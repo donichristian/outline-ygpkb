@@ -72,6 +72,9 @@ export default ({ mode }: ConfigEnv) =>
       port: environment.VITE_DEV_PORT
         ? Number(environment.VITE_DEV_PORT)
         : 3001,
+      // The backend injects this exact port into the page, so silently moving
+      // to another one would break hot reloading without any visible error.
+      strictPort: true,
       host: true,
       https: httpsConfig,
       allowedHosts: host ? [host] : undefined,
@@ -85,7 +88,9 @@ export default ({ mode }: ConfigEnv) =>
           : { strict: true },
     },
     plugins: [
-      redirectRootToApp(environment.URL ?? `http://localhost:${environment.PORT ?? 3000}`),
+      redirectRootToApp(
+        environment.URL ?? `http://localhost:${environment.PORT ?? 3000}`
+      ),
       react(),
       // https://vite-pwa-org.netlify.app/
       VitePWA({
