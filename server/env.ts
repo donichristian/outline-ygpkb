@@ -291,6 +291,16 @@ export class Environment {
   public PORT = this.toOptionalNumber(environment.PORT) ?? 3000;
 
   /**
+   * The port that the Vite development server listens on, defaults to 3001.
+   * Only used outside of production, where Vite serves the assets with hot
+   * module reloading enabled.
+   */
+  @IsNumber()
+  @IsOptional()
+  public VITE_DEV_PORT =
+    this.toOptionalNumber(environment.VITE_DEV_PORT) ?? 3001;
+
+  /**
    * Optional extra debugging. Comma separated
    */
   public DEBUG = environment.DEBUG || "";

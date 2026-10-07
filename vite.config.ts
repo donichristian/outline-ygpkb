@@ -40,7 +40,9 @@ export default ({ mode }: ConfigEnv) =>
     publicDir: "./server/static",
     base: (environment.CDN_URL ?? "") + "/static/",
     server: {
-      port: 3001,
+      port: environment.VITE_DEV_PORT
+        ? Number(environment.VITE_DEV_PORT)
+        : 3001,
       host: true,
       https: httpsConfig,
       allowedHosts: host ? [host] : undefined,
