@@ -14,6 +14,8 @@
     "dev:backend": "NODE_ENV=development nodemon --quiet --exec \"yarn build:server && yarn dev\" -e js,ts,tsx --watch server --watch shared --watch plugins --watch .env --watch .env.local --watch .env.development --ignore \"shared/components/**/*.tsx?\" --ignore \"plugins/client/**/*.tsx?\" --ignore \"**/*.test.ts\" --ignore data/ --ignore build/ --ignore app/ --ignore \"shared/editor/**\" --ignore server/migrations",
     "dev:watch": "NODE_ENV=development yarn concurrently -n backend,frontend \"yarn dev:backend\" \"yarn vite:dev\"",
     "dev:start": "node ./scripts/dev.js",
+    "dev:reset": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-reset.ps1",
+    "dev:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-stop.ps1",
     "lint": "oxlint --type-aware app server shared plugins",
     "lint:changed": "git diff --name-only --diff-filter=ACMRTUXB | grep -E '\\.(js|jsx|ts|tsx)$' | xargs -r oxlint",
     "format": "oxfmt app server shared plugins",
