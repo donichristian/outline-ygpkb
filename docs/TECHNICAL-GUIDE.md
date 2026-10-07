@@ -17,7 +17,7 @@ upstream architecture and code conventions.
 | Node.js | 22.x | `engines` also allows 20.19+, 24<24.17, 26<26.3.1 |
 | Yarn | 4.18.0 | via `corepack` |
 | PostgreSQL | 17+ | Windows service, installed via winget |
-| Redis | 8.x | `redis-windows` MSYS2 build |
+| Redis | 8.x | `redis-windows` MSYS2 build, installed as a Windows service |
 | Git | any | includes Git Bash, which the build needs |
 
 ### Why not Docker or WSL
@@ -94,15 +94,27 @@ Two MSYS2 quirks to keep in mind:
 - Paths *inside* the config must use the `/cygdrive/c/...` form. `C:/redis/...`
   and `/c/redis/...` are both rejected with `No such file or directory`.
 
-Optional — install it as an auto-starting Windows service (requires an
-**elevated** PowerShell):
+Install it as an auto-starting Windows service (requires an **elevated**
+PowerShell — service registration is a privileged operation):
 
 ```powershell
 cd C:\redis\Redis-8.10.2-Windows-x64-msys2-with-Service
 .\RedisService.exe install -c "$PWD\redis-dev.conf" --service-name Redis --start-mode auto
 ```
 
-To start it manually instead, run `.\scripts\dev-start.ps1`.
+This is already done on this machine. Confirm with:
+
+```powershell
+Get-Service Redis     # Name: Redis, Status: Running, StartMode: Automatic
+```
+
+The service name is `Redis` (display name "Redis Server (Redis)"). It starts
+at boot, so Redis and PostgreSQL are both available without running anything
+manually. Note that `Stop-Service`/`Restart-Service` need an elevated shell.
+
+If you prefer not to use a service, run `.\scripts\dev-start.ps1` instead —
+it launches `redis-server.exe` directly and skips that if the service is
+already running.
 
 > Avoid `Redis.Redis` in winget — it is the archived Microsoft port at
 > **Redis 3.0**. Also avoid the old `tporadowski` builds: Outline calls
@@ -273,7 +285,8 @@ Run it from inside the extracted folder using the bare filename
 Those paths must use the `/cygdrive/c/redis/data` form.
 
 **`Cannot connect to Redis at 127.0.0.1:6379`**
-Redis is not running. Start it, or check `Get-Process redis-server`.
+Redis is not running. Check `Get-Service Redis`; if it is stopped, start it with
+`Start-Service Redis` from an elevated shell, or run `.\scripts\dev-start.ps1`.
 
 **Redis works but the app reports connection errors**
 Check `REDIS_URL` in `.env`; the migration CLI reads `.env`, not
