@@ -2,7 +2,8 @@
 /* oxlint-disable @typescript-oxlint/no-var-requires */
 /* oxlint-disable no-undef */
 const { exec } = require("child_process");
-const { readdirSync, existsSync } = require("fs");
+const { readdirSync, existsSync, rmSync, mkdirSync, copyFileSync } = require("fs");
+const path = require("path");
 
 const getDirectories = (source) =>
   readdirSync(source, { withFileTypes: true })
@@ -26,14 +27,31 @@ function execAsync(cmd) {
   });
 }
 
+/**
+ * Removes a path and its contents, equivalent to `rm -rf`.
+ * @param target {string}
+ */
+function remove(target) {
+  rmSync(target, { recursive: true, force: true });
+}
+
+/**
+ * Copies a file, creating the destination directory if needed. Equivalent to
+ * `mkdir -p <dir> && cp <source> <dest>`.
+ * @param source {string}
+ * @param destination {string}
+ */
+function copy(source, destination) {
+  mkdirSync(path.dirname(destination), { recursive: true });
+  copyFileSync(source, destination);
+}
+
 async function build() {
   // Clean previous build
   console.log("Clean previous build…");
 
-  await Promise.all([
-    execAsync("rm -rf ./build/server"),
-    execAsync("rm -rf ./build/plugins"),
-  ]);
+  remove("./build/server");
+  remove("./build/plugins");
 
   const d = getDirectories("./plugins");
 
@@ -69,21 +87,17 @@ async function build() {
   // Copy static files
   console.log("Copying static files…");
   await Promise.all([
-    execAsync(
-      "cp ./server/collaboration/Procfile ./build/server/collaboration/Procfile"
-    ),
-    execAsync(
-      "cp ./server/static/error.dev.html ./build/server/error.dev.html"
-    ),
-    execAsync(
-      "cp ./server/static/error.prod.html ./build/server/error.prod.html"
-    ),
-    execAsync("cp package.json ./build"),
-    ...d.map(async (plugin) =>
-      execAsync(
-        `mkdir -p ./build/plugins/${plugin} && cp ./plugins/${plugin}/plugin.json ./build/plugins/${plugin}/plugin.json 2>/dev/null || :`
-      )
-    ),
+    copy("./server/collaboration/Procfile", "./build/server/collaboration/Procfile"),
+    copy("./server/static/error.dev.html", "./build/server/error.dev.html"),
+    copy("./server/static/error.prod.html", "./build/server/error.prod.html"),
+    copy("./package.json", "./build/package.json"),
+    ...d.map(async (plugin) => {
+      const manifest = `./plugins/${plugin}/plugin.json`;
+
+      if (existsSync(manifest)) {
+        copy(manifest, `./build/plugins/${plugin}/plugin.json`);
+      }
+    }),
   ]);
 
   console.log("Done!");
