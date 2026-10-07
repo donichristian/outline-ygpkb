@@ -165,8 +165,9 @@ Both development ports sit inside the reserved **3050-3100** range:
 | 3050 | `PORT` | API, web service, websocket and collaboration server |
 | 3051 | `VITE_DEV_PORT` | Vite dev server, serves assets with hot module reloading |
 
-Browse to **http://localhost:3050** — that is the app. The Vite server is not
-browsable directly; the backend injects its HMR client into the page.
+Browse to **http://localhost:3050** — that is the app. Port 3051 serves the
+compiled assets only, because Vite is mounted at `/static/`. Browsing it
+directly redirects to port 3050, so either port lands you on the application.
 
 `VITE_DEV_PORT` defaults to 3001 upstream and must differ from `PORT`, since
 `server/routes/app.ts` and `server/middlewares/csp.ts` rewrite the backend
