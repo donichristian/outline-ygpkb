@@ -1,71 +1,38 @@
 # Outline YGPKB — Developer / IT Guide (Technical)
 
-This document covers local development on Windows without Docker, and a
-summary of production deployment. For the upstream architecture and
-conventions, see `docs/ARCHITECTURE.md` and `AGENTS.md`.
+Local development on **Windows without Docker and without WSL**, plus a
+production deployment summary. See `docs/ARCHITECTURE.md` and `AGENTS.md` for
+upstream architecture and code conventions.
 
 ## Repository
 
 - Fork: <https://github.com/donichristian/outline-ygpkb>
-- Default branch: `main`
+- Branches: `main` → `development` → `feature/*`
 - Local checkout: `D:\Work-Project\Outline-YGPKB\outline-ygpkb`
 
 ## Prerequisites
 
 | Tool | Version | Notes |
 | ---- | ------- | ----- |
-| Node.js | 22.x (engines also allow 20.19+, 24<24.17, 26<26.3.1) | Installed at `C:\Program Files\nodejs` |
-| Yarn | 4.18.0 | Enabled via `corepack` |
-| PostgreSQL | 16+ | Runs in WSL2 Ubuntu |
-| Redis | 7+ | Runs in WSL2 Ubuntu |
-| Git | any | |
+| Node.js | 22.x | `engines` also allows 20.19+, 24<24.17, 26<26.3.1 |
+| Yarn | 4.18.0 | via `corepack` |
+| PostgreSQL | 17+ | Windows service, installed via winget |
+| Redis | 8.x | `redis-windows` MSYS2 build |
+| Git | any | includes Git Bash, which the build needs |
 
-Docker Desktop is **not** required and is intentionally avoided in this
-setup. The provided `Makefile` targets (`make up`, `make test`, ...) use
-Docker, so use the `yarn` equivalents below instead.
+### Why not Docker or WSL
 
-## One-time environment setup (Windows)
+- **WSL2** is not installed, and enabling it needs a Windows restart.
+- **Docker Desktop requires WSL2 or Hyper-V**, so it is not an alternative to
+  WSL here.
+- This machine also reports `Virtualization Enabled In Firmware: No`, which
+  would block WSL2/Hyper-V until VT-x is enabled in the BIOS.
+- The `Makefile` targets (`make up`, `make test`) assume Docker, so use the
+  `yarn` equivalents below.
 
-### 1. Enable WSL2 (requires one restart)
+## One-time setup
 
-```powershell
-wsl --install -d Ubuntu
-```
-
-If the install fails with `HCS_E_HYPERV_NOT_INSTALLED`, enable the required
-Windows features and restart:
-
-```powershell
-Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart -All
-Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart -All
-```
-
-Then reboot, and run `wsl --install -d Ubuntu` again.
-
-### 2. Start PostgreSQL and Redis in WSL2
-
-Inside the Ubuntu shell:
-
-```bash
-sudo apt update
-sudo apt install -y postgresql redis-server
-sudo service postgresql start
-sudo service redis-server start
-sudo -u postgres psql -c "CREATE USER \"user\" WITH PASSWORD 'pass' SUPERUSER;"
-sudo -u postgres psql -c "CREATE DATABASE outline OWNER \"user\";"
-sudo -u postgres psql -c "CREATE DATABASE \"outline-test\" OWNER \"user\";"
-```
-
-Redis listens on `127.0.0.1:6379` and PostgreSQL on `127.0.0.1:5432`; both
-are reachable from Windows via localhost forwarding (WSL2 default).
-
-To start them again after a reboot:
-
-```bash
-sudo service postgresql start && sudo service redis-server start
-```
-
-### 3. Node + dependencies
+### 1. Node and dependencies
 
 ```powershell
 corepack enable
@@ -73,42 +40,149 @@ cd D:\Work-Project\Outline-YGPKB\outline-ygpkb
 yarn install --immutable
 ```
 
-### 4. Local environment file
-
-`.env.local` is already created (gitignored) with:
-
-- `URL=http://localhost:3000` (overrides `.env.development` HTTPS URL)
-- Generated `SECRET_KEY` and `UTILS_SECRET`
-- Local file storage under `./data`
-
-To enable HTTPS locally instead, install `mkcert`, run
-`yarn install-local-ssl`, remove the `URL` override from `.env.local`, and
-use `https://local.outline.dev:3000` (a hosts entry
-`127.0.0.1 local.outline.dev` was already added to
-`C:\Windows\System32\drivers\etc\hosts`).
-
-### 5. Database migrations
+### 2. PostgreSQL
 
 ```powershell
+winget install --id PostgreSQL.PostgreSQL.17
+```
+
+This registers the `postgresql-x64-17` service (auto-start). The unattended
+installer leaves the superuser password as `postgres`. Create the role and
+databases:
+
+```powershell
+$env:PGPASSWORD = 'postgres'
+$psql = 'C:\Program Files\PostgreSQL\17\bin\psql.exe'
+
+& $psql -U postgres -h 127.0.0.1 -c "CREATE ROLE ""user"" WITH LOGIN PASSWORD 'pass' SUPERUSER CREATEDB;"
+& $psql -U postgres -h 127.0.0.1 -c "CREATE DATABASE outline OWNER ""user"";"
+& $psql -U postgres -h 127.0.0.1 -c 'CREATE DATABASE "outline-test" OWNER "user";'
+Remove-Item Env:\PGPASSWORD
+```
+
+The role **must be SUPERUSER** — migrations run `CREATE EXTENSION` for
+`uuid-ossp`, `unaccent`, `pg_trgm` and `btree_gin`.
+
+### 3. Redis
+
+Redis has no official native Windows build; this uses the community
+`redis-windows` project, which compiles unmodified upstream Redis source via
+MSYS2.
+
+```powershell
+$ProgressPreference = 'SilentlyContinue'
+Invoke-WebRequest `
+  'https://github.com/redis-windows/redis-windows/releases/download/8.10.2/Redis-8.10.2-Windows-x64-msys2-with-Service.zip' `
+  -OutFile "$env:TEMP\redis.zip"
+Expand-Archive "$env:TEMP\redis.zip" -DestinationPath C:\redis -Force
+```
+
+Edit `C:\redis\Redis-8.10.2-Windows-x64-msys2-with-Service\redis-dev.conf`:
+
+```
+bind 127.0.0.1
+port 6379
+daemonize no
+logfile /cygdrive/c/redis/data/redis.log
+dir /cygdrive/c/redis/data
+```
+
+Two MSYS2 quirks to keep in mind:
+
+- The config path is resolved **relative to the working directory**, so run
+  `redis-server.exe redis-dev.conf` from inside the extracted folder.
+- Paths *inside* the config must use the `/cygdrive/c/...` form. `C:/redis/...`
+  and `/c/redis/...` are both rejected with `No such file or directory`.
+
+Optional — install it as an auto-starting Windows service (requires an
+**elevated** PowerShell):
+
+```powershell
+cd C:\redis\Redis-8.10.2-Windows-x64-msys2-with-Service
+.\RedisService.exe install -c "$PWD\redis-dev.conf" --service-name Redis --start-mode auto
+```
+
+To start it manually instead, run `.\scripts\dev-start.ps1`.
+
+> Avoid `Redis.Redis` in winget — it is the archived Microsoft port at
+> **Redis 3.0**. Also avoid the old `tporadowski` builds: Outline calls
+> `GETDEL`, which requires Redis 6.2+.
+
+### 4. Environment files
+
+Both files are gitignored (`.gitignore:4-5`).
+
+`.env` — needed because `.sequelizerc:2` loads `.env` (not
+`.env.development`) for non-test runs, so without it `yarn db:migrate` has no
+`DATABASE_URL`:
+
+```
+DATABASE_URL=postgres://user:pass@127.0.0.1:5432/outline
+REDIS_URL=redis://127.0.0.1:6379
+```
+
+`.env.local` — overrides `.env.development`, holds the secrets:
+
+```
+URL=http://localhost:3000
+SECRET_KEY=<64 hex chars>
+UTILS_SECRET=<random>
+FILE_STORAGE=local
+FILE_STORAGE_LOCAL_ROOT_DIR=D:\Work-Project\Outline-YGPKB\outline-ygpkb\data
+```
+
+Generate a key with:
+
+```powershell
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+`URL` is plain HTTP because no local SSL certificate is generated. To use
+HTTPS, install `mkcert`, run `yarn install-local-ssl`, drop the `URL` override,
+and browse to `https://local.outline.dev:3000` (a hosts entry for
+`local.outline.dev` already points at `127.0.0.1`).
+
+### 5. Build and migrate
+
+`build.js` calls `rm -rf`, `cp` and `mkdir -p`, which need a POSIX shell, and
+Node's `child_process.exec` uses `ComSpec` on Windows. Compile with Git Bash:
+
+```powershell
+$env:ComSpec = 'C:\PROGRA~1\Git\bin\bash.exe'   # short path: "Program Files" breaks bash
+node build.js
+```
+
+Then migrate. `NODE_ENV` **must** be set, because several data-migration
+scripts boot the app's env validator, which only reads `.env.development` when
+`NODE_ENV=development`:
+
+```powershell
+$env:NODE_ENV = 'development'
 yarn db:migrate
 ```
 
-For the test database (run once, and after pulling new migrations):
-
-```powershell
-$env:NODE_ENV='test'; yarn db:migrate; Remove-Item Env:NODE_ENV
-```
+Expected result: 306 migrations, 42 tables in `public`, and the four required
+extensions present.
 
 ## Daily development
 
 ```powershell
 cd D:\Work-Project\Outline-YGPKB\outline-ygpkb
+.\scripts\dev-start.ps1
+```
+
+Or manually:
+
+```powershell
+$env:NODE_ENV = 'development'
 yarn dev:watch
 ```
 
-- API + websockets + worker: `http://localhost:3000`
-- Frontend (Vite, HMR): `http://localhost:3000` (served through the same port
-  in dev via the proxy — check the console output for the Vite port)
+`yarn dev:watch` sets `NODE_ENV=development` inline, which `cmd.exe` cannot
+parse; `scripts/dev-start.ps1` sets it in the shell instead and handles the
+Redis and build steps.
+
+Verify the stack at any time with `.\scripts\dev-check.ps1`.
 
 ### Useful commands
 
@@ -117,68 +191,93 @@ yarn dev:watch
 | Lint | `yarn lint` |
 | Format | `yarn format` |
 | Type check | `yarn tsc` |
-| Run all tests | `yarn test` |
+| All tests | `yarn test` |
 | Server tests | `yarn test:server` |
 | Frontend tests | `yarn test:app` |
 | New migration | `yarn db:create-migration --name my-migration` |
 | Reset dev DB | `yarn db:reset` |
 
+### Makefile equivalents
+
+The `Makefile` assumes Docker. On this machine use:
+
+| Makefile | Windows equivalent |
+| -------- | ------------------ |
+| `make up` | start Redis, then `yarn dev:watch` |
+| `make test` | `yarn db:reset` (with `NODE_ENV=test`), then `yarn test` |
+| `make build` | `node build.js` then `yarn vite:build` |
+
 ## Testing
 
-Tests use Vitest. Backend tests expect PostgreSQL + Redis at `127.0.0.1`
-using `DATABASE_URL=postgres://user:pass@127.0.0.1:5432/outline-test`
-(from `.env.test`). Create the `outline-test` database once as shown above.
+Backend tests expect PostgreSQL and Redis on `127.0.0.1`, using the
+`outline-test` database (`.env.test`). Set `NODE_ENV=test` before migrating
+that database.
 
-Server tests share a module registry; any server test that uses `vi.mock` or
+Server tests share a module registry; any test using `vi.mock` or
 `vi.resetModules` must start with `// @vitest-isolate true`.
 
 ## Project layout
 
 - `app/` — React frontend (MobX stores in `app/stores/`)
 - `server/` — Koa API, Sequelize models, workers, cron
-- `server/migrations/` — Sequelize migrations
+- `server/migrations/` — Sequelize migrations (306 files)
 - `shared/` — shared types, editor, utilities
-- `plugins/` — optional integrations (google, slack, azure, email, ...)
+- `plugins/` — integrations (google, slack, azure, email, oidc, ...)
+- `scripts/` — local Windows helper scripts
 - `docs/` — project documentation
 
-## Authentication in dev
+## Authentication in development
 
-At least one auth provider must be configured. Options:
+At least one provider must be configured, otherwise there is no way to sign
+in. Options: Google, Microsoft Entra (`AZURE_*`), Slack, GitHub, generic OIDC
+(`OIDC_*`), Discord, passkeys, or email magic links via the `email` plugin plus
+SMTP.
 
-- OAuth providers: Google, Microsoft Entra (`AZURE_*`), Slack, GitHub, OIDC
-  (`OIDC_*`), Discord
-- Email magic links via the `email` plugin + SMTP settings
-- Passkeys plugin
-
-For a local test instance you can set placeholder OAuth credentials; the
-sign-in button is still shown. For a working sign-in flow, configure a real
-provider (e.g. your organization's Azure Entra app registration) and set the
-corresponding env vars in `.env.local`.
+For a working local sign-in, configure your organisation's provider (Azure
+Entra is the usual choice) in `.env.local`, and set `SMTP_*` values if you want
+email notifications or magic-link sign-in.
 
 ## Production deployment
 
-See `Dockerfile`, `docker-compose.yml`, and the repo `README.md` for the
-upstream production configuration. Key env vars are documented in
+Use the `Dockerfile` and `docker-compose.yml`. Key variables are documented in
 `.env.sample`: `URL`, `SECRET_KEY`, `UTILS_SECRET`, `DATABASE_URL`,
-`REDIS_URL`, `FILE_STORAGE`, one auth provider, and SMTP for outgoing email.
+`REDIS_URL`, `FILE_STORAGE`, one auth provider, and SMTP.
 
-Internal deployment checklist:
+Checklist:
 
 1. Provision PostgreSQL 16+ and Redis 7+ (managed service or VM).
-2. Run the container image with `URL=https://kb.your-domain`.
-3. Configure the org's SSO provider (Azure Entra recommended).
-4. Back up PostgreSQL and the local file-storage directory (`FILE_STORAGE_LOCAL_ROOT_DIR`) or S3 bucket.
-5. Enable `ENABLE_UPDATES=false` if you do not want anonymous update checks.
+2. Run the container with `URL=https://kb.your-domain`.
+3. Configure the organisation's SSO provider.
+4. Back up PostgreSQL plus the storage directory (or S3 bucket).
+5. Set `ENABLE_UPDATES=false` to disable anonymous update checks.
+6. Do not reuse the development `SECRET_KEY` — it encrypts database columns.
 
 ## Troubleshooting
 
-- **`NODE_ENV=development yarn ...` fails on Windows PowerShell** — use yarn
-  scripts (they run through Yarn's cross-platform shell); prefix with
-  `$env:NODE_ENV='development';` in PowerShell if invoking tools directly.
-- **Cannot connect to Postgres/Redis** — make sure the WSL2 services are
-  running: `wsl -d Ubuntu -e sudo service postgresql start`.
-- **HTTPS cert errors** — you removed the local CA; use the plain HTTP
-  `URL` override in `.env.local`.
-- **Port 5432/6379 already in use** — stop any other local Postgres/Redis
-  service (e.g. the MySQL install here does not conflict, but a native
-  Postgres would).
+**`yarn db:migrate` fails with "Environment configuration is invalid"**
+Set `$env:NODE_ENV = 'development'` first; the validator only loads
+`.env.development` in that mode.
+
+**`yarn db:migrate` cannot find a compiled migration script**
+Run `node build.js` with `$env:ComSpec = 'C:\PROGRA~1\Git\bin\bash.exe'`.
+
+**`build.js` fails with `Command failed: rm -rf ./build/server`**
+`ComSpec` is not pointing at Git Bash. Use the short path
+`C:\PROGRA~1\Git\bin\bash.exe` — the spaced form fails.
+
+**Redis exits immediately with "can't open config file"**
+Run it from inside the extracted folder using the bare filename
+`redis-dev.conf`. MSYS2 resolves the argument against the working directory.
+
+**Redis exits with `No such file or directory` on `dir` or `logfile`**
+Those paths must use the `/cygdrive/c/redis/data` form.
+
+**`Cannot connect to Redis at 127.0.0.1:6379`**
+Redis is not running. Start it, or check `Get-Process redis-server`.
+
+**Redis works but the app reports connection errors**
+Check `REDIS_URL` in `.env`; the migration CLI reads `.env`, not
+`.env.local`.
+
+**`yarn dev:watch` does nothing on Windows**
+Use `.\scripts\dev-start.ps1`, which sets `NODE_ENV` in the shell.
