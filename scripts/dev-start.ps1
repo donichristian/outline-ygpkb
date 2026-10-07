@@ -2,41 +2,36 @@
 #
 #   .\scripts\dev-start.ps1
 #
-# Prerequisites: PostgreSQL 17 service running, Redis running (see
-# docs/TECHNICAL-GUIDE.md). Run from an ordinary (non-elevated) shell.
+# Requires the PostgreSQL and Redis Windows services to be running, and
+# dependencies installed (`corepack enable; yarn install`). See
+# docs/TECHNICAL-GUIDE.md for the one-time setup.
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 Set-Location $repo
 
-$redisRoot = 'C:\redis\Redis-8.10.2-Windows-x64-msys2-with-Service'
+$apiPort = 3050
+$vitePort = 3051
 
-# --- 1. Redis -------------------------------------------------------------
-# RedisService.exe must be started from the folder holding the binaries and
-# config; MSYS2 resolves the config argument relative to the current directory.
-if (-not (Get-Process redis-server -ErrorAction SilentlyContinue)) {
-  if (Test-Path "$redisRoot\redis-server.exe") {
-    Start-Process -FilePath "$redisRoot\redis-server.exe" `
-      -ArgumentList 'redis-dev.conf' -WorkingDirectory $redisRoot -WindowStyle Hidden
-    Start-Sleep -Seconds 4
-    Write-Host "redis:  $(& "$redisRoot\redis-cli.exe" PING)"
+Write-Host 'Checking services...'
+foreach ($svc in 'postgresql-x64-17', 'Redis') {
+  $s = Get-Service -Name $svc -ErrorAction SilentlyContinue
+  if (-not $s) {
+    Write-Warning "Service '$svc' is not installed."
+  } elseif ($s.Status -ne 'Running') {
+    Write-Warning "Service '$svc' is $($s.Status). Start it with: Start-Service $svc"
   } else {
-    Write-Warning "Redis not found at $redisRoot - start it manually."
+    Write-Host "  $svc : Running"
   }
 }
 
-# --- 2. Backend -----------------------------------------------------------
-# dev:watch normally sets NODE_ENV inline, which cmd.exe cannot parse, and
-# build.js shells out to rm/cp/mkdir, which need Git Bash as ComSpec.
-# Set NODE_ENV in the shell instead and compile with ComSpec pointed at bash.
-$env:NODE_ENV = 'development'
-$env:ComSpec = 'C:\PROGRA~1\Git\bin\bash.exe'
+Write-Host ''
+Write-Host "API      http://localhost:$apiPort"
+Write-Host "Vite HMR http://localhost:$vitePort/static/"
+Write-Host ''
+Write-Host 'Starting backend and frontend (first run compiles for ~2 min)...'
+Write-Host ''
 
-Write-Host 'building server...'
-node build.js
-
-# Restore the normal shell so yarn keeps working in this session.
-$env:ComSpec = $env:SystemRoot\System32\cmd.exe
-
-Write-Host 'starting backend and vite...'
+# yarn dev:watch sets NODE_ENV inline and runs build:server, both of which work
+# on Windows: build.js uses node:fs rather than shell commands.
 yarn dev:watch

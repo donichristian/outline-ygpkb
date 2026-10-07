@@ -18,7 +18,7 @@ upstream architecture and code conventions.
 | Yarn | 4.18.0 | via `corepack` |
 | PostgreSQL | 17+ | Windows service, installed via winget |
 | Redis | 8.x | `redis-windows` MSYS2 build, installed as a Windows service |
-| Git | any | includes Git Bash, which the build needs |
+| Git | any | only needed for repository operations |
 
 ### Why not Docker or WSL
 
@@ -133,10 +133,12 @@ DATABASE_URL=postgres://user:pass@127.0.0.1:5432/outline
 REDIS_URL=redis://127.0.0.1:6379
 ```
 
-`.env.local` — overrides `.env.development`, holds the secrets:
+`.env.local` — overrides `.env.development`, holds the secrets and ports:
 
 ```
-URL=http://localhost:3000
+URL=http://localhost:3050
+PORT=3050
+VITE_DEV_PORT=3051
 SECRET_KEY=<64 hex chars>
 UTILS_SECRET=<random>
 FILE_STORAGE=local
@@ -151,17 +153,32 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 
 `URL` is plain HTTP because no local SSL certificate is generated. To use
 HTTPS, install `mkcert`, run `yarn install-local-ssl`, drop the `URL` override,
-and browse to `https://local.outline.dev:3000` (a hosts entry for
+and browse to `https://local.outline.dev:3050` (a hosts entry for
 `local.outline.dev` already points at `127.0.0.1`).
+
+### Local ports
+
+Both development ports sit inside the reserved **3050-3100** range:
+
+| Port | Variable | Purpose |
+| ---- | -------- | ------- |
+| 3050 | `PORT` | API, web service, websocket and collaboration server |
+| 3051 | `VITE_DEV_PORT` | Vite dev server, serves assets with hot module reloading |
+
+Browse to **http://localhost:3050** — that is the app. The Vite server is not
+browsable directly; the backend injects its HMR client into the page.
+
+`VITE_DEV_PORT` defaults to 3001 upstream and must differ from `PORT`, since
+`server/routes/app.ts` and `server/middlewares/csp.ts` rewrite the backend
+port in `URL` to reach the Vite server.
 
 ### 5. Build and migrate
 
-`build.js` calls `rm -rf`, `cp` and `mkdir -p`, which need a POSIX shell, and
-Node's `child_process.exec` uses `ComSpec` on Windows. Compile with Git Bash:
+`yarn build:server` runs on Windows — `build.js` uses `node:fs` rather than
+shell commands:
 
 ```powershell
-$env:ComSpec = 'C:\PROGRA~1\Git\bin\bash.exe'   # short path: "Program Files" breaks bash
-node build.js
+yarn build:server
 ```
 
 Then migrate. `NODE_ENV` **must** be set, because several data-migration
@@ -183,16 +200,17 @@ cd D:\Work-Project\Outline-YGPKB\outline-ygpkb
 .\scripts\dev-start.ps1
 ```
 
-Or manually:
+Or directly:
 
 ```powershell
-$env:NODE_ENV = 'development'
 yarn dev:watch
 ```
 
-`yarn dev:watch` sets `NODE_ENV=development` inline, which `cmd.exe` cannot
-parse; `scripts/dev-start.ps1` sets it in the shell instead and handles the
-Redis and build steps.
+`yarn dev:watch` runs the API server (port 3050) and the Vite dev server
+(port 3051) together with hot module reloading. The first run compiles the
+server, which takes roughly two minutes; later starts are much faster.
+
+Browse to **http://localhost:3050**.
 
 Verify the stack at any time with `.\scripts\dev-check.ps1`.
 
@@ -271,11 +289,8 @@ Set `$env:NODE_ENV = 'development'` first; the validator only loads
 `.env.development` in that mode.
 
 **`yarn db:migrate` cannot find a compiled migration script**
-Run `node build.js` with `$env:ComSpec = 'C:\PROGRA~1\Git\bin\bash.exe'`.
-
-**`build.js` fails with `Command failed: rm -rf ./build/server`**
-`ComSpec` is not pointing at Git Bash. Use the short path
-`C:\PROGRA~1\Git\bin\bash.exe` — the spaced form fails.
+Run `yarn build:server` first — some migrations are TypeScript that must be
+compiled into `build/server` before the CLI can execute them.
 
 **Redis exits immediately with "can't open config file"**
 Run it from inside the extracted folder using the bare filename
@@ -293,4 +308,14 @@ Check `REDIS_URL` in `.env`; the migration CLI reads `.env`, not
 `.env.local`.
 
 **`yarn dev:watch` does nothing on Windows**
-Use `.\scripts\dev-start.ps1`, which sets `NODE_ENV` in the shell.
+Run `yarn dev:watch` from PowerShell rather than `cmd.exe`, and expect the
+first compile to take about two minutes before port 3050 accepts requests.
+
+**Port 3050 refuses connections**
+The server has not finished booting. Watch for
+`[lifecycle] Listening on http://localhost:3050` in the output.
+
+**Hot reload does not work**
+`PORT` and `VITE_DEV_PORT` must differ, and the browser must be on port 3050.
+The backend rewrites the `PORT` portion of `URL` to reach Vite, so a mismatch
+between the two breaks the injected HMR client.

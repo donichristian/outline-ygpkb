@@ -19,11 +19,34 @@ Step 'PostgreSQL service' {
 }
 
 Step 'Redis' {
+  $svc = Get-Service -Name Redis -ErrorAction SilentlyContinue
+  if ($svc) {
+    $svc | Select-Object Name, Status, StartType | Format-Table -AutoSize
+  }
   if (Get-Process redis-server -ErrorAction SilentlyContinue) {
     & $redisCli PING
     & $redisCli INFO server | Select-String 'redis_version'
   } else {
     Write-Warning 'redis-server is not running'
+  }
+}
+
+Step 'Dev server ports' {
+  $listening = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+    Where-Object { $_.LocalPort -ge 3050 -and $_.LocalPort -le 3100 }
+
+  if ($listening) {
+    $listening | Select-Object LocalAddress, LocalPort |
+      Sort-Object LocalPort | Format-Table -AutoSize
+  } else {
+    Write-Host '  nothing listening (expected when the dev server is stopped)'
+  }
+
+  try {
+    $r = Invoke-WebRequest 'http://localhost:3050/' -UseBasicParsing -TimeoutSec 10
+    Write-Host "  GET http://localhost:3050/ -> $($r.StatusCode)"
+  } catch {
+    Write-Host "  GET http://localhost:3050/ -> not responding (run scripts\dev-start.ps1)"
   }
 }
 
