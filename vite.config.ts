@@ -3,13 +3,42 @@ import path from "node:path";
 import react from "@vitejs/plugin-react";
 import browserslistToEsbuild from "browserslist-to-esbuild";
 import webpackStats from "rollup-plugin-webpack-stats";
-import type { ConfigEnv, ServerOptions } from "vite";
+import type { ConfigEnv, Plugin, ServerOptions } from "vite";
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
 import environment from "./server/utils/environment";
 
 let httpsConfig: ServerOptions["https"] | undefined;
 let host: string | undefined;
+
+/**
+ * The Vite dev server only responds under `base` (`/static/`), and this project
+ * has no root `index.html`, so browsing the dev server port directly returns a
+ * bare 404 even though the app is running fine. Send those requests to the
+ * application server instead, which owns the page.
+ * @param appUrl {string} URL of the application server
+ * @return {Plugin}
+ */
+function redirectRootToApp(appUrl: string): Plugin {
+  return {
+    name: "outline:redirect-root-to-app",
+    apply: "serve",
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const [pathname] = (req.url ?? "").split("?");
+
+        if (pathname === "/" || pathname === "/index.html") {
+          res.statusCode = 302;
+          res.setHeader("Location", appUrl);
+          res.end();
+          return;
+        }
+
+        next();
+      });
+    },
+  };
+}
 
 if (environment.NODE_ENV === "development") {
   host = host = new URL(environment.URL!).hostname;
@@ -40,7 +69,12 @@ export default ({ mode }: ConfigEnv) =>
     publicDir: "./server/static",
     base: (environment.CDN_URL ?? "") + "/static/",
     server: {
-      port: 3001,
+      port: environment.VITE_DEV_PORT
+        ? Number(environment.VITE_DEV_PORT)
+        : 3001,
+      // The backend injects this exact port into the page, so silently moving
+      // to another one would break hot reloading without any visible error.
+      strictPort: true,
       host: true,
       https: httpsConfig,
       allowedHosts: host ? [host] : undefined,
@@ -54,6 +88,9 @@ export default ({ mode }: ConfigEnv) =>
           : { strict: true },
     },
     plugins: [
+      redirectRootToApp(
+        environment.URL ?? `http://localhost:${environment.PORT ?? 3000}`
+      ),
       react(),
       // https://vite-pwa-org.netlify.app/
       VitePWA({

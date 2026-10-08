@@ -8,7 +8,7 @@ describe("shouldAutoDeleteDraftOnUnmount", () => {
     isDraft: true,
     isActive: true,
     hasEmptyTitle: true,
-    isPersistedOnce: true,
+    isJustCreated: false,
   };
 
   it("does not auto delete drafts with non-empty editor content", () => {
@@ -27,5 +27,15 @@ describe("shouldAutoDeleteDraftOnUnmount", () => {
         isEditorEmpty: true,
       })
     ).toBe(true);
+  });
+
+  it("does not auto delete a draft that was just created", () => {
+    expect(
+      shouldAutoDeleteDraftOnUnmount({
+        ...baseOptions,
+        isEditorEmpty: true,
+        isJustCreated: true,
+      })
+    ).toBe(false);
   });
 });
