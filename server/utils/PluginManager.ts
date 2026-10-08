@@ -78,6 +78,22 @@ export type Plugin<T extends Hook> = {
 };
 
 /**
+ * Builds the glob pattern used to discover plugin entry points.
+ *
+ * Separators are posix rather than `path.join` output because glob reads "\"
+ * as an escape character, not a path separator — a Windows-built pattern
+ * matches nothing and every plugin silently fails to register. The root is
+ * omitted when empty so the pattern stays relative in the test environment.
+ *
+ * @param rootDir the directory that plugin folders are resolved against.
+ * @returns a glob pattern matching every plugin's server entry point.
+ */
+export function pluginEntryPointGlob(rootDir: string): string {
+  const prefix = rootDir ? `${rootDir}/` : "";
+  return `${prefix}plugins/*/server/index.[jt]s`;
+}
+
+/**
  * Server plugin manager.
  */
 export class PluginManager {
@@ -154,7 +170,7 @@ export class PluginManager {
     const rootDir = env.ENVIRONMENT === "test" ? "" : "build";
 
     glob
-      .sync(path.join(rootDir, "plugins/*/server/index.[jt]s"))
+      .sync(pluginEntryPointGlob(rootDir))
       .forEach((filePath: string) => {
         try {
           // oxlint-disable-next-line typescript/no-require-imports -- path is only known at runtime
