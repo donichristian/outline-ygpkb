@@ -16,6 +16,10 @@ data/*
 *.cert
 .history
 
+# graphify knowledge graph output
+graphify-out/
+graph.json
+
 # Yarn Berry
 .yarn/*
 !.yarn/patches
