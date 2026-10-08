@@ -59,7 +59,7 @@ export function shouldAutoDeleteDraftOnUnmount({
   isDraft,
   isActive,
   hasEmptyTitle,
-  isPersistedOnce,
+  isJustCreated,
 }: {
   isEditorEmpty: boolean;
   title: string;
@@ -68,8 +68,12 @@ export function shouldAutoDeleteDraftOnUnmount({
   isDraft: boolean;
   isActive: boolean;
   hasEmptyTitle: boolean;
-  isPersistedOnce: boolean;
+  isJustCreated: boolean;
 }) {
+  // A document the user is still in the middle of creating must never be
+  // trashed. `isJustCreated` covers both the window right after creation and the
+  // synthetic unmount React StrictMode performs on mount, which would otherwise
+  // delete a fresh draft before the user has typed anything.
   return (
     isEditorEmpty &&
     title.trim() === "" &&
@@ -77,7 +81,7 @@ export function shouldAutoDeleteDraftOnUnmount({
     isDraft &&
     isActive &&
     hasEmptyTitle &&
-    isPersistedOnce
+    !isJustCreated
   );
 }
 
@@ -354,7 +358,7 @@ export function useDocumentSave({
           isDraft: document.isDraft,
           isActive: document.isActive,
           hasEmptyTitle: document.hasEmptyTitle,
-          isPersistedOnce: document.isPersistedOnce,
+          isJustCreated: document.isJustCreated,
         })
       ) {
         void document.delete();
