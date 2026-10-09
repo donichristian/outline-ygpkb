@@ -59,3 +59,26 @@ disabled via `skills.disabled` in the matius `config.yaml`, keeping just:
 Result: **2 enabled / 54 disabled** (`hermes -p matius skills list`). The list is
 non-destructive — skill files stay on disk, `hermes update` is unaffected, and a
 name is re-enabled by removing it from `skills.disabled`.
+
+## Answer-only replies (no reasoning / tool narration)
+
+By default Hermes streams mid-turn **reasoning and tool-call narration** into the
+chat ("Let me fetch…", raw tool args, a reasoning box). For a KB Q&A bot this is
+noise. The matius config sets, under `display.platforms.telegram`:
+
+```yaml
+display:
+  platforms:
+    telegram:
+      streaming: false                 # don't stream partial tokens
+      tool_progress: off               # no per-tool breadcrumbs
+      interim_assistant_messages: false # no mid-turn "Let me fetch…" narration
+      show_reasoning: false            # no reasoning box
+```
+
+Result: the bot posts **only the final answer**. Scoped to Telegram so the CLI/
+TUI are unaffected. `hermes gateway restart` applies it.
+
+> The leaked narration is `interim_assistant_messages` (mid-turn assistant
+> messages) plus `tool_progress` (tool breadcrumbs). Both must be off for a
+> clean answer-only surface.
