@@ -21,7 +21,9 @@ It complements — and does not repeat — the step-by-step runbook.
 
 The deployed bot persona is **Matius** — a Bahasa Indonesia, KB-only assistant
 whose capabilities are **allow-listed to the registered KB tools** (see §8b for
-the gate and §8c for the persona layer).
+the gate, §8c for the persona layer, and §8d for the multi-agent profile layout).
+It runs as its own Hermes profile (`matius`), separate from the general `default`
+agent.
 
 One direction of agent interface: **Hermes → Outline MCP**. (Hermes can also be
 an MCP server itself — `hermes mcp serve` — but that is out of scope here.)
@@ -167,10 +169,18 @@ KB data (membership-scoped; soft-delete; audit)
 ## 8. Deployment topology & config (local dev, verified)
 
 - **Outline:** `http://localhost:3050` (`web` service mounts `/mcp`).
-- **Hermes config:** `C:\Users\Media\AppData\Local\hermes\config.yaml` →
-  `mcp_servers.outline` = `{ url, headers.Authorization: "Bearer ${OUTLINE_MCP_TOKEN}" }`.
-  **Hermes reads this path**, not `~/.hermes/config.yaml` (verified via `hermes config path`).
-- **Secret:** `OUTLINE_MCP_TOKEN` in `C:\Users\Media\AppData\Local\hermes\.env`.
+- **Hermes config:** the active profile's `config.yaml` →
+   - `default`: `C:\Users\Media\AppData\Local\hermes\config.yaml`
+   - `matius`:  `C:\Users\Media\AppData\Local\hermes\profiles\matius\config.yaml`
+
+   `mcp_servers.outline` = `{ url, headers.Authorization: "Bearer ${OUTLINE_MCP_TOKEN}" }`.
+   **Hermes reads the profile home** (verified via `hermes config path` /
+   `hermes profile show`), not `~/.hermes/config.yaml`.
+- **Secret:** `OUTLINE_MCP_TOKEN` in the profile's `.env`
+  (`…\profiles\matius\.env` for the KB agent).
+- **Gateway:** one multiplexed gateway serves all profiles; `hermes gateway status`
+  shows it. `matius` currently has **no Telegram channel** (its bot token is not
+  set) so it is CLI-only; `default` owns the Telegram bot.
 - **Issuer:** Outline derives the MCP issuer from `env.URL`; dev uses
   `http://localhost:3050` (`.env.local`). An API key bypasses OAuth issuer
   discovery, so mismatches only affect the OAuth flow, not API-key auth.
@@ -267,7 +277,7 @@ language, and citation style.
 
 | Layer | Location | Controls |
 |-------|----------|----------|
-| **SOUL.md** (agent identity) | `~/AppData/Local/hermes/SOUL.md` | Persona ("Matius"), Bahasa Indonesia + sopan/formal/baku tone, KB-only scope, refuse malicious / PII / off-scope requests |
+| **SOUL.md** (agent identity) | `<profile home>/SOUL.md` — for Matius: `~/AppData/Local/hermes/profiles/matius/SOUL.md` | Persona ("Matius"), Bahasa Indonesia + sopan/formal/baku tone, KB-only scope, refuse malicious / PII / off-scope requests |
 | **guidanceMCP** (workspace instructions) | Outline team settings → surfaced in the MCP handshake `instructions` | Read-only stance, retrieve-before-answer, cite the source, never invent facts |
 
 > **Model matters.** The persona/guardrails are only honoured reliably by models
@@ -275,6 +285,52 @@ language, and citation style.
 > (an agent-router at `localhost:20127`); an earlier `zen-combo` configuration
 > overrode the system prompt with its own persona, so SOUL.md had no effect.
 > If the bot starts ignoring SOUL.md, check the active model first.
+
+## 8d. Agent profiles (multi-agent strategy)
+
+Hermes **profiles** provide isolated agent instances — each with its own home
+(`config.yaml`, `.env`, `SOUL.md`, skills, sessions, and per-profile MCP/tool
+setup). This is how the foundation scales to multiple agents: **one profile per
+agent/domain**.
+
+| Profile | Purpose | Model | Toolsets | KB access |
+|---------|---------|-------|----------|-----------|
+| `default` | General/dev assistant (Telegram bot) | `ski-bot` | full (`hermes-cli` / `hermes-telegram`) | unrestricted |
+| `matius` | **Knowledge Management System SKI** assistant | `ski-bot` | `[mcp-outline, clarify]` | read-only (7 tools) |
+| `lms` *(planned)* | Learning-management integration | — | `[mcp-lms, clarify]` | per its own allowlist |
+| `hris` *(planned)* | HR/information-system integration | — | `[mcp-hris, clarify]` | per its own allowlist |
+
+Key properties:
+- **Isolation:** a change to one profile's config/SOUL/secrets does not affect
+  the others. `matius`'s allowlist and persona are independent of `default`.
+- **Invocation:** `hermes -p <profile> …` (or the generated wrapper, e.g.
+  `matius …`). `default` remains the sticky default for bare `hermes`.
+- **Shared gateway:** one multiplexed gateway process (throng-style) serves all
+  profiles; `hermes -p <profile> gateway …` manages a profile's channels.
+- **Per-profile credentials:** each profile has its own `.env`, so a future LMS or
+  HRIS agent gets its **own** API key/token — not shared with the KB agent.
+
+### Adding a new agent (e.g. an LMS agent)
+
+```bash
+hermes profile create lms --clone --description "LMS integration agent"
+# then, inside profiles/lms/config.yaml:
+#   platform_toolsets: { cli: [mcp-lms, clarify], telegram: [...] }
+#   mcp_servers.lms: { url, headers, tools: { include: [...] } }
+#   + set that profile's model / SOUL.md / .env token
+hermes -p lms gateway restart   # apply
+```
+
+### Adding a system to the *existing* Matius agent
+
+If Matius should also serve another system (rather than a separate persona),
+append that server to its allowlists instead of creating a profile:
+`platform_toolsets.cli: [mcp-outline, mcp-lms, clarify]` and give `mcp-lms` its
+own `tools.include`.
+
+> **Token-collision caution:** do **not** copy a messaging bot token across
+> profiles — two gateways polling the same bot fight over updates. Give each
+> Telegram-serving profile its own bot token (a second bot via BotFather).
 
 ## 9. Failure modes
 
@@ -319,6 +375,7 @@ or document id at the caller).
 | **Toolset allowlist over prompt-only scope** | Prompt rules are probabilistic (they leaked ~50% of off-topic answers); removing the tools makes off-scope questions structurally unanswerable |
 | **Read-only `tools.include` for Matius** | Enforces the "no writes" requirement at the tool layer; writes are impossible rather than discouraged |
 | Model choice pinned to a compliant model | An agent-router model can override the system prompt, silently defeating SOUL.md |
+| **One Hermes profile per agent** | Isolated config/SOUL/secrets/credentials per agent; a KB agent can't be affected by (or leak into) an LMS/HRIS agent; `default` stays the general assistant |
 
 ## 12. Open questions
 
