@@ -20,6 +20,9 @@ data/*
 graphify-out/
 graph.json
 
+# OpenCode agent harness state
+.omo/
+
 # Yarn Berry
 .yarn/*
 !.yarn/patches
