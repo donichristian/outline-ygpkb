@@ -2,6 +2,7 @@
 
 **Status:** draft / design (not yet enforced)
 **Systems:** Knowledge Management System SKI (Outline KB) · Hermes (agent/broker) · external consumers (LMS, HRIS, future)
+**Related:** `docs/HERMES-OUTLINE-ARCHITECTURE.md` (how the agent↔KB path is built)
 
 > **Goal:** define the *stable interface* by which other systems consume the KB,
 > so consumers are not coupled to internals. This is a contract to adopt and

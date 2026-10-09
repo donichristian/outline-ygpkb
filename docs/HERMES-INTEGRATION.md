@@ -1,5 +1,7 @@
 # Hermes ⇄ Outline — API-key dry-run runbook
 
+**Design/architecture:** see `docs/HERMES-OUTLINE-ARCHITECTURE.md`.
+
 ## Status: EXECUTED — working (2026-10-08)
 
 The dry run was completed and verified end-to-end:
