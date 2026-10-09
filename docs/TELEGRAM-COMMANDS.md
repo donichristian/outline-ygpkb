@@ -47,3 +47,15 @@ fall off Hermes's own `set_my_commands` slice. Two things keep it visible:
    `name: <name>` and a `description`.
 2. Add `<name> - <description>` to the BotFather `/setcommands` list.
 3. Optionally add it to `platforms.telegram.extra.command_menu.priority`.
+
+## Lean skill set (KB bot)
+
+Matius only needs the KB; the bundled skills (code, media, dev tooling) are
+disabled via `skills.disabled` in the matius `config.yaml`, keeping just:
+
+- `sop` — the KB shortcut
+- `hermes-agent` — mandatory agent manual (never disableable)
+
+Result: **2 enabled / 54 disabled** (`hermes -p matius skills list`). The list is
+non-destructive — skill files stay on disk, `hermes update` is unaffected, and a
+name is re-enabled by removing it from `skills.disabled`.
