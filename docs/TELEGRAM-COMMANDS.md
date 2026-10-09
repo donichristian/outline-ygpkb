@@ -82,3 +82,24 @@ TUI are unaffected. `hermes gateway restart` applies it.
 > The leaked narration is `interim_assistant_messages` (mid-turn assistant
 > messages) plus `tool_progress` (tool breadcrumbs). Both must be off for a
 > clean answer-only surface.
+
+## Citations and the reachable-URL requirement
+
+Matius is instructed to end every answer with a `Sumber:` citation in the form
+`[Judul Dokumen](url)`. For that citation to be **tappable from Telegram**, the
+KB's `URL` must be reachable from the user's device — **not** `localhost`.
+
+Currently Outline's `URL` is `http://localhost:3050` (`.env.local`), so citations
+render as links that only work on the machine running Outline; on a phone the
+link is dead. Nothing in the agent or prompt can fix this — it is a deployment
+detail.
+
+To make citations usable:
+
+1. Set Outline's `URL` to a device-reachable address, e.g. a LAN address
+   (`http://192.168.x.x:3050`) or a public host/tunnel, in `.env.local`.
+2. Restart the Outline server so `URL` (and `Document.path` output) update.
+
+> Interim mitigation: the bot also names the document **title** in plain text, so
+> even with a dead link the user knows which document a answer came from. The
+> clickable link becomes useful only once `URL` is reachable.
