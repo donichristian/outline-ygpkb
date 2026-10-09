@@ -19,6 +19,10 @@ It complements — and does not repeat — the step-by-step runbook.
 | **Hermes** | MCP **client**. Reads/writes the KB by calling Outline's MCP tools. Also the orchestration brain (email, cron, approvals). |
 | **Outline (KB)** | MCP **server** (`/mcp`). Exposes KB operations as scoped tools; enforces auth and authorization. |
 
+The deployed bot persona is **Matius** — a Bahasa Indonesia, KB-only assistant
+whose capabilities are **allow-listed to the registered KB tools** (see §8b for
+the gate and §8c for the persona layer).
+
 One direction of agent interface: **Hermes → Outline MCP**. (Hermes can also be
 an MCP server itself — `hermes mcp serve` — but that is out of scope here.)
 
@@ -58,6 +62,12 @@ templates:read                  users:read
 ```
 Expiry: 90 days. Scope grammar: `shared/helpers/AuthenticationHelper.ts`.
 
+> The key retains write-capable scopes as a **defense-in-depth** layer, but the
+> Matius bot never exercises them: its tool allowlist (§8b) exposes only the read
+> tools, so no write tool is even registered for the agent. The scopes exist so
+> the *same* credential would still work if a write tool were deliberately
+> re-enabled later.
+
 ### 3.3 Two-layer enforcement
 1. **Tool registration** — `createMcpServer` receives the token's scopes and only
    registers tools the scopes permit (`canAccess("<resource>.<method>", scopes)`).
@@ -81,6 +91,12 @@ independent of the key — a valid key to a non-MCP workspace sees nothing.
 
 ## 5. Tool catalog (19 tools)
 
+> The full server exposes 19 tools, but the **Matius bot only sees the 7 read
+> tools** (`list_collections`, `list_collection_documents`, `list_documents`,
+> `list_comments`, `list_templates`, `list_users`, `fetch`) due to the tool
+> allowlist in §8b. The write tools below exist on the server for other,
+> non-Matius consumers.
+
 | Group | Tools | Write? |
 |-------|-------|:------:|
 | documents | `list_documents`, `list_collection_documents`, `create_document`, `update_document`, `move_document`, `delete_document`, `restore_document` | mixed |
@@ -97,7 +113,23 @@ independent of the key — a valid key to a non-MCP workspace sees nothing.
   `meeting-notes`) are served as `skill://` resources + `skills/list|get` methods —
   **methodology, not executable tools**; they orchestrate the tools above.
 
-## 6. Data flow (write example: create a document)
+## 6. Data flow
+
+**Read path (what Matius actually does):**
+
+```
+Hermes tool call: fetch {resource: "document", id}
+  → POST /mcp (Bearer <api key>)
+    → Outline: auth() resolves user + scopes
+      → MCP route builds server with scopes + team guidance
+        → tool handler gated by canAccess("documents.info", scopes)
+          → authorize(user, "read", document)
+            → presenter builds metadata + markdown body
+  ← two content blocks: JSON metadata, then raw markdown
+  ← Hermes cites title + URL in its answer
+```
+
+**Write path (exists on the server; NOT exposed to Matius — see §8b):**
 
 ```
 Hermes tool call: create_document {title, text, collectionId}
@@ -143,8 +175,106 @@ KB data (membership-scoped; soft-delete; audit)
   `http://localhost:3050` (`.env.local`). An API key bypasses OAuth issuer
   discovery, so mismatches only affect the OAuth flow, not API-key auth.
 
+## 8b. Matius capability gating (tool / domain allow-listing)
+
+The bot — **Matius** — is deliberately limited to **registered tools/domains** so
+non-KB requests are *structurally* unanswerable, not merely discouraged by
+prompting. This is enforced in Hermes' config (not in the repo), in two layers.
+
+### Layer 1 — Toolset allowlist (`platform_toolsets`)
+
+The Matius surfaces (`cli` and `telegram`) are pinned to only the KB toolset plus
+`clarify`:
+
+```yaml
+platform_toolsets:
+  cli:      [mcp-outline, clarify]
+  telegram: [mcp-outline, clarify]
+```
+
+This removes every other capability — web search, browser, terminal, files, code
+execution, memory, cron, computer-use, process tools — so the agent has **no tool
+path** to answer an off-topic question. Verified with `hermes tools --summary`:
+`CLI (3/28)` · `Telegram (3/28)` (only `mcp-outline` + Clarifying Questions).
+
+> Add a future system by appending its MCP server, e.g. `[mcp-outline, mcp-lms, clarify]`.
+> Each registered system gets its own tool allowlist in Layer 2.
+
+### Layer 2 — Per-MCP read-only allowlist (`mcp_servers.<name>.tools.include`)
+
+Even within the KB toolset, only the **read** tools are exposed to Matius:
+
+```yaml
+mcp_servers:
+  outline:
+    # … url / headers / enabled / timeouts …
+    tools:
+      include:
+        - list_collections
+        - list_collection_documents
+        - list_documents
+        - list_comments
+        - list_templates
+        - list_users
+        - fetch
+```
+
+At runtime this drops the tool count from **21 → 9** (7 allowlisted + 2 MCP
+resource helpers). Every write path — `create_*`, `update_*`, `delete_*`,
+`move_*`, `restore_*`, `create_attachment` — is **absent**, so the KB cannot be
+written to via the bot at all.
+
+### What each layer buys
+
+| Layer | Mechanism | Effect |
+|---|---|---|
+| Toolset allowlist | `platform_toolsets.<surface>` | Only `mcp-outline` + `clarify` reachable; no non-KB tools exist to answer off-topic questions |
+| MCP tool include | `mcp_servers.outline.tools.include` | Read-only within the KB; writes structurally impossible |
+
+Prompt rules (SOUL.md, `guidanceMCP`) are **defense in depth** on top of this
+structural gate — they shape tone and citations, but correctness of scope is
+enforced here, not by the model.
+
+### Verifying the gate
+
+```bash
+hermes tools --summary                 # CLI / Telegram show 3/28
+hermes tools list                      # web/browser/terminal/file disabled; outline include-only
+# runtime truth (agent.log / gateway.log):
+#   "MCP server 'outline' (HTTP): registered 9 tool(s): list_collections, …"
+```
+
+The gateway must be restarted to pick up config changes:
+`hermes gateway restart`.
+
+### Known nuance — `tool_search activated` log line
+
+`agent.log`/`gateway.log` may show `tool_search activated (tier 1): 23
+core/visible tools kept, N deferred`. This is `tool_search`'s **internal
+schema-budget accounting** (how many tool schemas are shown immediately vs.
+deferred for context economy) — **not** the granted toolset. The authoritative
+signals are `hermes tools list` / `--summary` and the MCP `registered N tool(s)`
+line.
+
 > **Production deployment is OPEN** (see `docs/FOUNDATION-ARCHITECTURE.md`):
 > TLS/domain, secret management, and rotation are unresolved.
+
+## 8c. Persona & prompt layer (defense in depth)
+
+Above the structural gate (§8b), two prompt sources shape behavior. Neither is
+load-bearing for scope — that is enforced structurally — but they govern tone,
+language, and citation style.
+
+| Layer | Location | Controls |
+|-------|----------|----------|
+| **SOUL.md** (agent identity) | `~/AppData/Local/hermes/SOUL.md` | Persona ("Matius"), Bahasa Indonesia + sopan/formal/baku tone, KB-only scope, refuse malicious / PII / off-scope requests |
+| **guidanceMCP** (workspace instructions) | Outline team settings → surfaced in the MCP handshake `instructions` | Read-only stance, retrieve-before-answer, cite the source, never invent facts |
+
+> **Model matters.** The persona/guardrails are only honoured reliably by models
+> that respect the injected system prompt. On this setup the model is `ski-bot`
+> (an agent-router at `localhost:20127`); an earlier `zen-combo` configuration
+> overrode the system prompt with its own persona, so SOUL.md had no effect.
+> If the bot starts ignoring SOUL.md, check the active model first.
 
 ## 9. Failure modes
 
@@ -153,6 +283,8 @@ KB data (membership-scoped; soft-delete; audit)
 | `401` | missing/invalid/expired bearer | rotate key; check `.env` resolution |
 | `404` on `/mcp` | `TeamPreference.MCP` off | enable in workspace settings |
 | Short tool list | key scope too narrow | widen scopes (still least-privilege) |
+| Bot ignores SOUL.md / scope | wrong model (agent-router overriding system prompt) | switch to a compliant model (e.g. `ski-bot`) |
+| Bot answers off-topic questions | toolset allowlist not applied | check `hermes tools --summary`; restart gateway |
 | `AuthorizationError` inside a tool | object-level policy denial | expected; membership-scoped |
 | Connection refused | Outline web service down | start dev stack; health `/_health` |
 | `${VAR}` unresolved | token missing in Hermes `.env` | Hermes **fails closed** for remote servers |
@@ -165,6 +297,10 @@ or document id at the caller).
 
 - **New Outline tool:** add a module under `server/mcp/tools/`, gate with
   `canAccess`, authorize with policies — it appears automatically, scope-filtered.
+- **Expose a new tool to Matius:** add it to `mcp_servers.outline.tools.include`.
+- **Add a whole new system (LMS/HRIS):** register its MCP server, then append it
+  to `platform_toolsets.cli`/`telegram` and give it its own `tools.include`
+  allowlist — no other change.
 - **New KB convention:** set `guidanceMCP` (settings) — no code change.
 - **New skill:** add `SKILL.md` under `server/mcp/skills/` (YAML frontmatter).
 - **Richer agent behavior:** Hermes skills/plugins/cron wrap the same MCP surface.
@@ -180,9 +316,13 @@ or document id at the caller).
 | API key (not OAuth) for Hermes local | Fewest moving parts; no browser flow; least-privilege scopes still apply |
 | Scoped, expiring credential | Limited blast radius; fits contract's per-consumer credential model |
 | Team-gated MCP | Admin control over whether a workspace is agent-accessible at all |
+| **Toolset allowlist over prompt-only scope** | Prompt rules are probabilistic (they leaked ~50% of off-topic answers); removing the tools makes off-scope questions structurally unanswerable |
+| **Read-only `tools.include` for Matius** | Enforces the "no writes" requirement at the tool layer; writes are impossible rather than discouraged |
+| Model choice pinned to a compliant model | An agent-router model can override the system prompt, silently defeating SOUL.md |
 
 ## 12. Open questions
 
 1. Rotate key on the contract's cadence — who owns rotation?
 2. Should inbound (webhook/run-API) auth be standardized alongside this outbound path?
 3. Versioning the MCP tool surface (KB contract G5) — when tool names change.
+4. Which additional systems (LMS/HRIS) get added to the allowlist, and in what order?

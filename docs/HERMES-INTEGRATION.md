@@ -1,6 +1,9 @@
 # Hermes ⇄ Outline — API-key dry-run runbook
 
 **Design/architecture:** see `docs/HERMES-OUTLINE-ARCHITECTURE.md`.
+**Tool/domain allow-listing (Matius gating):** see §8b of that doc —
+`hermes tools --summary` should show CLI/Telegram at `3/28`, and the MCP server
+should register only the 7 read tools.
 
 ## Status: EXECUTED — working (2026-10-08)
 
