@@ -55,6 +55,27 @@ Rules:
 - Set `expiresAt` on API keys; rotate via re-issue.
 - Write access is **never anonymous** (enforced: all write routes require auth).
 
+## 3b. Large documents (retrieval granularity)
+
+Documents can be large (the YGPKB regulation PDFs are ~167 KB of text each). A
+single MCP `fetch` that returns the whole body overflows a consumer's tool-output
+budget, so the `fetch` tool supports **granular reads** of a document:
+
+| Param | Effect |
+|-------|--------|
+| `section: "<heading text>"` | Returns only the section whose heading contains the text, down to the next heading of the same/higher level. Best for structured documents. |
+| `offset` + `limit` | Page through the body by character range. |
+| *(neither)* | Bodies over `limit` (default 20000, max 60000 chars) are auto-chunked. |
+
+The metadata block reports `paging: { start, end, total, hasMore }` so a consumer
+knows there is more and how to fetch it. Consumers should **search first**
+(`list_documents` returns focused snippets), then read only the needed
+section/chunk — never pull a whole large document in one call.
+
+> This is deliberately **granularity**, not RAG/graph. Outline search is keyword
+> (`tsvector`) and already returns snippets; the fix for large-document questions
+> is reading the right region, not adding a vector store.
+
 ## 4. Read surface (contract-level)
 
 Canonical read actions an external consumer may rely on:
