@@ -19,10 +19,11 @@ It complements — and does not repeat — the step-by-step runbook.
 | **Hermes** | MCP **client**. Reads/writes the KB by calling Outline's MCP tools. Also the orchestration brain (email, cron, approvals). |
 | **Outline (KB)** | MCP **server** (`/mcp`). Exposes KB operations as scoped tools; enforces auth and authorization. |
 
-The deployed bot persona is **Matius** — a Bahasa Indonesia, KB-only assistant
-whose capabilities are **allow-listed to the registered KB tools** (see §8b for
-the gate, §8c for the persona layer, and §8d for the multi-agent profile layout).
-It runs as its own Hermes profile (`matius`), separate from the general `default`
+The deployed bot persona is **Matius** — a KB-only assistant that replies **in
+the user's own language** with a formal, well-worded tone, and whose
+capabilities are **allow-listed to the registered KB tools** (see §8b for the
+gate, §8c for the persona layer, and §8d for the multi-agent profile layout). It
+runs as its own Hermes profile (`matius`), separate from the general `default`
 agent.
 
 One direction of agent interface: **Hermes → Outline MCP**. (Hermes can also be
@@ -277,7 +278,7 @@ language, and citation style.
 
 | Layer | Location | Controls |
 |-------|----------|----------|
-| **SOUL.md** (agent identity) | `<profile home>/SOUL.md` — for Matius: `~/AppData/Local/hermes/profiles/matius/SOUL.md` | Persona ("Matius"), Bahasa Indonesia + sopan/formal/baku tone, KB-only scope, refuse malicious / PII / off-scope requests |
+| **SOUL.md** (agent identity) | `<profile home>/SOUL.md` — for Matius: `~/AppData/Local/hermes/profiles/matius/SOUL.md` | Persona ("Matius"), language-matching with a formal/polite/well-worded tone, KB-only scope, refuse malicious / PII / off-scope requests |
 | **guidanceMCP** (workspace instructions) | Outline team settings → surfaced in the MCP handshake `instructions` | Read-only stance, retrieve-before-answer, cite the source, never invent facts |
 
 > **Model matters.** The persona/guardrails are only honoured reliably by models
