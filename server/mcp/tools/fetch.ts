@@ -9,7 +9,7 @@ import {
   User,
 } from "@server/models";
 import { authorize, can } from "@server/policies";
-import { AuthorizationError } from "@server/errors";
+import { AuthorizationError, ValidationError } from "@server/errors";
 import { presentNavigationNode, presentUser } from "@server/presenters";
 import AuthenticationHelper from "@shared/helpers/AuthenticationHelper";
 import { presentCollection } from "./collections";
@@ -27,6 +27,88 @@ import {
 } from "../util";
 
 const SELF_TOKENS = new Set(["self", "me", "current_user"]);
+
+/** Default characters returned for a document body when none is requested. */
+const DEFAULT_CHUNK_LIMIT = 20000;
+
+/** Maximum characters a single fetch may return, to bound tool output. */
+const MAX_CHUNK_LIMIT = 60000;
+
+/**
+ * Extracts the ATX/fenced heading lines from markdown, used to locate a section.
+ *
+ * @param markdown - the markdown body.
+ * @returns an array of `{ level, title, index }` ordered as they appear.
+ */
+function findHeadings(markdown: string) {
+  const headings: { level: number; title: string; index: number }[] = [];
+  const lines = markdown.split("\n");
+  let offset = 0;
+
+  for (const line of lines) {
+    const match = /^(#{1,6})\s+(.*\S)\s*$/.exec(line);
+    if (match) {
+      headings.push({
+        level: match[1].length,
+        title: match[2].trim(),
+        index: offset,
+      });
+    }
+    offset += line.length + 1;
+  }
+
+  return headings;
+}
+
+/**
+ * Slices out a section of markdown from a heading down to the next heading of
+ * the same or higher level, so a subsection is returned whole.
+ *
+ * @param markdown - the markdown body.
+ * @param query - heading text to locate (case-insensitive substring).
+ * @returns the section text, or undefined when no heading matches.
+ */
+function extractSection(markdown: string, query: string) {
+  const headings = findHeadings(markdown);
+  const needle = query.toLowerCase();
+  const index = headings.findIndex((heading) =>
+    heading.title.toLowerCase().includes(needle)
+  );
+
+  if (index === -1) {
+    return undefined;
+  }
+
+  const { level, index: start } = headings[index];
+  const next = headings
+    .slice(index + 1)
+    .find((heading) => heading.level <= level);
+  const end = next ? next.index : markdown.length;
+
+  return markdown.slice(start, end).trim();
+}
+
+/**
+ * Applies offset/limit paging to a document body.
+ *
+ * @param text - the full markdown body.
+ * @param offset - starting character offset.
+ * @param limit - maximum characters to return.
+ * @returns the chunk plus paging metadata for the caller to surface.
+ */
+function chunkText(text: string, offset: number, limit: number) {
+  const total = text.length;
+  const start = Math.max(0, Math.min(offset, total));
+  const end = Math.min(total, start + limit);
+
+  return {
+    chunk: text.slice(start, end),
+    total,
+    start,
+    end,
+    hasMore: end < total,
+  };
+}
 
 /**
  * Extracts a resource identifier from a value that may be a URL or a plain ID.
@@ -102,7 +184,7 @@ export function fetchTool(server: McpServer, scopes: string[]) {
     {
       title: "Fetch",
       description:
-        'Fetches a document, collection, user, attachment, or template by type and ID. When fetching a collection the response includes the full hierarchical document tree. For users, "current_user" can be used as the ID to get the authenticated user. For attachments, the response includes a short-lived signed URL that can be used to download the file contents directly. For templates, the response includes the template body as markdown.',
+        'Fetches a document, collection, user, attachment, or template by type and ID. When fetching a collection the response includes the full hierarchical document tree. For users, "current_user" can be used as the ID to get the authenticated user. For attachments, the response includes a short-lived signed URL that can be used to download the file contents directly. For templates, the response includes the template body as markdown. For long documents, prefer `section` to read a single heading, or `offset`/`limit` to page through the body; large bodies are chunked and the metadata block reports `paging` with `total` and `hasMore`.',
       annotations: {
         idempotentHint: true,
         readOnlyHint: true,
@@ -114,9 +196,34 @@ export function fetchTool(server: McpServer, scopes: string[]) {
           .describe(
             'The unique identifier or URL. For users, "current_user" returns the authenticated user.'
           ),
+        offset: z
+          .number()
+          .int()
+          .min(0)
+          .optional()
+          .describe(
+            "Documents only. Character offset to start reading the body from. Use with `hasMore` from a previous response to read the next chunk of a long document."
+          ),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(MAX_CHUNK_LIMIT)
+          .optional()
+          .describe(
+            `Documents only. Maximum characters of the body to return (default ${DEFAULT_CHUNK_LIMIT}, max ${MAX_CHUNK_LIMIT}). Large documents are returned in chunks.`
+          ),
+        section: z
+          .string()
+          .optional()
+          .describe(
+            "Documents only. Return only the section whose heading contains this text (case-insensitive), from that heading down to the next heading of the same or higher level. Use for long structured documents instead of paging through the whole body."
+          ),
       },
     },
-    withTracing("fetch", async ({ resource, id: rawId }, extra) => {
+    withTracing(
+      "fetch",
+      async ({ resource, id: rawId, offset, limit, section }, extra) => {
       try {
         const actor = getActorFromContext(extra);
         const id = extractId(rawId);
@@ -141,6 +248,46 @@ export function fetchTool(server: McpServer, scopes: string[]) {
                 getDocumentBreadcrumb(document, actor),
                 getPublicShareUrlForDocument(actor.team, document.id),
               ]);
+
+            const body = typeof text === "string" ? text : "";
+            let content = body;
+            let paging: Record<string, unknown> | undefined;
+
+            if (section) {
+              const found = extractSection(body, section);
+              if (found === undefined) {
+                return error(
+                  ValidationError(
+                    `No section heading matching "${section}" was found in the document.`
+                  )
+                );
+              }
+              content = found;
+              paging = { section };
+            } else if (offset !== undefined || limit !== undefined) {
+              const chunk = chunkText(
+                body,
+                offset ?? 0,
+                Math.min(limit ?? DEFAULT_CHUNK_LIMIT, MAX_CHUNK_LIMIT)
+              );
+              content = chunk.chunk;
+              paging = {
+                start: chunk.start,
+                end: chunk.end,
+                total: chunk.total,
+                hasMore: chunk.hasMore,
+              };
+            } else if (body.length > DEFAULT_CHUNK_LIMIT) {
+              const chunk = chunkText(body, 0, DEFAULT_CHUNK_LIMIT);
+              content = chunk.chunk;
+              paging = {
+                start: chunk.start,
+                end: chunk.end,
+                total: chunk.total,
+                hasMore: chunk.hasMore,
+              };
+            }
+
             return {
               content: [
                 {
@@ -149,11 +296,12 @@ export function fetchTool(server: McpServer, scopes: string[]) {
                     document: pathToUrl(actor.team, attributes),
                     ...(breadcrumb !== undefined && { breadcrumb }),
                     ...(shareUrl !== undefined && { shareUrl }),
+                    ...(paging !== undefined && { paging }),
                   }),
                 },
                 {
                   type: "text" as const,
-                  text: typeof text === "string" ? text : "",
+                  text: content,
                 },
               ],
             } satisfies CallToolResult;

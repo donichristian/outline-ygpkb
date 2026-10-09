@@ -16,6 +16,13 @@ data/*
 *.cert
 .history
 
+# graphify knowledge graph output
+graphify-out/
+graph.json
+
+# OpenCode agent harness state
+.omo/
+
 # Yarn Berry
 .yarn/*
 !.yarn/patches
