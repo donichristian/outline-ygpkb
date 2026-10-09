@@ -343,6 +343,36 @@ export class Environment {
   public SSL_CERT = this.toOptionalString(environment.SSL_CERT);
 
   /**
+   * The base URL of the AI chat provider, e.g. an OpenAI-compatible endpoint.
+   * When unset, the AI chat feature is disabled.
+   */
+  @Public
+  @IsOptional()
+  @IsUrl({
+    protocols: ["http", "https"],
+    require_protocol: true,
+    require_tld: false,
+  })
+  public AI_CHAT_BASE_URL = this.toOptionalString(
+    environment.AI_CHAT_BASE_URL
+  );
+
+  /**
+   * The API key used to authenticate with the AI chat provider. This is a
+   * secret and is intentionally never exposed to the client.
+   */
+  @IsOptional()
+  @CannotUseWithout("AI_CHAT_BASE_URL")
+  public AI_CHAT_API_KEY = this.toOptionalString(environment.AI_CHAT_API_KEY);
+
+  /**
+   * The model identifier to use for AI chat requests.
+   */
+  @IsOptional()
+  @CannotUseWithout("AI_CHAT_BASE_URL")
+  public AI_CHAT_MODEL = this.toOptionalString(environment.AI_CHAT_MODEL);
+
+  /**
    * The default interface language. See translate.getoutline.com for a list of
    * available language codes and their percentage translated.
    */
