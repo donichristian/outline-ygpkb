@@ -29,6 +29,7 @@ import Fade from "./Fade";
 import NotificationBadge from "./NotificationBadge";
 import { PortalContext } from "./Portal";
 import CommandBar from "./CommandBar";
+import { AIChatProvider } from "./AIChat/AIChatContext";
 
 const SettingsSidebar = lazyWithRetry(
   () => import("~/components/Sidebar/Settings")
@@ -103,23 +104,25 @@ const AuthenticatedLayout: React.FC<Props> = ({ children }: Props) => {
   return (
     <DocumentContextProvider>
       <RightSidebarProvider>
-        <PortalContext.Provider value={layoutRef.current}>
-          <DndProvider backend={EditorAwareHTML5Backend}>
-            <Layout
-              title={team.name}
-              sidebar={sidebar}
-              sidebarCanCollapse={!isSettings}
-              ref={layoutRef}
-            >
-              <RegisterKeyDown trigger="n" handler={goToNewDocument} />
-              <RegisterKeyDown trigger="t" handler={goToSearch} />
-              <RegisterKeyDown trigger="/" handler={goToSearch} />
-              {children}
-              <CommandBar />
-              <NotificationBadge />
-            </Layout>
-          </DndProvider>
-        </PortalContext.Provider>
+        <AIChatProvider>
+          <PortalContext.Provider value={layoutRef.current}>
+            <DndProvider backend={EditorAwareHTML5Backend}>
+              <Layout
+                title={team.name}
+                sidebar={sidebar}
+                sidebarCanCollapse={!isSettings}
+                ref={layoutRef}
+              >
+                <RegisterKeyDown trigger="n" handler={goToNewDocument} />
+                <RegisterKeyDown trigger="t" handler={goToSearch} />
+                <RegisterKeyDown trigger="/" handler={goToSearch} />
+                {children}
+                <CommandBar />
+                <NotificationBadge />
+              </Layout>
+            </DndProvider>
+          </PortalContext.Provider>
+        </AIChatProvider>
       </RightSidebarProvider>
     </DocumentContextProvider>
   );
