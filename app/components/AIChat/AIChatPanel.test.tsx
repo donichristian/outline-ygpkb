@@ -218,4 +218,21 @@ describe("AIChatPanel", () => {
     );
     cleanup();
   });
+
+  it("shows the session-expired message for a 403", async () => {
+    streamAiChat.mockImplementation(async function* () {
+      throw new AiChatError("CSRF token invalid", "http", 403);
+      // eslint-disable-next-line no-unreachable
+      yield { type: "delta", text: "" };
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel();
+    typeMessage("hi");
+    await submit();
+
+    expect(query("ai-chat-error")?.textContent).toContain(
+      "Your session has expired, refresh the page to continue"
+    );
+    cleanup();
+  });
 });
