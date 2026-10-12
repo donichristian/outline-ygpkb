@@ -22,6 +22,7 @@ graph.json
 
 # OpenCode agent harness state
 .omo/
+.omo-qa/
 
 # Yarn Berry
 .yarn/*
