@@ -1,0 +1,5 @@
+﻿CMD: yarn tsc --incremental false
+EXIT_CODE: 0
+ERROR_TS_LINES: 0
+----- raw output below -----
+

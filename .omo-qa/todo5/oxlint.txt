@@ -1,0 +1,7 @@
+﻿CMD: yarn oxlint app/components/AIChat/AIChatPanel.tsx app/components/AIChat/AIChatContext.tsx app/components/AIChat/AIChatPanel.test.tsx app/components/AuthenticatedLayout.tsx
+EXIT_CODE: 0
+DIAGNOSTIC_ERROR_LINES: 0
+DIAGNOSTIC_WARNING_LINES: 1 (pre-existing: AuthenticatedLayout refs during render)
+----- raw output below -----
+app/components/AuthenticatedLayout.tsx:108:42: warning react(refs): Cannot access refs during render help: React refs are values that are not needed for rendering. Refs should only be accessed outside of render, such as in event handlers or effects. Accessing a ref value (the `current` property) during render can cause your component not to update as expected
+
