@@ -14,10 +14,13 @@ import {
   DraftsIcon,
   BugIcon,
   ImportIcon,
+  SparklesIcon,
 } from "outline-icons";
+import { TeamPreference } from "@shared/types";
 import { UrlHelper } from "@shared/utils/UrlHelper";
 import { isMac } from "@shared/utils/browser";
 import stores from "~/stores";
+import { openAIChatPanel } from "~/components/AIChat/AIChatContext";
 import type SearchQuery from "~/models/SearchQuery";
 import KeyboardShortcuts from "~/scenes/KeyboardShortcuts";
 import {
@@ -196,6 +199,17 @@ export const toggleSidebar = createAction({
   perform: () => stores.ui.toggleCollapsedSidebar(),
 });
 
+export const openAIChat = createAction({
+  name: ({ t }) => t("AI chat"),
+  analyticsName: "Open AI chat",
+  keywords: "assistant ask ai chat",
+  section: NavigationSection,
+  icon: <SparklesIcon />,
+  visible: ({ stores }) =>
+    !!stores.auth.team?.getPreference(TeamPreference.AIChat),
+  perform: () => openAIChatPanel(),
+});
+
 export const openFeedbackUrl = createExternalLinkAction({
   name: ({ t }) => t("Send us feedback"),
   analyticsName: "Open feedback",
@@ -281,5 +295,6 @@ export const rootNavigationActions = [
   openChangelog,
   openKeyboardShortcuts,
   toggleSidebar,
+  openAIChat,
   logout,
 ];

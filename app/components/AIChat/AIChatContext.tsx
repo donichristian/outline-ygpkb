@@ -22,6 +22,42 @@ export interface AIChatControls {
 const AIChatContext = React.createContext<AIChatControls | null>(null);
 
 /**
+ * Module-level bridge between the command-bar action (which is a plain object
+ * with no access to React context) and the mounted {@link AIChatProvider}. The
+ * provider registers its `open` callback here on mount and clears it on
+ * unmount; {@link openAIChatPanel} is the action-facing entry point. This keeps
+ * the panel's open state in React where it already lives, instead of widening
+ * `UiStore` (whose persisted `rightSidebar` field drives the Document sidebar).
+ */
+let openHandler: (() => void) | null = null;
+
+/**
+ * Registers the callback used by {@link openAIChatPanel} to open the panel.
+ *
+ * @param handler the provider's `open` callback.
+ * @returns a cleanup function that removes the handler if it is still current.
+ */
+export function registerAIChatOpenHandler(handler: () => void): () => void {
+  openHandler = handler;
+  return () => {
+    if (openHandler === handler) {
+      openHandler = null;
+    }
+  };
+}
+
+/**
+ * Opens the AI chat panel via the currently registered provider, if any. Safe
+ * to call when AI chat is disabled for the workspace – the provider does not
+ * register a handler while the {@link TeamPreference.AIChat} gate is off, so
+ * the call is a no-op. The action additionally hides itself via its `visible`
+ * predicate, so this is defence in depth.
+ */
+export function openAIChatPanel(): void {
+  openHandler?.();
+}
+
+/**
  * Mounts the AI chat panel into the right sidebar whenever it is open, mirroring
  * the pattern used by the Document sidebar. Renders nothing itself – it drives
  * the ephemeral `RightSidebarContext` from an effect so the sliding `Aside`
@@ -88,6 +124,16 @@ export function AIChatProvider({ children }: { children: React.ReactNode }) {
       isOpen,
     };
   }, [enabled, isOpen]);
+
+  // Publish the open callback to the module bridge so the command-bar action
+  // can reach it, but only while the workspace gate is on.
+  React.useEffect(() => {
+    if (!enabled) {
+      return;
+    }
+
+    return registerAIChatOpenHandler(() => setRequested(true));
+  }, [enabled]);
 
   return (
     <AIChatContext.Provider value={controls}>
