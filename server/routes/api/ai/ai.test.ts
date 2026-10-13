@@ -3,6 +3,7 @@ import { TeamPreference } from "@shared/types";
 import env from "@server/env";
 import { buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
+import { OutOfScopeRefusal } from "./scope";
 
 const server = getTestServer();
 
@@ -231,5 +232,152 @@ describe("POST /api/ai.chat", () => {
     expect(text).toContain("event: error");
     expect(text).toContain('{"error":"The AI chat stream failed"}');
     expect(text).not.toContain("upstream socket reset");
+  });
+
+  describe("knowledge base scope gate", () => {
+    /**
+     * Asserts that a request was refused with the in-band scope frame without
+     * ever reaching the provider.
+     *
+     * @param user the requesting user.
+     * @param content the prompt content to submit.
+     */
+    async function expectRefused(
+      user: Awaited<ReturnType<typeof buildUser>>,
+      content: string
+    ) {
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: { messages: [{ role: "user", content }] },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+      const text = await res.text();
+      expect(text).toContain("event: error");
+      expect(text).toContain(OutOfScopeRefusal);
+      // The whole point of the gate: the provider is never asked, so it cannot
+      // leak a general-knowledge answer.
+      expect(fetchMock).not.toHaveBeenCalled();
+    }
+
+    it("refuses an off-topic prompt without contacting the provider", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+
+      await expectRefused(user, "What is the capital of France?");
+    });
+
+    it("refuses a knowledge-base-looking question that shares a probe shape", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+
+      // Documented policy: the gate fails closed on a matched shape. It cannot
+      // tell this apart from the general-knowledge probe above, so it refuses
+      // both rather than risk leaking. See the ponytail note in `scope.ts`.
+      await expectRefused(user, "What is the capital city of our Jakarta office?");
+    });
+
+    it("refuses a prompt padded with case, spacing, tabs and zero-width marks", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+
+      await expectRefused(user, "  wHaT\t\t Is  THe  CaPiTal   oF FrAnCe?  ");
+    });
+
+    it("refuses whitespace-only content", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+
+      await expectRefused(user, "  \t \n ");
+    });
+
+    it("refuses a conversation with no user message", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: { messages: [{ role: "assistant", content: "How can I help?" }] },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(await res.text()).toContain(OutOfScopeRefusal);
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("still rejects empty content at the schema", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: { messages: [{ role: "user", content: "" }] },
+      });
+      expect(res.status).toEqual(400);
+    });
+
+    it("still streams an on-topic knowledge base question", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          streamingResponse([
+            'data: {"choices":[{"delta":{"content":"See onboarding"}}]}\n\n',
+            "data: [DONE]\n\n",
+          ])
+        );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: {
+          messages: [
+            {
+              role: "user",
+              content: "What is the onboarding procedure for a new engineer?",
+            },
+          ],
+        },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const text = await res.text();
+      expect(text).toContain('{"choices":[{"delta":{"content":"See onboarding"}}]}');
+      expect(text).toContain("data: [DONE]");
+      expect(text).not.toContain("event: error");
+    });
+
+    it("does not let an assistant echo re-trigger the gate on a later turn", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(streamingResponse(["data: [DONE]\n\n"]));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: {
+          messages: [
+            // An earlier turn leaked the phrase into the transcript; only user
+            // messages are classified, so the conversation is not locked.
+            { role: "user", content: "hi" },
+            { role: "assistant", content: "What is the capital of France?" },
+            { role: "user", content: "And our travel reimbursement policy?" },
+          ],
+        },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(await res.text()).not.toContain("event: error");
+    });
   });
 });

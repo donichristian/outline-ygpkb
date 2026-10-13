@@ -1,5 +1,6 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
+import { t } from "i18next";
 import Router from "koa-router";
 import { TeamPreference } from "@shared/types";
 import { toError } from "@shared/utils/error";
@@ -12,6 +13,7 @@ import validate from "@server/middlewares/validate";
 import type { APIContext } from "@server/types";
 import { AuthenticationType } from "@server/types";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
+import { findOutOfScopeProbe, OutOfScopeRefusal } from "./scope";
 import * as T from "./schema";
 
 const router = new Router();
@@ -26,6 +28,36 @@ const router = new Router();
 function sseFrame(data: unknown, event?: string): string {
   const prefix = event ? `event: ${event}\n` : "";
   return `${prefix}data: ${JSON.stringify(data)}\n\n`;
+}
+
+/**
+ * Applies the SSE response headers shared by the streaming and refusal paths.
+ *
+ * @param ctx the request context.
+ */
+function setSseHeaders(ctx: APIContext) {
+  ctx.set("Content-Type", "text/event-stream");
+  ctx.set("Cache-Control", "no-cache");
+  ctx.set("X-Accel-Buffering", "no");
+}
+
+/**
+ * Ends the response with a single in-band `event: error` frame. This is the
+ * same channel a mid-stream provider failure uses, so `app/utils/aiChat.ts`
+ * raises an `AiChatError` of kind `stream` and the panel renders the message as
+ * ordinary text – no client change, and the browser still receives a well-formed
+ * stream rather than a bare error status.
+ *
+ * @param ctx the request context.
+ * @param message the user-facing message to deliver.
+ */
+function refuseWithSseError(ctx: APIContext, message: string) {
+  setSseHeaders(ctx);
+
+  const body = new Readable({ read() {} });
+  body.push(Buffer.from(sseFrame({ error: message }, "error")));
+  body.push(null);
+  ctx.body = body;
 }
 
 router.post(
@@ -47,6 +79,7 @@ router.post(
     }
 
     const { messages } = ctx.input.body;
+    const requestId = ctx.get("x-request-id");
 
     // SSE responses must not be compressed – buffering defeats incremental
     // delivery. koa-compress honors `ctx.compress = false` as a filter bypass.
@@ -56,6 +89,21 @@ router.post(
     // timeout that would otherwise cut the connection mid-stream.
     ctx.req.setTimeout(0);
 
+    // The provider's persona carries the knowledge-base boundary as prompt
+    // text only, and honours it roughly 60% of the time – it answers general
+    // knowledge from memory otherwise. Reject an out-of-scope prompt here, so
+    // the boundary is structural and costs no upstream call or latency. See
+    // `scope.ts` for what this heuristic does and does not catch.
+    const outOfScopeProbe = findOutOfScopeProbe(messages);
+    if (outOfScopeProbe) {
+      Logger.warn("AI chat prompt rejected as out of scope", {
+        requestId,
+        probe: outOfScopeProbe,
+      });
+      refuseWithSseError(ctx, t(OutOfScopeRefusal));
+      return;
+    }
+
     // Abort the upstream request if the client disconnects before the stream
     // has finished, so we do not keep the provider connection open.
     const ac = new AbortController();
@@ -64,8 +112,6 @@ router.post(
         ac.abort();
       }
     });
-
-    const requestId = ctx.get("x-request-id");
 
     const res = await fetch(`${env.AI_CHAT_BASE_URL}/chat/completions`, {
       method: "POST",
@@ -106,9 +152,7 @@ router.post(
       ctx.throw(502, "AI chat provider returned an empty response");
     }
 
-    ctx.set("Content-Type", "text/event-stream");
-    ctx.set("Cache-Control", "no-cache");
-    ctx.set("X-Accel-Buffering", "no");
+    setSseHeaders(ctx);
 
     // Wrap the upstream body so a mid-stream error can be interposed as an
     // in-band SSE frame rather than surfacing as a broken pipe. `body` is the

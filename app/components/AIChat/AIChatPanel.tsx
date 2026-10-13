@@ -143,6 +143,25 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
     []
   );
 
+  const requestSubmit = React.useCallback(() => {
+    formRef.current?.requestSubmit();
+  }, []);
+
+  // A single-line prompt sends on plain Enter. Input only fires
+  // onRequestSubmit on Cmd+Enter (Input.tsx handleKeyDown), and that branch
+  // returns early, so Enter is handled here rather than in the shared
+  // component. preventDefault stops the browser's implicit submission, which
+  // would otherwise submit the form a second time.
+  const handleKeyDown = React.useCallback(
+    (ev: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        requestSubmit();
+      }
+    },
+    [requestSubmit]
+  );
+
   return (
     <SidebarLayout title={t("AI chat")} onClose={onClose} scrollable={false}>
       <Container column>
@@ -182,42 +201,36 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
 
         <Composer ref={formRef} onSubmit={handleSubmit}>
           <Input
-            type="textarea"
+            type="text"
             value={input}
             placeholder={t("Ask a question…")}
             onChange={handleChange}
-            onRequestSubmit={() => {
-              const form = formRef.current;
-              if (form) {
-                form.requestSubmit();
-              }
-            }}
-            autoSize
-            minHeight="3lh"
-            maxHeight="10lh"
+            onKeyDown={handleKeyDown}
+            onRequestSubmit={requestSubmit}
+            // Input's outlined box defaults to a 16px bottom margin, which
+            // pushes it off-centre in the composer row.
+            margin={0}
             aria-label={t("Message")}
             data-testid="ai-chat-input"
           />
-          <Flex align="center" justify="flex-end" gap={8}>
-            {isStreaming ? (
-              <Button
-                type="button"
-                neutral
-                onClick={handleStop}
-                data-testid="ai-chat-stop"
-              >
-                {t("Stop")}
-              </Button>
-            ) : (
-              <Button
-                type="submit"
-                disabled={!input.trim()}
-                data-testid="ai-chat-send"
-              >
-                {t("Send")}
-              </Button>
-            )}
-          </Flex>
+          {isStreaming ? (
+            <Button
+              type="button"
+              neutral
+              onClick={handleStop}
+              data-testid="ai-chat-stop"
+            >
+              {t("Stop")}
+            </Button>
+          ) : (
+            <Button
+              type="submit"
+              disabled={!input.trim()}
+              data-testid="ai-chat-send"
+            >
+              {t("Send")}
+            </Button>
+          )}
         </Composer>
       </Container>
     </SidebarLayout>
@@ -291,17 +304,25 @@ const ErrorNotice = styled.div`
 
 const Composer = styled.form`
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: center;
   padding: 12px 16px;
   gap: 8px;
   border-top: 1px solid ${s("divider")};
   flex-shrink: 0;
 
-  /* Input's root carries flex: 0, which in this column resolves to a zero
-     flex-basis and collapses it to zero height. Its relatively positioned
-     textarea then overflows the box and paints over the Send/Stop button,
-     leaving it visible but unclickable. Size both children to their content. */
-  > * {
+  /* Input's root Wrapper carries flex: 0, i.e. flex-basis: 0%, so in this row
+     it resolves to zero width and its overflowed control paints over the
+     Send/Stop button – visible but unclickable. Grow the input wrapper to fill
+     the row instead, letting min-width: 0 do what min-width: initial (the
+     flex-item automatic minimum) would otherwise forbid. */
+  > :first-child {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  /* The button keeps its intrinsic width and never shrinks. */
+  > :last-child {
     flex: 0 0 auto;
   }
 `;
