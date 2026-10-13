@@ -92,6 +92,14 @@ text.
 > distinguishable in the logs as `unsupported script`; a prompt that reduces to
 > a single token instead reports `no distinctive terms`. The refusal is still
 > fail-closed — the reason string changed, the decision did not.
+>
+> **The term extractor assumes space-delimited scripts.** A prompt written in a
+> whitespace-free script — Han, Thai, Khmer, Lao, Myanmar, Japanese kana,
+> Hangul — arrives as one long unmatchable "word", so it degrades to near-total
+> refusal no matter what the workspace holds. Those refusals are now
+> distinguishable in the logs as `unsupported script`; a prompt that reduces to
+> a single token instead reports `no distinctive terms`. The refusal is still
+> fail-closed — the reason string changed, the decision did not.
 
 ## Environment variables
 

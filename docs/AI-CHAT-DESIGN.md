@@ -265,6 +265,14 @@ it after the upstream latency.
   Those refusals are now distinguishable in the logs as `unsupported script`,
   while a single-token prompt reports `no distinctive terms`. Only the reason
   string differs; the decision is unchanged and still fail-closed.
+- **The term extractor assumes space-delimited scripts.** Whether it retrieves
+  depends on the full-text search configuration, and a prompt written in a
+  whitespace-free script — Han, Thai, Khmer, Lao, Myanmar, Japanese kana,
+  Hangul — is submitted as a single long term with nothing to match, so it
+  degrades to near-total refusal regardless of what the workspace contains.
+  Those refusals are now distinguishable in the logs as `unsupported script`,
+  while a single-token prompt reports `no distinctive terms`. Only the reason
+  string differs; the decision is unchanged and still fail-closed.
 
 Cost: one search per request (two or three indexed queries on the read
 replica), on a route that previously did no database read. The upgrade path, if
