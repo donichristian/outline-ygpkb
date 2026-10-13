@@ -3,6 +3,7 @@ build
 node_modules/*
 .env
 .env.local
+.env.local.bak-*
 .env.production
 .log
 .vscode/*
