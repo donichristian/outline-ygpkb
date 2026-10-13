@@ -62,8 +62,8 @@ sequenceDiagram
     Note over MW: "requestContext, koa-body, coalesceBody, userAgent, requestTracer,<br/>apiResponse, apiErrorHandler, editor, apiContext, verifyCSRFToken"
     MW->>Route: dispatch to router
     Route->>Route: "auth({type: [APP]}) - API keys cannot call this route"
-    Route->>Route: "validate(T.AiChatSchema)"
     Route->>Route: "rateLimiter(TenPerMinute)"
+    Route->>Route: "validate(T.AiChatSchema)"
     alt "workspace pref off or AI_CHAT_BASE_URL unset"
         Route-->>Util: "404 NotFoundError - indistinguishable from unknown route"
     else gate open
