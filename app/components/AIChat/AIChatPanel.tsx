@@ -144,7 +144,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
   );
 
   return (
-    <SidebarLayout title={t("AI chat")} onClose={onClose}>
+    <SidebarLayout title={t("AI chat")} onClose={onClose} scrollable={false}>
       <Container column>
         <Transcript ref={transcriptRef}>
           {messages.length === 0 && (
@@ -227,6 +227,9 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
 const Container = styled(Flex)`
   height: 100%;
   overflow: hidden;
+  /* Allow the column to shrink below its content so Transcript scrolls
+     internally and Composer stays pinned instead of being clipped. */
+  min-height: 0;
 `;
 
 const Transcript = styled(Scrollable)`
@@ -235,6 +238,10 @@ const Transcript = styled(Scrollable)`
   flex-direction: column;
   gap: 12px;
   padding: 12px 16px;
+  /* A flex item defaults to min-height: auto and will not shrink below its
+     content; without this the transcript grows unbounded and pushes the
+     composer out of the panel. */
+  min-height: 0;
 `;
 
 const EmptyText = styled(Text)`
@@ -289,6 +296,14 @@ const Composer = styled.form`
   gap: 8px;
   border-top: 1px solid ${s("divider")};
   flex-shrink: 0;
+
+  /* Input's root carries flex: 0, which in this column resolves to a zero
+     flex-basis and collapses it to zero height. Its relatively positioned
+     textarea then overflows the box and paints over the Send/Stop button,
+     leaving it visible but unclickable. Size both children to their content. */
+  > * {
+    flex: 0 0 auto;
+  }
 `;
 
 export default AIChatPanel;
