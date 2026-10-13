@@ -13,7 +13,7 @@ import validate from "@server/middlewares/validate";
 import type { APIContext } from "@server/types";
 import { AuthenticationType } from "@server/types";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
-import { findOutOfScopeProbe, OutOfScopeRefusal } from "./scope";
+import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
 
 const router = new Router();
@@ -91,16 +91,21 @@ router.post(
 
     // The provider's persona carries the knowledge-base boundary as prompt
     // text only, and honours it roughly 60% of the time – it answers general
-    // knowledge from memory otherwise. Reject an out-of-scope prompt here, so
-    // the boundary is structural and costs no upstream call or latency. See
-    // `scope.ts` for what this heuristic does and does not catch.
-    const outOfScopeProbe = findOutOfScopeProbe(messages);
-    if (outOfScopeProbe) {
-      Logger.warn("AI chat prompt rejected as out of scope", {
+    // knowledge from memory otherwise. Refuse here, unless the requesting user's
+    // own documents can ground the prompt, so the boundary is structural and
+    // costs no upstream call or latency on a refusal.
+    const ungroundedReason = await findUngroundedReason(user, messages);
+    if (ungroundedReason) {
+      Logger.warn("AI chat prompt rejected as ungrounded", {
         requestId,
-        probe: outOfScopeProbe,
+        reason: ungroundedReason,
       });
-      refuseWithSseError(ctx, t(OutOfScopeRefusal));
+      // Inlined, not `OutOfScopeRefusal`: i18next-parser sees string literals
+      // only. ai.test.ts fails if these two ever differ.
+      refuseWithSseError(
+        ctx,
+        t("This assistant only answers from this workspace’s knowledge base")
+      );
       return;
     }
 
