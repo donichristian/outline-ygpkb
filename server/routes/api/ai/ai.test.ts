@@ -140,6 +140,26 @@ describe("POST /api/ai.chat", () => {
     expect(res.status).toEqual(404);
   });
 
+  it("returns 404 when a provider is configured without a model", async () => {
+    const user = await buildUser();
+    user.team.setPreference(TeamPreference.AIChat, true);
+    await user.team.save();
+    env.AI_CHAT_BASE_URL = "http://localhost:20127/v1";
+    env.AI_CHAT_MODEL = undefined;
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await server.post("/api/ai.chat", user, {
+      body: { messages: [{ role: "user", content: "hi" }] },
+    });
+
+    expect(res.status).toEqual(404);
+    // A model-less request could only ever reach the provider as a broken
+    // upstream call, so the route must short-circuit before contacting it.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("returns 403 when a cookie-authenticated request is missing the CSRF token", async () => {
     const user = await buildUser();
     await configureAiChat(user.team);

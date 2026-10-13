@@ -71,12 +71,15 @@ router.post(
   async (ctx: APIContext<T.AiChatSchemaReq>) => {
     const { user } = ctx.state.auth;
 
-    // The feature is gated per-workspace and requires a configured provider.
-    // Both conditions return a 404 so the endpoint is indistinguishable from
-    // any other unknown route when unavailable.
+    // The feature is gated per-workspace and requires a fully configured
+    // provider – a base URL *and* a model. A base URL without a model can only
+    // produce a broken upstream request, so it is treated as no provider at
+    // all. All three conditions return a 404 so the endpoint is
+    // indistinguishable from any other unknown route when unavailable.
     if (
       !user.team.getPreference(TeamPreference.AIChat) ||
-      !env.AI_CHAT_BASE_URL
+      !env.AI_CHAT_BASE_URL ||
+      !env.AI_CHAT_MODEL
     ) {
       throw NotFoundError();
     }

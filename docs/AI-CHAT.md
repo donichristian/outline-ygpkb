@@ -84,16 +84,26 @@ text.
 > is not. See
 > [**§4 of the design doc**](./AI-CHAT-DESIGN.md#4-the-kb-boundary-rebuilt-three-times)
 > for the three-stage history of this boundary and its stated ceiling.
+>
+> **The term extractor assumes space-delimited scripts.** A prompt written in a
+> whitespace-free script — Han, Thai, Khmer, Lao, Myanmar, Japanese kana,
+> Hangul — arrives as one long unmatchable "word", so it degrades to near-total
+> refusal no matter what the workspace holds. Those refusals are now
+> distinguishable in the logs as `unsupported script`; a prompt that reduces to
+> a single token instead reports `no distinctive terms`. The refusal is still
+> fail-closed — the reason string changed, the decision did not.
 
 ## Environment variables
 
-All three are **optional**. With none set the feature is a safe no-op.
+All three are **optional**: the process boots without any of them and the
+feature is a safe no-op. `AI_CHAT_MODEL` is, however, required to *enable* chat
+once a provider is configured.
 
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `AI_CHAT_BASE_URL` | no | Base URL of an OpenAI-compatible provider, e.g. a URL ending in `/v1`. The route appends `/chat/completions`. When unset, the feature is disabled. |
 | `AI_CHAT_API_KEY` | no | **SECRET.** Sent as `Authorization: Bearer <key>` to the provider. **Server-side only — never sent to the browser.** |
-| `AI_CHAT_MODEL` | no | Model id forwarded as `model` in the upstream request body. |
+| `AI_CHAT_MODEL` | **when `AI_CHAT_BASE_URL` is set** | Model id forwarded as `model` in the upstream request body. With a base URL configured but no model, the route returns **404** and no upstream request is made. |
 
 Defined in `server/env.ts` (the `AI_CHAT_*` block). Notes:
 
@@ -104,6 +114,14 @@ Defined in `server/env.ts` (the `AI_CHAT_*` block). Notes:
   the error and calls `process.exit(1)` with a message like
   `AI_CHAT_API_KEY cannot be used without AI_CHAT_BASE_URL.` It is **not**
   silently ignored.
+- The reverse — a base URL **without** a model — is deliberately **not** a boot
+  failure. A missing model disables one route, not the configuration of the
+  whole cluster, and a hard failure here would take down web, worker, cron,
+  collaboration and websockets alike during a two-step env rollout. Instead the
+  server boots, logs `AI_CHAT_BASE_URL is set without AI_CHAT_MODEL; the AI chat
+  route will return 404 until AI_CHAT_MODEL is set.` via `console.warn`, and the
+  route gates on the model itself (`server/routes/api/ai/ai.ts`), returning 404
+  exactly as if no provider were configured.
 - `AI_CHAT_API_KEY` is deliberately **not** `@Public`, so it is never included
   in the serialized environment exposed to the client.
 - Setting **none** of the three is a safe no-op (see
@@ -258,6 +276,16 @@ When `AI_CHAT_BASE_URL` is not set (or the workspace toggle is off):
 - The server **boots normally** — there is no crash.
 - `POST /api/ai.chat` returns **404**; no upstream request is made.
 - The chat **panel is gated** and does not render an entry point.
+
+When `AI_CHAT_BASE_URL` **is** set but `AI_CHAT_MODEL` is unset:
+
+- The server **boots normally** — this is a warning, not a failure.
+- A one-line `console.warn` is logged:
+  `AI_CHAT_BASE_URL is set without AI_CHAT_MODEL; the AI chat route will return
+  404 until AI_CHAT_MODEL is set.`
+- `POST /api/ai.chat` returns **404**; no upstream request is made. A request
+  with no model could only ever reach the provider as a broken call, so the
+  route short-circuits before contacting it.
 
 Setting only `AI_CHAT_API_KEY`/`AI_CHAT_MODEL` (without `AI_CHAT_BASE_URL`) is
 the one exception: it is **rejected at boot** by the `@CannotUseWithout`

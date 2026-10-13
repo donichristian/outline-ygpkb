@@ -34,6 +34,18 @@ export class Environment {
   constructor() {
     process.nextTick(() => {
       void validate(this).then((errors) => {
+        // Non-fatal: a provider without a model disables one route, it does not
+        // invalidate the configuration of the other services in the cluster. A
+        // hard failure here would take down web, worker, cron, collaboration and
+        // websockets alike, and would crash-loop a two-step env rollout whose
+        // intermediate state is exactly this one. The route gates on the model
+        // itself (see `server/routes/api/ai/ai.ts`).
+        if (this.AI_CHAT_BASE_URL && !this.AI_CHAT_MODEL) {
+          console.warn(
+            "AI_CHAT_BASE_URL is set without AI_CHAT_MODEL; the AI chat route will return 404 until AI_CHAT_MODEL is set."
+          );
+        }
+
         if (errors.length > 0) {
           let output =
             "Environment configuration is invalid, please check the following:\n\n";
