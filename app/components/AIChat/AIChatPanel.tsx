@@ -117,7 +117,20 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
           });
         }
       } catch (err) {
-        if (controller.signal.aborted) {
+        if (err instanceof AiChatError && err.kind === "refusal") {
+          // A grounding refusal is the boundary answering, not a failure: write
+          // it into the trailing assistant turn so it reads as an ordinary
+          // transcript entry rather than a red error banner. The panel knows it
+          // is a refusal here at throw time, so no extra state is tracked.
+          setMessages((current) => {
+            const updated = current.slice();
+            updated[updated.length - 1] = {
+              role: "assistant",
+              content: err.message,
+            };
+            return updated;
+          });
+        } else if (controller.signal.aborted) {
           // A user-initiated stop is not an error.
         } else if (err instanceof AiChatError) {
           setError(err);
@@ -182,7 +195,14 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
                 dir="auto"
                 data-testid={`message-${message.role}`}
               >
-                {message.content}
+                {message.role === "assistant" ? (
+                  // Assistant output is an aria-live region so a refusal – which
+                  // renders inline without the error banner's visual affordance –
+                  // is still announced to assistive technology.
+                  <span role="status">{message.content}</span>
+                ) : (
+                  message.content
+                )}
                 {isStreaming &&
                   index === messages.length - 1 &&
                   message.role === "assistant" && <Cursor />}

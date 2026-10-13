@@ -42,11 +42,14 @@ function setSseHeaders(ctx: APIContext) {
 }
 
 /**
- * Ends the response with a single in-band `event: error` frame. This is the
- * same channel a mid-stream provider failure uses, so `app/utils/aiChat.ts`
- * raises an `AiChatError` of kind `stream` and the panel renders the message as
- * ordinary text – no client change, and the browser still receives a well-formed
- * stream rather than a bare error status.
+ * Ends the response with a single in-band `event: error` frame carrying a
+ * `kind: "refusal"` discriminator. The event name stays `error` so a browser
+ * holding a pre-rename client bundle still reads the payload's `error` field and
+ * degrades to the previous banner rather than silently dropping the answer. The
+ * `kind` field lets `app/utils/aiChat.ts` raise an `AiChatError` of kind
+ * `refusal`, which the panel renders as an ordinary assistant transcript turn –
+ * the boundary answering, not a failure – while the browser still receives a
+ * well-formed stream rather than a bare error status.
  *
  * @param ctx the request context.
  * @param message the user-facing message to deliver.
@@ -55,7 +58,7 @@ function refuseWithSseError(ctx: APIContext, message: string) {
   setSseHeaders(ctx);
 
   const body = new Readable({ read() {} });
-  body.push(Buffer.from(sseFrame({ error: message }, "error")));
+  body.push(Buffer.from(sseFrame({ error: message, kind: "refusal" }, "error")));
   body.push(null);
   ctx.body = body;
 }
@@ -68,12 +71,15 @@ router.post(
   async (ctx: APIContext<T.AiChatSchemaReq>) => {
     const { user } = ctx.state.auth;
 
-    // The feature is gated per-workspace and requires a configured provider.
-    // Both conditions return a 404 so the endpoint is indistinguishable from
-    // any other unknown route when unavailable.
+    // The feature is gated per-workspace and requires a fully configured
+    // provider – a base URL *and* a model. A base URL without a model can only
+    // produce a broken upstream request, so it is treated as no provider at
+    // all. All three conditions return a 404 so the endpoint is
+    // indistinguishable from any other unknown route when unavailable.
     if (
       !user.team.getPreference(TeamPreference.AIChat) ||
-      !env.AI_CHAT_BASE_URL
+      !env.AI_CHAT_BASE_URL ||
+      !env.AI_CHAT_MODEL
     ) {
       throw NotFoundError();
     }
@@ -93,7 +99,9 @@ router.post(
     // text only, and honours it roughly 60% of the time – it answers general
     // knowledge from memory otherwise. Refuse here, unless the requesting user's
     // own documents can ground the prompt, so the boundary is structural and
-    // costs no upstream call or latency on a refusal.
+    // costs no upstream call or latency on a refusal. The refusal is delivered
+    // with a `kind: "refusal"` discriminator (see `refuseWithSseError`) so the
+    // panel renders it as an ordinary transcript turn rather than an error.
     const ungroundedReason = await findUngroundedReason(user, messages);
     if (ungroundedReason) {
       Logger.warn("AI chat prompt rejected as ungrounded", {

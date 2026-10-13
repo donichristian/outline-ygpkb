@@ -246,6 +246,25 @@ describe("AIChatPanel", () => {
     cleanup();
   });
 
+  it("renders a grounding refusal inline as an assistant turn, not an error", async () => {
+    const refusal =
+      "This assistant only answers from this workspace’s knowledge base";
+    streamAiChat.mockImplementation(async function* () {
+      throw new AiChatError(refusal, "refusal");
+      // eslint-disable-next-line no-unreachable
+      yield { type: "delta", text: "" };
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel();
+    typeMessage("hi");
+    await submit();
+
+    expect(query("message-user")?.textContent).toBe("hi");
+    expect(query("message-assistant")?.textContent).toContain(refusal);
+    expect(query("ai-chat-error")).toBeNull();
+    cleanup();
+  });
+
   it("shows the session-expired message for a 403", async () => {
     streamAiChat.mockImplementation(async function* () {
       throw new AiChatError("CSRF token invalid", "http", 403);

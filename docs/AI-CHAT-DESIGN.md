@@ -62,8 +62,8 @@ sequenceDiagram
     Note over MW: "requestContext, koa-body, coalesceBody, userAgent, requestTracer,<br/>apiResponse, apiErrorHandler, editor, apiContext, verifyCSRFToken"
     MW->>Route: dispatch to router
     Route->>Route: "auth({type: [APP]}) - API keys cannot call this route"
-    Route->>Route: "validate(T.AiChatSchema)"
     Route->>Route: "rateLimiter(TenPerMinute)"
+    Route->>Route: "validate(T.AiChatSchema)"
     alt "workspace pref off or AI_CHAT_BASE_URL unset"
         Route-->>Util: "404 NotFoundError - indistinguishable from unknown route"
     else gate open
@@ -74,7 +74,7 @@ sequenceDiagram
         alt "total === 0 or search threw (fails closed)"
             Scope-->>Route: "ungroundedReason"
             Route-->>Util: "200 text/event-stream, one event: error frame (refusal)"
-            Util-->>Panel: "AiChatError kind=stream"
+            Util-->>Panel: "AiChatError kind=refusal"
             Panel-->>User: render refusal as ordinary text
         else "total > 0 (grounded)"
             Route->>Route: "ctx.compress = false, ctx.req.setTimeout(0)"
@@ -257,6 +257,14 @@ it after the upstream latency.
 - The gate is **deliberately biased toward refusing**, because a refusal is
   visible to the user and a hallucination is not. A false rejection costs one
   retry; a false acceptance is an ungrounded answer presented as a citation.
+- **The term extractor assumes space-delimited scripts.** Whether it retrieves
+  depends on the full-text search configuration, and a prompt written in a
+  whitespace-free script — Han, Thai, Khmer, Lao, Myanmar, Japanese kana,
+  Hangul — is submitted as a single long term with nothing to match, so it
+  degrades to near-total refusal regardless of what the workspace contains.
+  Those refusals are now distinguishable in the logs as `unsupported script`,
+  while a single-token prompt reports `no distinctive terms`. Only the reason
+  string differs; the decision is unchanged and still fail-closed.
 
 Cost: one search per request (two or three indexed queries on the read
 replica), on a route that previously did no database read. The upgrade path, if
@@ -428,11 +436,19 @@ document.
 |---|---|
 | `AI_CHAT_BASE_URL` | `@Public`, `@IsUrl` (http/https). Appends `/chat/completions`. Unset disables the feature. |
 | `AI_CHAT_API_KEY` | **Secret.** Deliberately **not** `@Public`, so it never serializes to the client. |
-| `AI_CHAT_MODEL` | Forwarded as `model` in the upstream body (§7). |
+| `AI_CHAT_MODEL` | Forwarded as `model` in the upstream body (§7). **Required to enable the route**: with `AI_CHAT_BASE_URL` set but no model, `POST /api/ai.chat` returns 404 and is never sent upstream. |
 
 All three are `@CannotUseWithout("AI_CHAT_BASE_URL")`, so setting the key or the
 model without the base URL is rejected at boot. The feature **fails soft**: an
 unset configuration is a safe no-op, not a broken server.
+
+The converse — a base URL configured **without** a model — is **not** a boot
+failure. `server/env.ts` logs a non-fatal warning and the process stays up; the
+route gates on the model and returns 404, identical to the disabled state. A
+boot failure was rejected because env validation runs once per process cluster,
+so it would stop web, worker, cron, collaboration and websockets for a
+single-route misconfiguration and crash-loop a two-step env rollout whose
+intermediate state is exactly this one.
 
 Local verification used `AI_CHAT_BASE_URL=http://127.0.0.1:8642/p/matius/v1` and
 `AI_CHAT_MODEL=matius` against the Hermes gateway.

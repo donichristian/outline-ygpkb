@@ -130,6 +130,54 @@ function buildProbeQuery(prompt: string): string | undefined {
 }
 
 /**
+ * The scripts this codebase cannot tokenize: they are written without spaces
+ * between words, while `buildProbeQuery` splits the prompt on whitespace and
+ * drops any term shorter than two characters. A whole sentence in one of these
+ * scripts therefore arrives as a single long "word" that a lexical `tsquery`
+ * cannot match, so the gate refuses it for a reason that has nothing to do with
+ * the workspace.
+ */
+const WhitespaceFreeScript =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Script=Thai}\p{Script=Khmer}\p{Script=Lao}\p{Script=Myanmar}]/u;
+
+/**
+ * The share of letters that must belong to a whitespace-free script for the
+ * prompt to be classified as one. Pinned at 50%: a plain majority, so an even
+ * split between scripts is *not* classified as whitespace-free. The threshold is
+ * a pinned decision rather than a tuned constant – the goal is to make the
+ * ceiling measurable in logs, not to maximize classification accuracy.
+ */
+const UntokenizableScriptRatio = 0.5;
+
+/**
+ * Reports whether a prompt is written in a script the term extractor cannot
+ * tokenize. The extractor splits on whitespace (`buildProbeQuery`), so a
+ * whitespace-free script degrades to near-total refusal; this only makes that
+ * refusal *say why* in the logs. It is a reason classifier, never a decision:
+ * the caller only consults it once retrieval has already returned no match, so
+ * it cannot turn a refusal into an allow.
+ *
+ * @param normalizedPrompt the prompt as returned by `normalize` – never raw user
+ *   text, because the ratio is measured over letters and raw text still carries
+ *   punctuation and the like.
+ * @returns true when whitespace-free-script letters are at least 50% of all
+ *   letters in the prompt, false otherwise.
+ */
+export function isUntokenizableScript(normalizedPrompt: string): boolean {
+  const letters = normalizedPrompt.match(/\p{L}/gu) ?? [];
+
+  if (!letters.length) {
+    return false;
+  }
+
+  const untokenizable = letters.filter((letter) =>
+    WhitespaceFreeScript.test(letter)
+  ).length;
+
+  return untokenizable / letters.length >= UntokenizableScriptRatio;
+}
+
+/**
  * Decides whether the workspace knowledge base can answer the conversation, by
  * searching the requesting user's own documents for the prompt and requiring at
  * least one accessible hit. Answers nothing locally – it only answers "is there
@@ -154,6 +202,16 @@ function buildProbeQuery(prompt: string): string | undefined {
  * if this proves too blunt: rank with embeddings, or keep the probe and add a
  * post-hoc check that the upstream stream actually cites a `/doc/` URL before any
  * token of it is flushed.
+ *
+ * ponytail: the term extractor assumes space-delimited scripts. A
+ * whitespace-free script (Han, Thai, Khmer, …) arrives as one long "word", so
+ * the probe degrades to near-total refusal regardless of what the workspace
+ * contains. That ceiling is now *distinguishable in the logs* as
+ * `unsupported script`, while a single-token prompt reports
+ * `no distinctive terms` – but neither is fixed here. Only the reason string
+ * changed; the decision did not. Upgrade path if this proves too blunt: segment
+ * the prompt with a language-aware tokenizer before extracting terms, and
+ * index those languages rather than relying on the default `tsquery` config.
  *
  * @param user the requesting user, whose access bounds the search.
  * @param messages the conversation as submitted by the client.
@@ -181,7 +239,15 @@ export async function findUngroundedReason(
       { query, filter: ProbeFilter, offset: 0, limit: 1 }
     );
 
-    return total > 0 ? undefined : "no matching document";
+    // Refining the reason string *after* retrieval came back empty leaves the
+    // decision untouched: `total > 0` stays the only path to `undefined`, every
+    // other path is a refusal. The call sits inside the `try` so a classifier
+    // throw degrades to "search failed" rather than escaping as a JSON 500.
+    return total > 0
+      ? undefined
+      : isUntokenizableScript(prompt)
+        ? "unsupported script"
+        : "no matching document";
   } catch (err) {
     Logger.error(
       "AI chat grounding search failed",

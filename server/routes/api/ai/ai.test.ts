@@ -140,6 +140,26 @@ describe("POST /api/ai.chat", () => {
     expect(res.status).toEqual(404);
   });
 
+  it("returns 404 when a provider is configured without a model", async () => {
+    const user = await buildUser();
+    user.team.setPreference(TeamPreference.AIChat, true);
+    await user.team.save();
+    env.AI_CHAT_BASE_URL = "http://localhost:20127/v1";
+    env.AI_CHAT_MODEL = undefined;
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await server.post("/api/ai.chat", user, {
+      body: { messages: [{ role: "user", content: "hi" }] },
+    });
+
+    expect(res.status).toEqual(404);
+    // A model-less request could only ever reach the provider as a broken
+    // upstream call, so the route must short-circuit before contacting it.
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("returns 403 when a cookie-authenticated request is missing the CSRF token", async () => {
     const user = await buildUser();
     await configureAiChat(user.team);
@@ -277,6 +297,9 @@ describe("POST /api/ai.chat", () => {
     const text = await res.text();
     expect(text).toContain("event: error");
     expect(text).toContain('{"error":"The AI chat stream failed"}');
+    // A mid-stream failure must never be tagged as a refusal – the two
+    // producers share `event: error` but must stay distinguishable by payload.
+    expect(text).not.toContain('"kind":"refusal"');
     expect(text).not.toContain("upstream socket reset");
   });
 
@@ -304,7 +327,14 @@ describe("POST /api/ai.chat", () => {
 
       const text = await res.text();
       expect(text).toContain("event: error");
-      expect(text).toContain(OutOfScopeRefusal);
+      // The payload carries the discriminator the panel branches on to render
+      // the refusal as a transcript turn. Asserting the exact frame locks the
+      // wire shape – a bare `{"error":…}` would also satisfy `toContain` above.
+      expect(text).toContain(
+        'data: {"error":"' + OutOfScopeRefusal + '","kind":"refusal"}'
+      );
+      expect(text).toContain('"kind":"refusal"');
+      expect(text).not.toContain('"kind":"stream"');
       // The whole point of the gate: the provider is never asked, so it cannot
       // leak a general-knowledge answer.
       expect(fetchMock).not.toHaveBeenCalled();
