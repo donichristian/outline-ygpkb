@@ -1915,6 +1915,7 @@
   "{{ user }} updated {{ timeAgo }}": "{{ user }} updated {{ timeAgo }}",
   "You created {{ timeAgo }}": "You created {{ timeAgo }}",
   "{{ user }} created {{ timeAgo }}": "{{ user }} created {{ timeAgo }}",
+  "This assistant only answers from this workspace’s knowledge base": "This assistant only answers from this workspace’s knowledge base",
   "Sorry, an error occurred uploading the file": "Sorry, an error occurred uploading the file",
   "Sorry, that type of link is not supported": "Sorry, that type of link is not supported",
   "Caption": "Caption",

@@ -13,7 +13,7 @@ import validate from "@server/middlewares/validate";
 import type { APIContext } from "@server/types";
 import { AuthenticationType } from "@server/types";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
-import { findUngroundedReason, OutOfScopeRefusal } from "./scope";
+import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
 
 const router = new Router();
@@ -100,7 +100,12 @@ router.post(
         requestId,
         reason: ungroundedReason,
       });
-      refuseWithSseError(ctx, t(OutOfScopeRefusal));
+      // Inlined, not `OutOfScopeRefusal`: i18next-parser sees string literals
+      // only. ai.test.ts fails if these two ever differ.
+      refuseWithSseError(
+        ctx,
+        t("This assistant only answers from this workspace’s knowledge base")
+      );
       return;
     }
 

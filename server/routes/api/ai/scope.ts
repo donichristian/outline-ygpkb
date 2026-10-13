@@ -9,9 +9,9 @@ type ChatMessages = AiChatSchemaReq["body"]["messages"];
 
 /**
  * The refusal sent to the browser when a prompt is rejected before any upstream
- * call is made. The English text doubles as its own translation key – `t()`
- * falls back to the key until `yarn build:i18n` extracts it into the locale
- * files.
+ * call is made. `ai.ts` inlines this text at its `t()` call instead of passing
+ * the constant, because i18next-parser extracts string literals only – the two
+ * are kept identical by a test rather than by this reference.
  */
 export const OutOfScopeRefusal =
   "This assistant only answers from this workspace’s knowledge base";

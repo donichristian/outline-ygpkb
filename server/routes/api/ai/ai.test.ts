@@ -1,4 +1,5 @@
 // @vitest-isolate true
+import { readFileSync } from "node:fs";
 import { TeamPreference } from "@shared/types";
 import env from "@server/env";
 import {
@@ -490,5 +491,19 @@ describe("POST /api/ai.chat", () => {
       expect(await res.text()).toContain(OutOfScopeRefusal);
       expect(fetchMock).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("out of scope refusal string", () => {
+  it("is inlined at the t() call and identical to the exported constant", () => {
+    // Reading the route source is what ties the two together – a runtime check
+    // cannot, since i18next falls back to the key while untranslated.
+    const source = readFileSync(new URL("./ai.ts", import.meta.url), "utf8");
+
+    // Pinned with the smart apostrophe: a straight one would be a second key.
+    expect(OutOfScopeRefusal).toEqual(
+      "This assistant only answers from this workspace’s knowledge base"
+    );
+    expect(source).toContain(`t("${OutOfScopeRefusal}")`);
   });
 });
