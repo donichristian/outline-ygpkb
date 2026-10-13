@@ -74,7 +74,7 @@ sequenceDiagram
         alt "total === 0 or search threw (fails closed)"
             Scope-->>Route: "ungroundedReason"
             Route-->>Util: "200 text/event-stream, one event: error frame (refusal)"
-            Util-->>Panel: "AiChatError kind=stream"
+            Util-->>Panel: "AiChatError kind=refusal"
             Panel-->>User: render refusal as ordinary text
         else "total > 0 (grounded)"
             Route->>Route: "ctx.compress = false, ctx.req.setTimeout(0)"
@@ -257,14 +257,6 @@ it after the upstream latency.
 - The gate is **deliberately biased toward refusing**, because a refusal is
   visible to the user and a hallucination is not. A false rejection costs one
   retry; a false acceptance is an ungrounded answer presented as a citation.
-- **The term extractor assumes space-delimited scripts.** Whether it retrieves
-  depends on the full-text search configuration, and a prompt written in a
-  whitespace-free script — Han, Thai, Khmer, Lao, Myanmar, Japanese kana,
-  Hangul — is submitted as a single long term with nothing to match, so it
-  degrades to near-total refusal regardless of what the workspace contains.
-  Those refusals are now distinguishable in the logs as `unsupported script`,
-  while a single-token prompt reports `no distinctive terms`. Only the reason
-  string differs; the decision is unchanged and still fail-closed.
 - **The term extractor assumes space-delimited scripts.** Whether it retrieves
   depends on the full-text search configuration, and a prompt written in a
   whitespace-free script — Han, Thai, Khmer, Lao, Myanmar, Japanese kana,
