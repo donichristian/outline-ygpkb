@@ -1,7 +1,11 @@
 // @vitest-isolate true
 import { TeamPreference } from "@shared/types";
 import env from "@server/env";
-import { buildUser } from "@server/test/factories";
+import {
+  buildCollection,
+  buildDocument,
+  buildUser,
+} from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
 import { OutOfScopeRefusal } from "./scope";
 
@@ -71,6 +75,29 @@ async function configureAiChat(team: {
   await team.save();
   env.AI_CHAT_BASE_URL = "http://localhost:20127/v1";
   env.AI_CHAT_MODEL = "test-model";
+}
+
+/**
+ * Seeds a document the given user can read, so the grounding gate has something
+ * to find. `title` is indexed alongside the body, so keep it free of any word a
+ * negative test expects NOT to match.
+ *
+ * @param user the document's creator, and therefore a reader.
+ * @param text the document body.
+ * @param title the document title.
+ * @returns the created document.
+ */
+function seedReadableDocument(
+  user: Awaited<ReturnType<typeof buildUser>>,
+  text: string,
+  title = "Reference notes"
+) {
+  return buildDocument({
+    teamId: user.teamId,
+    userId: user.id,
+    title,
+    text,
+  });
 }
 
 const originalBaseUrl = env.AI_CHAT_BASE_URL;
@@ -152,6 +179,10 @@ describe("POST /api/ai.chat", () => {
   it("streams the upstream SSE frames and does not compress the response", async () => {
     const user = await buildUser();
     await configureAiChat(user.team);
+    await seedReadableDocument(
+      user,
+      "The deployment runbook covers the payments service"
+    );
 
     const fetchMock = vi
       .fn()
@@ -165,7 +196,11 @@ describe("POST /api/ai.chat", () => {
     vi.stubGlobal("fetch", fetchMock);
 
     const res = await server.post("/api/ai.chat", user, {
-      body: { messages: [{ role: "user", content: "hi" }] },
+      body: {
+        messages: [
+          { role: "user", content: "What is the payments deployment runbook?" },
+        ],
+      },
     });
 
     expect(res.status).toEqual(200);
@@ -187,13 +222,16 @@ describe("POST /api/ai.chat", () => {
     expect(parsed).toMatchObject({
       model: "test-model",
       stream: true,
-      messages: [{ role: "user", content: "hi" }],
+      messages: [
+        { role: "user", content: "What is the payments deployment runbook?" },
+      ],
     });
   });
 
   it("returns a JSON error when the upstream rejects the request", async () => {
     const user = await buildUser();
     await configureAiChat(user.team);
+    await seedReadableDocument(user, "Details of the Zanzibar onboarding flow");
 
     vi.stubGlobal(
       "fetch",
@@ -201,7 +239,11 @@ describe("POST /api/ai.chat", () => {
     );
 
     const res = await server.post("/api/ai.chat", user, {
-      body: { messages: [{ role: "user", content: "hi" }] },
+      body: {
+        messages: [
+          { role: "user", content: "Describe the Zanzibar onboarding flow" },
+        ],
+      },
     });
 
     // The upstream status is preserved; the body is the sanitized JSON error
@@ -216,11 +258,14 @@ describe("POST /api/ai.chat", () => {
   it("terminates the stream with an in-band error frame when the upstream fails mid-flight", async () => {
     const user = await buildUser();
     await configureAiChat(user.team);
+    await seedReadableDocument(user, "Retention policy is reviewed each quarter");
 
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(failingStreamResponse()));
 
     const res = await server.post("/api/ai.chat", user, {
-      body: { messages: [{ role: "user", content: "hi" }] },
+      body: {
+        messages: [{ role: "user", content: "When is the retention policy reviewed?" }],
+      },
     });
 
     expect(res.status).toEqual(200);
@@ -234,9 +279,9 @@ describe("POST /api/ai.chat", () => {
     expect(text).not.toContain("upstream socket reset");
   });
 
-  describe("knowledge base scope gate", () => {
+  describe("knowledge base grounding gate", () => {
     /**
-     * Asserts that a request was refused with the in-band scope frame without
+     * Asserts that a request was refused with the in-band refusal frame without
      * ever reaching the provider.
      *
      * @param user the requesting user.
@@ -264,33 +309,101 @@ describe("POST /api/ai.chat", () => {
       expect(fetchMock).not.toHaveBeenCalled();
     }
 
-    it("refuses an off-topic prompt without contacting the provider", async () => {
+    it("allows a prompt matching a document the user can read", async () => {
       const user = await buildUser();
       await configureAiChat(user.team);
+      await seedReadableDocument(
+        user,
+        "The deployment runbook covers the payments service"
+      );
+
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          streamingResponse([
+            'data: {"choices":[{"delta":{"content":"See onboarding"}}]}\n\n',
+            "data: [DONE]\n\n",
+          ])
+        );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: {
+          messages: [
+            {
+              role: "user",
+              content: "What is the payments deployment runbook?",
+            },
+          ],
+        },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const text = await res.text();
+      expect(text).toContain(
+        '{"choices":[{"delta":{"content":"See onboarding"}}]}'
+      );
+      expect(text).toContain("data: [DONE]");
+      expect(text).not.toContain("event: error");
+    });
+
+    it("refuses a prompt matching nothing in the knowledge base", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+      await seedReadableDocument(user, "Unrelated onboarding steps");
+
+      await expectRefused(user, "How do I rotate the Kubernetes signing keys?");
+    });
+
+    it("refuses a general-knowledge probe that matches no document", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+      // A workspace that does have documents, none mentioning France — so the
+      // refusal is about retrieval, not about an empty workspace.
+      await seedReadableDocument(user, "Office locations and their timezones");
 
       await expectRefused(user, "What is the capital of France?");
     });
 
-    it("refuses a knowledge-base-looking question that shares a probe shape", async () => {
+    it("refuses a prompt whose only match is a document the user cannot read", async () => {
       const user = await buildUser();
       await configureAiChat(user.team);
 
-      // Documented policy: the gate fails closed on a matched shape. It cannot
-      // tell this apart from the general-knowledge probe above, so it refuses
-      // both rather than risk leaking. See the ponytail note in `scope.ts`.
-      await expectRefused(user, "What is the capital city of our Jakarta office?");
+      const stranger = await buildUser({ teamId: user.teamId });
+      const privateCollection = await buildCollection({
+        teamId: user.teamId,
+        userId: stranger.id,
+        permission: null,
+      });
+      await buildDocument({
+        teamId: user.teamId,
+        userId: stranger.id,
+        collectionId: privateCollection.id,
+        title: "Severance bands",
+        text: "Zanzibar severance bands are reviewed quarterly",
+      });
+
+      // The document exists and is indexed, but sits in a collection the
+      // requester has neither membership nor permission on, so the prompt
+      // cannot be used to learn that it is there.
+      await expectRefused(user, "What are the Zanzibar severance bands?");
     });
 
-    it("refuses a prompt padded with case, spacing, tabs and zero-width marks", async () => {
+    it("refuses a prompt whose only terms carry no topic", async () => {
       const user = await buildUser();
       await configureAiChat(user.team);
+      // Every word here is a function or question word, so there is no term to
+      // search with even though the workspace does have documents.
+      await seedReadableDocument(user, "Quarterly planning notes");
 
-      await expectRefused(user, "  wHaT\t\t Is  THe  CaPiTal   oF FrAnCe?  ");
+      await expectRefused(user, "Can you tell me anything about it?");
     });
 
     it("refuses whitespace-only content", async () => {
       const user = await buildUser();
       await configureAiChat(user.team);
+      await seedReadableDocument(user, "Quarterly planning notes");
 
       await expectRefused(user, "  \t \n ");
     });
@@ -298,6 +411,7 @@ describe("POST /api/ai.chat", () => {
     it("refuses a conversation with no user message", async () => {
       const user = await buildUser();
       await configureAiChat(user.team);
+      await seedReadableDocument(user, "Quarterly planning notes");
 
       const fetchMock = vi.fn();
       vi.stubGlobal("fetch", fetchMock);
@@ -321,42 +435,13 @@ describe("POST /api/ai.chat", () => {
       expect(res.status).toEqual(400);
     });
 
-    it("still streams an on-topic knowledge base question", async () => {
-      const user = await buildUser();
-      await configureAiChat(user.team);
-
-      const fetchMock = vi
-        .fn()
-        .mockResolvedValue(
-          streamingResponse([
-            'data: {"choices":[{"delta":{"content":"See onboarding"}}]}\n\n',
-            "data: [DONE]\n\n",
-          ])
-        );
-      vi.stubGlobal("fetch", fetchMock);
-
-      const res = await server.post("/api/ai.chat", user, {
-        body: {
-          messages: [
-            {
-              role: "user",
-              content: "What is the onboarding procedure for a new engineer?",
-            },
-          ],
-        },
-      });
-
-      expect(res.status).toEqual(200);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      const text = await res.text();
-      expect(text).toContain('{"choices":[{"delta":{"content":"See onboarding"}}]}');
-      expect(text).toContain("data: [DONE]");
-      expect(text).not.toContain("event: error");
-    });
-
     it("does not let an assistant echo re-trigger the gate on a later turn", async () => {
       const user = await buildUser();
       await configureAiChat(user.team);
+      await seedReadableDocument(
+        user,
+        "Travel reimbursement policy for expenses"
+      );
 
       const fetchMock = vi
         .fn()
@@ -367,7 +452,7 @@ describe("POST /api/ai.chat", () => {
         body: {
           messages: [
             // An earlier turn leaked the phrase into the transcript; only user
-            // messages are classified, so the conversation is not locked.
+            // messages are searched, so the conversation is not locked.
             { role: "user", content: "hi" },
             { role: "assistant", content: "What is the capital of France?" },
             { role: "user", content: "And our travel reimbursement policy?" },
@@ -378,6 +463,32 @@ describe("POST /api/ai.chat", () => {
       expect(res.status).toEqual(200);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       expect(await res.text()).not.toContain("event: error");
+    });
+
+    it("does not ground a prompt on an assistant message", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+      // The workspace holds a document matching only the assistant's words.
+      await seedReadableDocument(user, "Zanzibar severance policy");
+
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: {
+          messages: [
+            // The user's own term matches nothing; the assistant's would.
+            // Grounding on it would let an answer cite the model's prior
+            // output rather than a document.
+            { role: "user", content: "What about compensation?" },
+            { role: "assistant", content: "The Zanzibar severance policy." },
+          ],
+        },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(await res.text()).toContain(OutOfScopeRefusal);
+      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 });
