@@ -30,6 +30,7 @@ import NotificationBadge from "./NotificationBadge";
 import { PortalContext } from "./Portal";
 import CommandBar from "./CommandBar";
 import { AIChatProvider } from "./AIChat/AIChatContext";
+import AIChatTrigger from "./AIChat/AIChatTrigger";
 
 const SettingsSidebar = lazyWithRetry(
   () => import("~/components/Sidebar/Settings")
@@ -119,6 +120,7 @@ const AuthenticatedLayout: React.FC<Props> = ({ children }: Props) => {
                 {children}
                 <CommandBar />
                 <NotificationBadge />
+                <AIChatTrigger />
               </Layout>
             </DndProvider>
           </PortalContext.Provider>
