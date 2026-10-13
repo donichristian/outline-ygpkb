@@ -277,6 +277,9 @@ describe("POST /api/ai.chat", () => {
     const text = await res.text();
     expect(text).toContain("event: error");
     expect(text).toContain('{"error":"The AI chat stream failed"}');
+    // A mid-stream failure must never be tagged as a refusal – the two
+    // producers share `event: error` but must stay distinguishable by payload.
+    expect(text).not.toContain('"kind":"refusal"');
     expect(text).not.toContain("upstream socket reset");
   });
 
@@ -304,7 +307,14 @@ describe("POST /api/ai.chat", () => {
 
       const text = await res.text();
       expect(text).toContain("event: error");
-      expect(text).toContain(OutOfScopeRefusal);
+      // The payload carries the discriminator the panel branches on to render
+      // the refusal as a transcript turn. Asserting the exact frame locks the
+      // wire shape – a bare `{"error":…}` would also satisfy `toContain` above.
+      expect(text).toContain(
+        'data: {"error":"' + OutOfScopeRefusal + '","kind":"refusal"}'
+      );
+      expect(text).toContain('"kind":"refusal"');
+      expect(text).not.toContain('"kind":"stream"');
       // The whole point of the gate: the provider is never asked, so it cannot
       // leak a general-knowledge answer.
       expect(fetchMock).not.toHaveBeenCalled();

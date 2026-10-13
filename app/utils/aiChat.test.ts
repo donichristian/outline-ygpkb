@@ -117,6 +117,55 @@ describe("#parseSSEStream", () => {
     ).rejects.toMatchObject({ kind: "stream", message: "boom" });
   });
 
+  test("should parse a refusal frame as kind: refusal", async () => {
+    const refusal = "This assistant only answers from this workspace’s knowledge base";
+    const stream = streamOf(
+      encodeFrames([
+        `event: error\ndata: {"error":"${refusal}","kind":"refusal"}\n\n`,
+      ])
+    );
+
+    await expect(
+      collect(parseSSEStream(stream))
+    ).rejects.toMatchObject({ kind: "refusal", message: refusal });
+  });
+
+  test("should default an untyped error frame to kind: stream", async () => {
+    // No `kind` field: the legacy mid-stream failure shape must not be read as
+    // a refusal.
+    const stream = streamOf(
+      encodeFrames(['event: error\ndata: {"error":"boom"}\n\n'])
+    );
+
+    await expect(collect(parseSSEStream(stream))).rejects.toMatchObject({
+      kind: "stream",
+      message: "boom",
+    });
+  });
+
+  test("should treat a malformed error payload as kind: stream", async () => {
+    // An unparseable error is a failure, never a silent refusal.
+    const stream = streamOf(
+      encodeFrames(["event: error\ndata: not-json\n\n"])
+    );
+
+    await expect(collect(parseSSEStream(stream))).rejects.toMatchObject({
+      kind: "stream",
+      message: "The AI chat stream failed",
+    });
+  });
+
+  test("should round-trip the literal server refusal frame over the wire", async () => {
+    // The exact bytes the server asserts in ai.test.ts. This is the only test
+    // proving both ends agree on the wire contract.
+    const refusal = "This assistant only answers from this workspace’s knowledge base";
+    const frame = `event: error\ndata: {"error":"${refusal}","kind":"refusal"}\n\n`;
+
+    await expect(
+      collect(parseSSEStream(streamOf(encodeFrames([frame]))))
+    ).rejects.toMatchObject({ kind: "refusal", message: refusal });
+  });
+
   test("should ignore frames that carry no data", async () => {
     const stream = streamOf(encodeFrames([": keep-alive\n\n"]));
     const payloads = await collect(parseSSEStream(stream));

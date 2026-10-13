@@ -34,6 +34,8 @@ export type AiChatErrorKind =
   | "http"
   /** The provider failed mid-stream, surfaced as an in-band `event: error`. */
   | "stream"
+  /** The request was refused by the grounding gate before the provider was contacted. */
+  | "refusal"
   /** The transport failed, or the request was aborted. */
   | "network"
   /** A response frame could not be parsed as expected. */
@@ -110,8 +112,10 @@ function extractDelta(payload: unknown): string {
  * frame split mid-way through a `read()` never corrupts accumulation.
  *
  * A `data: [DONE]` frame terminates the generator without yielding. An
- * `event: error` frame throws an {@link AiChatError} of kind `stream`, carrying
- * the provider's message when the payload is JSON.
+ * `event: error` frame throws an {@link AiChatError}, carrying the provider's
+ * message when the payload is JSON: of kind `stream` by default, or
+ * `kind:"refusal"` when the payload also carries `kind:"refusal"` – the
+ * grounding gate refusing before the provider was contacted.
  *
  * @param body the response body reader's stream.
  * @returns an async generator of decoded SSE payloads.
@@ -195,7 +199,7 @@ function parseFrame(frame: string): ParsedFrame | undefined {
   const raw = dataLines.join("\n");
 
   if (event === "error") {
-    throw new AiChatError(errorMessage(raw), "stream");
+    throw new AiChatError(errorMessage(raw), errorKind(raw));
   }
 
   if (raw === "[DONE]") {
@@ -227,6 +231,28 @@ function errorMessage(raw: string): string {
   }
 
   return "The AI chat stream failed";
+}
+
+/**
+ * Discriminates an `event: error` frame by its payload `kind` field. The
+ * grounding gate tags its refusals with `kind: "refusal"`; every other producer
+ * (and any payload that fails to parse) yields `"stream"`, so a malformed or
+ * untagged error is never mistaken for a refusal.
+ *
+ * @param raw the raw error payload text.
+ * @returns the error kind to surface.
+ */
+function errorKind(raw: string): "refusal" | "stream" {
+  try {
+    const parsed = JSON.parse(raw) as { kind?: unknown };
+    if (parsed.kind === "refusal") {
+      return "refusal";
+    }
+  } catch {
+    // The payload was not JSON; treat it as a failure, never a refusal.
+  }
+
+  return "stream";
 }
 
 /**
