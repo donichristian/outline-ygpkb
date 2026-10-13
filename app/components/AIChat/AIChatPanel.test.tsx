@@ -77,14 +77,27 @@ function renderPanel() {
     container.querySelector(`[data-testid="${testid}"]`);
 
   const typeMessage = (text: string) => {
-    const input = query("ai-chat-input") as HTMLTextAreaElement;
+    const input = query("ai-chat-input") as HTMLInputElement;
     const setter = Object.getOwnPropertyDescriptor(
-      HTMLTextAreaElement.prototype,
+      HTMLInputElement.prototype,
       "value"
     )?.set;
     act(() => {
       setter?.call(input, text);
       input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+
+  const pressEnter = async () => {
+    const input = query("ai-chat-input") as HTMLInputElement;
+    await act(async () => {
+      input.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        })
+      );
     });
   };
 
@@ -97,13 +110,27 @@ function renderPanel() {
     });
   };
 
-  return { container, query, typeMessage, submit, onClose, cleanup };
+  return { container, query, typeMessage, pressEnter, submit, onClose, cleanup };
 }
 
 describe("AIChatPanel", () => {
   afterEach(() => {
     streamAiChat.mockReset();
     document.body.innerHTML = "";
+  });
+
+  it("sends the message when Enter is pressed in the prompt", async () => {
+    streamAiChat.mockImplementation(async function* () {
+      yield { type: "delta", text: "ok" };
+    });
+
+    const { query, typeMessage, pressEnter, cleanup } = renderPanel();
+    typeMessage("hi");
+    await pressEnter();
+
+    expect(streamAiChat).toHaveBeenCalledTimes(1);
+    expect(query("message-user")?.textContent).toBe("hi");
+    cleanup();
   });
 
   it("appends assistant text incrementally as deltas arrive", async () => {
