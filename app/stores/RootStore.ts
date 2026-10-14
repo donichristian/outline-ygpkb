@@ -1,6 +1,8 @@
 import invariant from "invariant";
 import { lowerFirst } from "es-toolkit/compat";
 import pluralize from "pluralize";
+import AIChatMessagesStore from "./AIChatMessagesStore";
+import AIChatSessionsStore from "./AIChatSessionsStore";
 import ApiKeysStore from "./ApiKeysStore";
 import AuthStore from "./AuthStore";
 import AuthenticationProvidersStore from "./AuthenticationProvidersStore";
@@ -38,6 +40,8 @@ import WebhookSubscriptionsStore from "./WebhookSubscriptionStore";
 import Store from "./base/Store";
 
 export default class RootStore {
+  aiChatMessages: AIChatMessagesStore;
+  aiChatSessions: AIChatSessionsStore;
   apiKeys: ApiKeysStore;
   auth: AuthStore;
   authenticationProviders: AuthenticationProvidersStore;
@@ -105,6 +109,17 @@ export default class RootStore {
     this.registerStore(FileOperationsStore);
     this.registerStore(WebhookSubscriptionsStore);
     this.registerStore(UserMembershipsStore);
+
+    // The fallback name for a store without an explicit name is
+    // `pluralize(lowerFirst(modelName))`, which for `"AIChatSession"` yields
+    // `aIChatSessions` (and `aIChatMessages`) — the leading `AI` is not
+    // capitalised the way lowerFirst assumes, so the generated field key would
+    // not match the `aiChatSessions` / `aiChatMessages` key that relation
+    // resolution expects. Pass the name explicitly to defeat the fallback. The
+    // stores keep `static modelName` of `"AIChatSession"` / `"AIChatMessage"`
+    // because that is what `getStoreForModelName` matches on.
+    this.registerStore(AIChatSessionsStore, "aiChatSessions");
+    this.registerStore(AIChatMessagesStore, "aiChatMessages");
 
     // Non-models
     this.registerStore(DocumentPresenceStore, "presence");
