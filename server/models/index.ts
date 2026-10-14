@@ -1,3 +1,7 @@
+export { default as AIChatMessage } from "./AIChatMessage";
+
+export { default as AIChatSession } from "./AIChatSession";
+
 export { default as ApiKey } from "./ApiKey";
 
 export { default as Attachment } from "./Attachment";
