@@ -3,9 +3,15 @@ import type { Filter } from "@shared/helpers/FilterHelper";
 import Logger from "@server/logging/Logger";
 import type { User } from "@server/models";
 import SearchProviderManager from "@server/utils/SearchProviderManager";
-import type { AiChatSchemaReq } from "./schema";
+import type { AiChatMessageInput } from "./schema";
 
-type ChatMessages = AiChatSchemaReq["body"]["messages"];
+/**
+ * A conversation as consumed by the grounding gate. Deliberately decoupled from
+ * the request schema: `AiChatSchemaReq["body"]["messages"]` is optional (a turn
+ * may continue a stored session instead), while the gate only ever needs a
+ * conversation that the caller has already resolved to a concrete array.
+ */
+type ChatMessages = AiChatMessageInput[];
 
 /**
  * The refusal sent to the browser when a prompt is rejected before any upstream
@@ -81,7 +87,7 @@ function normalize(input: string): string {
  * lock the conversation – and the newest turn comes first so a follow-up spends
  * the term budget on the current topic.
  *
- * @param messages the conversation as submitted by the client.
+ * @param messages the conversation as resolved by the caller.
  * @returns the normalized prompt, or an empty string when there is nothing to search.
  */
 function promptText(messages: ChatMessages): string {
@@ -214,7 +220,8 @@ export function isUntokenizableScript(normalizedPrompt: string): boolean {
  * index those languages rather than relying on the default `tsquery` config.
  *
  * @param user the requesting user, whose access bounds the search.
- * @param messages the conversation as submitted by the client.
+ * @param messages the conversation as resolved by the caller – the client array
+ *   for a standalone chat, the stored session window when continuing one.
  * @returns the refusal reason when the prompt cannot be grounded, otherwise undefined.
  */
 export async function findUngroundedReason(

@@ -10,11 +10,142 @@ import Logger from "@server/logging/Logger";
 import auth from "@server/middlewares/authentication";
 import { rateLimiter } from "@server/middlewares/rateLimiter";
 import validate from "@server/middlewares/validate";
+import { AIChatSession } from "@server/models";
+import type { User } from "@server/models";
+import AIChatMessage, { AIChatMessageRole } from "@server/models/AIChatMessage";
 import type { APIContext } from "@server/types";
 import { AuthenticationType } from "@server/types";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
 import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
+
+/** The validated context of a chat request. */
+type ChatContext = APIContext<T.AiChatSchemaReq>;
+
+/**
+ * A stored message row, narrowed to the two columns that may leave the server.
+ * `role` is widened to `string` so a value outside the allow-list is re-checked
+ * at runtime rather than trusted from the model's type.
+ */
+type StoredMessage = {
+  /** The authored role, re-asserted against {@link ForwardableRoles}. */
+  role: string;
+  /** The message text. */
+  content: string;
+};
+
+/**
+ * The roles a stored row may contribute to the upstream window. The provider
+ * also accepts a `system` role, which would override the server-side persona, so
+ * the allow-list is re-asserted on every row rather than trusted from the
+ * column type.
+ */
+const ForwardableRoles: ReadonlySet<string> = new Set<string>(
+  Object.values(AIChatMessageRole)
+);
+
+type ResolveUpstreamProps = {
+  /** The requesting user, who must own the session being continued. */
+  user: User;
+  /** The validated request context. */
+  ctx: ChatContext;
+  /** The stored conversation to continue, absent for a standalone chat. */
+  sessionId?: string;
+  /**
+   * The turn being started now, appended after the committed window because it
+   * is not in the database yet. Omitted once it has been persisted.
+   */
+  pendingTurn?: T.AiChatMessageInput;
+};
+
+/**
+ * Reports whether a stored role may be forwarded to the provider.
+ *
+ * @param role the role as stored.
+ * @returns true when the role is one the provider may receive.
+ */
+function isForwardableRole(role: string): role is T.AiChatMessageInput["role"] {
+  return ForwardableRoles.has(role);
+}
+
+/**
+ * Reduces stored rows to the conversation forwarded upstream, optionally
+ * followed by the turn being started now.
+ *
+ * Only `role` and `content` survive – `seq`, `status`, `runId`, `sessionId`,
+ * `teamId` and `userId` are storage concerns. The result is capped to the most
+ * recent `AiChatMaxMessages` entries, dropping the oldest context rather than the
+ * pending turn.
+ *
+ * @param rows the committed rows, in `seq ASC` order.
+ * @param pendingTurn the turn to append after the committed window, when it has
+ *   not been persisted yet.
+ * @returns the conversation to hand to the provider.
+ */
+export function toUpstreamMessages(
+  rows: readonly StoredMessage[],
+  pendingTurn?: T.AiChatMessageInput
+): T.AiChatMessageInput[] {
+  const committed: T.AiChatMessageInput[] = [];
+
+  for (const row of rows) {
+    if (isForwardableRole(row.role)) {
+      committed.push({ role: row.role, content: row.content });
+    }
+  }
+
+  return (
+    pendingTurn ? [...committed, pendingTurn] : committed
+  ).slice(-T.AiChatMaxMessages);
+}
+
+/**
+ * Resolves the conversation the provider is asked about.
+ *
+ * Without a `sessionId` the schema guarantees `messages`, so the client array is
+ * the whole conversation. With one, the upstream window is derived from the
+ * session's committed rows – never from the client – after ownership has been
+ * resolved, so a session belonging to another user raises `NotFoundError`
+ * before any provider call and without loading a single row.
+ *
+ * ponytail: `pendingTurn` exists so this resolver can be composed with the
+ * streaming path before that path persists the turn. Once the turn is written,
+ * pass nothing: the committed window already contains it, and supplying both
+ * would send the turn twice. Upgrade path if a turn ever needs retrying after
+ * the fetch: drop the rows that failed to persist before resolving, rather than
+ * widening this function to delete them.
+ *
+ * @param props the requester, the validated context, and the session or pending
+ *   turn to resolve.
+ * @returns the resolved conversation, capped and free of storage columns.
+ * @throws NotFoundError when the session does not exist or belongs to another
+ *   user.
+ */
+export async function resolveUpstreamMessages({
+  user,
+  ctx,
+  sessionId,
+  pendingTurn,
+}: ResolveUpstreamProps): Promise<T.AiChatMessageInput[]> {
+  if (!sessionId) {
+    return ctx.input.body.messages ?? [];
+  }
+
+  const session = await AIChatSession.findOwned(ctx, sessionId, user);
+
+  if (!session) {
+    throw NotFoundError();
+  }
+
+  const rows = await AIChatMessage.findAll({
+    attributes: ["seq", "role", "content"],
+    where: { sessionId: session.id },
+    order: [["seq", "ASC"]],
+    transaction: ctx.state.transaction,
+  });
+
+  return toUpstreamMessages(rows, pendingTurn);
+}
 
 const router = new Router();
 
@@ -84,8 +215,24 @@ router.post(
       throw NotFoundError();
     }
 
-    const { messages } = ctx.input.body;
+    const { messages, sessionId } = ctx.input.body;
     const requestId = ctx.get("x-request-id");
+
+    // Resolved once, before any consumer, so the grounding gate and the
+    // provider are asked about the same conversation: for a stored session that
+    // is the committed window, not the client array. A foreign `sessionId`
+    // raises here, before the response is switched to SSE and before the
+    // provider is contacted.
+    //
+    // `pendingTurn` carries the newest client message because it is not
+    // persisted yet. When the turn is written, stop passing it – the committed
+    // window then already contains it, and passing both would send it twice.
+    const resolvedMessages = await resolveUpstreamMessages({
+      user,
+      ctx,
+      sessionId,
+      pendingTurn: sessionId ? messages?.at(-1) : undefined,
+    });
 
     // SSE responses must not be compressed – buffering defeats incremental
     // delivery. koa-compress honors `ctx.compress = false` as a filter bypass.
@@ -102,7 +249,10 @@ router.post(
     // costs no upstream call or latency on a refusal. The refusal is delivered
     // with a `kind: "refusal"` discriminator (see `refuseWithSseError`) so the
     // panel renders it as an ordinary transcript turn rather than an error.
-    const ungroundedReason = await findUngroundedReason(user, messages);
+    const ungroundedReason = await findUngroundedReason(
+      user,
+      resolvedMessages
+    );
     if (ungroundedReason) {
       Logger.warn("AI chat prompt rejected as ungrounded", {
         requestId,
@@ -137,7 +287,7 @@ router.post(
       body: JSON.stringify({
         model: env.AI_CHAT_MODEL,
         stream: true,
-        messages,
+        messages: resolvedMessages,
       }),
       signal: ac.signal,
     });
