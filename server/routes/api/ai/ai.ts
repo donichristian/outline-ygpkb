@@ -5,6 +5,7 @@ import Router from "koa-router";
 import { v4 as uuidv4 } from "uuid";
 import { TeamPreference } from "@shared/types";
 import { toError } from "@shared/utils/error";
+import { Minute } from "@shared/utils/time";
 import aiChatMessageCreator from "@server/commands/aiChatMessageCreator";
 import env from "@server/env";
 import { NotFoundError } from "@server/errors";
@@ -22,6 +23,7 @@ import type { APIContext } from "@server/types";
 import { AuthenticationType } from "@server/types";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
 import { requestContext } from "@server/storage/requestContext";
+import Redis from "@server/storage/redis";
 import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
 
@@ -192,25 +194,56 @@ function setSseHeaders(ctx: APIContext) {
 }
 
 /**
+ * Seconds a held per-session in-flight lock survives without being released,
+ * which only happens when the process dies mid-stream and no exit ever runs.
+ *
+ * The trade-off is asymmetric, so the value sits at the slow end of plausible.
+ * A lock that expires while a legitimately slow completion is still streaming
+ * silently defeats the cap — a second turn is admitted for the same session and
+ * both race to allocate `seq` — whereas a lock that outlives a crash costs the
+ * session one refusal per TTL, and every ordinary exit releases explicitly. A
+ * completion over a full 50-message window routinely runs for a minute or two,
+ * so five minutes is well above a slow stream and well below the point where a
+ * stranded key would be noticed by a user.
+ */
+const AiChatInFlightLockTtlSeconds = 5 * Minute.seconds;
+
+/**
+ * The `kind` discriminators an `event: error` frame may carry.
+ *
+ * `refusal` is the grounding gate declining to answer, which the client renders
+ * as an ordinary assistant turn. `busy` is a second turn arriving while the
+ * first is still streaming, which is transient contention rather than a
+ * considered answer — folding the two together would make a permanent,
+ * knowledge-boundary refusal indistinguishable from "ask again in a moment",
+ * and the two want opposite UI. Anything else the client maps to a plain
+ * stream failure.
+ */
+type SseErrorKind = "refusal" | "busy";
+
+/**
  * Ends the response with a single in-band `event: error` frame carrying a
- * `kind: "refusal"` discriminator. The event name stays `error` so a browser
- * holding a pre-rename client bundle still reads the payload's `error` field and
- * degrades to the previous banner rather than silently dropping the answer. The
- * `kind` field lets `app/utils/aiChat.ts` raise an `AiChatError` of kind
- * `refusal`, which the panel renders as an ordinary assistant transcript turn –
- * the boundary answering, not a failure – while the browser still receives a
+ * `kind` discriminator. The event name stays `error` so a browser holding a
+ * pre-rename client bundle still reads the payload's `error` field and degrades
+ * to the previous banner rather than silently dropping the answer. The `kind`
+ * field lets `app/utils/aiChat.ts` raise an `AiChatError` of kind `refusal`,
+ * which the panel renders as an ordinary assistant transcript turn – the
+ * boundary answering, not a failure – while the browser still receives a
  * well-formed stream rather than a bare error status.
  *
  * @param ctx the request context.
  * @param message the user-facing message to deliver.
+ * @param kind the discriminator, defaulting to the grounding refusal.
  */
-function refuseWithSseError(ctx: APIContext, message: string) {
+function refuseWithSseError(
+  ctx: APIContext,
+  message: string,
+  kind: SseErrorKind = "refusal"
+) {
   setSseHeaders(ctx);
 
   const body = new Readable({ read() {} });
-  body.push(
-    Buffer.from(sseFrame({ error: message, kind: "refusal" }, "error"))
-  );
+  body.push(Buffer.from(sseFrame({ error: message, kind }, "error")));
   body.push(null);
   ctx.body = body;
 }
@@ -258,6 +291,78 @@ router.post(
     if (sessionId && !ownedSession) {
       throw NotFoundError();
     }
+
+    // At most one turn may be in flight per (user, session), so a double submit
+    // or a reconnect cannot open a second concurrent upstream call against the
+    // same conversation. The key is derived from the *owned* session, so it is
+    // scoped to a user that already passed the ownership check, and a stateless
+    // chat has no session to key on and is never locked.
+    //
+    // The value is this request's `runId`, which makes it an ownership token:
+    // release is a compare-and-delete, so a stream whose TTL expired mid-flight
+    // and whose key was re-acquired by a later turn cannot have *that* turn's
+    // lock deleted out from under it. The release is also idempotent, because
+    // all three exits below funnel through `finish`.
+    const inFlightLock = ownedSession
+      ? {
+          key: `aiChat:inflight:${user.id}:${ownedSession.id}`,
+          released: false,
+        }
+      : undefined;
+
+    if (inFlightLock) {
+      const acquired = await Redis.defaultClient.set(
+        inFlightLock.key,
+        runId,
+        "EX",
+        AiChatInFlightLockTtlSeconds,
+        "NX"
+      );
+
+      if (acquired !== "OK") {
+        Logger.warn("AI chat turn refused, another turn is already in flight", {
+          requestId,
+          sessionId: inFlightLock.key.split(":").at(-1),
+        });
+
+        // Refused in-band rather than thrown: the client is already expecting a
+        // stream from this endpoint, and a bare HTTP status here would leave it
+        // with no frame to attach the answer to.
+        refuseWithSseError(
+          ctx,
+          t("Another answer for this conversation is still being generated"),
+          "busy"
+        );
+        return;
+      }
+    }
+
+    /**
+     * Releases the in-flight lock, at most once. A no-op for a stateless chat,
+     * which never took one. Never rejects: a failed release must not take down
+     * the exit that called it, and the TTL bounds how long a stranded key can
+     * outlive it anyway.
+     */
+    const releaseInFlightLock = async () => {
+      if (!inFlightLock || inFlightLock.released) {
+        return;
+      }
+      inFlightLock.released = true;
+
+      try {
+        // Compare-and-delete: the value under the key must still be this
+        // request's `runId`. A bare `del` would remove a lock that a later turn
+        // had re-acquired after this one's TTL lapsed, un-capping that turn.
+        const script =
+          "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+        await Redis.defaultClient.eval(script, 1, inFlightLock.key, runId);
+      } catch (err) {
+        Logger.warn(
+          "AI chat in-flight lock could not be released",
+          toError(err)
+        );
+      }
+    };
 
     /**
      * Appends one row to the stored session, or does nothing for a stateless
@@ -379,6 +484,10 @@ router.post(
         ctx,
         t("This assistant only answers from this workspace’s knowledge base")
       );
+
+      // A refusal returns before the stream exists, so `finish` never runs for
+      // this request. The lock taken above would otherwise sit until its TTL.
+      await releaseInFlightLock();
       return;
     }
 
@@ -409,43 +518,56 @@ router.post(
       }
     });
 
-    const res = await fetch(`${env.AI_CHAT_BASE_URL}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(env.AI_CHAT_API_KEY
-          ? { Authorization: `Bearer ${env.AI_CHAT_API_KEY}` }
-          : {}),
-      },
-      body: JSON.stringify({
-        model: env.AI_CHAT_MODEL,
-        stream: true,
-        messages: resolvedMessages,
-      }),
-      signal: ac.signal,
-    });
+    // Opens the upstream stream. Nothing has been written to the client yet, so
+    // a failure here is an ordinary HTTP error rather than a broken pipe – but
+    // it is still an exit, and the lock has to go with it. Releasing inside the
+    // catch keeps the window between "provider unreachable" and "session usable
+    // again" at one round trip instead of the whole TTL.
+    let upstream: Readable;
+    try {
+      const res = await fetch(`${env.AI_CHAT_BASE_URL}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(env.AI_CHAT_API_KEY
+            ? { Authorization: `Bearer ${env.AI_CHAT_API_KEY}` }
+            : {}),
+        },
+        body: JSON.stringify({
+          model: env.AI_CHAT_MODEL,
+          stream: true,
+          messages: resolvedMessages,
+        }),
+        signal: ac.signal,
+      });
 
-    // The upstream refused the request. Nothing has been written to the client
-    // yet, so throw a normal error that the API error handler renders as JSON.
-    // The provider's own message is logged only – it can carry prompts, internal
-    // hostnames or account identifiers.
-    if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      Logger.error(
-        "AI chat upstream request failed",
-        toError(
-          new Error(
-            `Upstream returned ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ""}`
-          )
-        ),
-        { status: res.status, requestId }
-      );
+      // The upstream refused the request. Nothing has been written to the
+      // client yet, so throw a normal error that the API error handler renders
+      // as JSON. The provider's own message is logged only – it can carry
+      // prompts, internal hostnames or account identifiers.
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        Logger.error(
+          "AI chat upstream request failed",
+          toError(
+            new Error(
+              `Upstream returned ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ""}`
+            )
+          ),
+          { status: res.status, requestId }
+        );
 
-      ctx.throw(res.status, "AI chat provider error");
-    }
+        ctx.throw(res.status, "AI chat provider error");
+      }
 
-    if (!res.body) {
-      ctx.throw(502, "AI chat provider returned an empty response");
+      if (!res.body) {
+        ctx.throw(502, "AI chat provider returned an empty response");
+      }
+
+      upstream = Readable.fromWeb(res.body as NodeReadableStream<Uint8Array>);
+    } catch (err) {
+      await releaseInFlightLock();
+      throw err;
     }
 
     setSseHeaders(ctx);
@@ -454,12 +576,6 @@ router.post(
     // in-band SSE frame rather than surfacing as a broken pipe. `body` is the
     // only writer on the socket – koa pipes it into `ctx.res` – so a second
     // writer would interleave and corrupt frames.
-    // The global `ReadableStream` comes from the fetch typings while
-    // `Readable.fromWeb` wants the `node:stream/web` one – same shape, different
-    // declaration, so the cast is unavoidable.
-    const upstream = Readable.fromWeb(
-      res.body as NodeReadableStream<Uint8Array>
-    );
     const body = new Readable({ read() {} });
     let ended = false;
 
@@ -529,16 +645,21 @@ router.post(
       // before the first token, a provider that only sent `[DONE]` – would
       // store a blank bubble indistinguishable from a lost answer.
       if (!content) {
-        end();
+        void releaseInFlightLock().finally(end);
         return;
       }
 
       // The response is only terminated once the turn is durable, so a client
       // that reloads history the instant it sees the terminal frame cannot
       // race the insert. `appendTurn` cannot reject, so `end` always runs.
-      void appendTurn(AIChatMessageRole.Assistant, content, status).finally(
-        end
-      );
+      //
+      // The lock is released in the same breath: a later turn acquires it, then
+      // resolves the upstream window from the database, so dropping it before
+      // the row is committed would let that turn read a window missing the
+      // answer it is meant to continue from.
+      void appendTurn(AIChatMessageRole.Assistant, content, status)
+        .then(() => releaseInFlightLock())
+        .finally(end);
     };
 
     // Reads the delta text and the terminal reason out of every complete frame
@@ -616,7 +737,6 @@ router.post(
     });
 
     onClientGone = () => finish(AIChatMessageStatus.Aborted);
-
     ctx.body = body;
   }
 );
