@@ -2,6 +2,7 @@
 export * from "./cancan";
 
 // Import all policies
+import "./aiChatSession";
 import "./apiKey";
 import "./attachment";
 import "./authenticationProvider";
