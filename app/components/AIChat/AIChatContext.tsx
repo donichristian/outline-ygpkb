@@ -57,6 +57,19 @@ export function openAIChatPanel(): void {
   openHandler?.();
 }
 
+const noop = () => undefined;
+
+/**
+ * The panel as the sidebar sees it: a component with no props. It reads `close`
+ * from the AI chat context instead of receiving it, so the element handed to the
+ * sidebar cannot change when the provider re-renders. The Document sidebar
+ * solves the same problem the same way with `DocumentSidebarContent`.
+ */
+const AIChatSidebarContent = function AIChatSidebarContent() {
+  const controls = useAIChatPanel();
+  return <AIChatPanel onClose={controls?.close ?? noop} />;
+};
+
 /**
  * Mounts the AI chat panel into the right sidebar whenever it is open, mirroring
  * the pattern used by the Document sidebar. Renders nothing itself – it drives
@@ -65,20 +78,20 @@ export function openAIChatPanel(): void {
  */
 const AIChatContent = observer(function AIChatContent({
   isOpen,
-  onClose,
 }: {
   isOpen: boolean;
-  onClose: () => void;
 }) {
   const setSidebar = useSetRightSidebar();
 
+  // Memoized so the sidebar element is referentially stable for the lifetime of
+  // the provider. Handing the sidebar a different element tears the panel subtree
+  // down and back up, discarding its component state – invisible until the
+  // transcript silently resets. The effect depends on the open flag alone.
+  const panel = React.useMemo(() => <AIChatSidebarContent />, []);
+
   React.useEffect(() => {
-    if (isOpen) {
-      setSidebar(<AIChatPanel onClose={onClose} />);
-    } else {
-      setSidebar(null);
-    }
-  }, [isOpen, onClose, setSidebar]);
+    setSidebar(isOpen ? panel : null);
+  }, [isOpen, panel, setSidebar]);
 
   // Clear the sidebar content if the panel unmounts while open so a stale panel
   // does not linger after the provider goes away.
@@ -111,6 +124,7 @@ export function AIChatProvider({ children }: { children: React.ReactNode }) {
   // preference collapses an already-open panel without an effect.
   const isOpen = enabled && requested;
 
+  const handleOpen = React.useCallback(() => setRequested(true), []);
   const handleClose = React.useCallback(() => setRequested(false), []);
 
   const controls = React.useMemo<AIChatControls | null>(() => {
@@ -119,11 +133,11 @@ export function AIChatProvider({ children }: { children: React.ReactNode }) {
     }
 
     return {
-      open: () => setRequested(true),
-      close: () => setRequested(false),
+      open: handleOpen,
+      close: handleClose,
       isOpen,
     };
-  }, [enabled, isOpen]);
+  }, [enabled, isOpen, handleOpen, handleClose]);
 
   // Publish the open callback to the module bridge so the command-bar action
   // can reach it, but only while the workspace gate is on.
@@ -132,12 +146,12 @@ export function AIChatProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    return registerAIChatOpenHandler(() => setRequested(true));
-  }, [enabled]);
+    return registerAIChatOpenHandler(handleOpen);
+  }, [enabled, handleOpen]);
 
   return (
     <AIChatContext.Provider value={controls}>
-      {enabled && <AIChatContent isOpen={isOpen} onClose={handleClose} />}
+      {enabled && <AIChatContent isOpen={isOpen} />}
       {children}
     </AIChatContext.Provider>
   );
