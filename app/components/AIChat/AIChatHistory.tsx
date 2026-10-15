@@ -19,6 +19,7 @@ import useCurrentUser from "~/hooks/useCurrentUser";
 import useMobile from "~/hooks/useMobile";
 import useStores from "~/hooks/useStores";
 import type AIChatSession from "~/models/AIChatSession";
+import { clearDraft } from "~/utils/aiChat";
 
 type Props = {
   /** The session whose conversation is currently displayed, if any. */
@@ -82,6 +83,10 @@ const AIChatHistory = observer(function AIChatHistory({
 
       try {
         await aiChatSessions.delete(session);
+        // The draft belongs to a conversation that can never be reopened, so
+        // storing it under the session's key would orphan it in localStorage
+        // forever. Cleared only once the delete has actually succeeded.
+        clearDraft(session.id);
         // The deleted conversation is the one on screen, so there is nothing
         // left to display: start a fresh one instead of leaving the panel
         // pointed at a session that no longer exists.

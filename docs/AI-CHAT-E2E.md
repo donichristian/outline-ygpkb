@@ -36,10 +36,15 @@ surface that no test of any kind reaches.
 (7 files / 117 tests), green. Representative names, each grepped out of the file
 it is cited from:
 
-- `app/components/AIChat/AIChatPanel.test.tsx` — `keeps the transcript when the panel is closed and reopened`; `shows each session's own transcript when switching between sessions`
-- `app/components/AIChat/AIChatHistory.test.tsx` — `lists the user's sessions and switches to the correct transcript`; `renders the transcript ordered by seq ascending, not by createdAt`; `deleting the active session starts a new one`
+- `app/components/AIChat/AIChatPanel.test.tsx` — `restores the active conversation when the panel is closed and reopened`; `shows each session's own transcript when switching between sessions`
+- `app/components/AIChat/AIChatHistory.test.tsx` — `lists the user's sessions and switches to the correct transcript`; `renders the transcript ordered by seq ascending, not by createdAt`; `deleting the active session starts a new one`; `garbage-collects the deleted session's draft`
 - `app/components/AIChat/AIChatContext.test.tsx` — `reuses the same element object after a close and reopen`
-- `app/utils/aiChat.test.ts` — `listMessages should return the messages/truncated/cursor envelope`; `deleteSession should hit ai.sessions.delete with the session id`; `should round-trip a draft through storage`
+- `app/utils/aiChat.test.ts` — `should round-trip a draft through storage`; `should not leak one session's draft into another's key`
+
+The guarantee that a deleted session's draft is discarded is pinned in
+`app/components/AIChat/AIChatHistory.test.tsx`, not in `app/utils/aiChat.test.ts`:
+the storage helper still round-trips a draft, but only the component test can
+assert that deletion reaches the draft.
 
 ## 4. The gap
 

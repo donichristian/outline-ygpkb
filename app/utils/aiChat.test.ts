@@ -2,11 +2,7 @@ import { client } from "~/utils/ApiClient";
 import {
   AiChatError,
   clearDraft,
-  createSession,
-  deleteSession,
   flushDrafts,
-  listMessages,
-  listSessions,
   parseSSEStream,
   readDraft,
   streamAiChat,
@@ -556,101 +552,6 @@ describe("#streamAiChat", () => {
   });
 });
 
-describe("session helpers", () => {
-  const post = vi.mocked(client.post);
-  const session = {
-    id: "session-1",
-    title: "First",
-    createdAt: "2026-01-01T00:00:00.000Z",
-    updatedAt: "2026-01-02T00:00:00.000Z",
-  };
-
-  beforeEach(() => {
-    post.mockReset();
-  });
-
-  test("createSession should hit ai.sessions.create and return the session", async () => {
-    post.mockResolvedValueOnce({ data: session } as never);
-
-    expect(await createSession("First")).toEqual(session);
-    expect(post).toHaveBeenCalledWith("/ai.sessions.create", {
-      title: "First",
-    });
-  });
-
-  test("createSession should omit an absent title rather than send undefined", async () => {
-    post.mockResolvedValueOnce({ data: session } as never);
-
-    await createSession();
-
-    const body = post.mock.calls[0][1] as Record<string, unknown>;
-    expect(Object.keys(body)).toEqual([]);
-  });
-
-  test("listSessions should hit ai.sessions.list and unwrap the array", async () => {
-    post.mockResolvedValueOnce({ data: { sessions: [session] } } as never);
-
-    expect(await listSessions()).toEqual([session]);
-    expect(post).toHaveBeenCalledWith("/ai.sessions.list", {});
-  });
-
-  test("listMessages should return the messages/truncated/cursor envelope", async () => {
-    const message = {
-      id: "m1",
-      seq: 4,
-      role: "assistant",
-      content: "hi",
-      status: "truncated",
-      runId: "run-1",
-      createdAt: "2026-01-02T00:00:00.000Z",
-    };
-    post.mockResolvedValueOnce({
-      data: { messages: [message], truncated: true, cursor: 4 },
-    } as never);
-
-    expect(await listMessages("session-1")).toEqual({
-      messages: [message],
-      truncated: true,
-      cursor: 4,
-    });
-  });
-
-  test("listMessages should thread the beforeSeq cursor", async () => {
-    post.mockResolvedValueOnce({
-      data: { messages: [], truncated: false },
-    } as never);
-
-    const page = await listMessages("session-1", 7);
-
-    expect(post).toHaveBeenCalledWith("/ai.messages.list", {
-      sessionId: "session-1",
-      beforeSeq: 7,
-    });
-    expect(page.cursor).toBeUndefined();
-  });
-
-  test("listMessages should not send a beforeSeq key when paging from the start", async () => {
-    post.mockResolvedValueOnce({
-      data: { messages: [], truncated: false },
-    } as never);
-
-    await listMessages("session-1");
-
-    const body = post.mock.calls[0][1] as Record<string, unknown>;
-    expect(Object.keys(body)).toEqual(["sessionId"]);
-  });
-
-  test("deleteSession should hit ai.sessions.delete with the session id", async () => {
-    post.mockResolvedValueOnce({ success: true } as never);
-
-    await deleteSession("session-1");
-
-    expect(post).toHaveBeenCalledWith("/ai.sessions.delete", {
-      id: "session-1",
-    });
-  });
-});
-
 describe("draft helpers", () => {
   const sessionA = "aaaaaaaa-0000-4000-8000-000000000000";
   const sessionB = "bbbbbbbb-0000-4000-8000-000000000000";
@@ -711,16 +612,6 @@ describe("draft helpers", () => {
     expect(readDraft(sessionB)).toBe("b");
   });
 
-  test("should garbage-collect the draft when the session is deleted", async () => {
-    writeDraft("orphaned draft", sessionA);
-    flushDrafts();
-    vi.mocked(client.post).mockResolvedValueOnce({ success: true } as never);
-
-    await deleteSession(sessionA);
-
-    expect(readDraft(sessionA)).toBe("");
-  });
-
   test("should degrade to no draft when storage throws on access", () => {
     const original = Object.getOwnPropertyDescriptor(window, "localStorage");
     Object.defineProperty(window, "localStorage", {
@@ -745,7 +636,7 @@ describe("draft helpers", () => {
     }
   });
 
-  test("should degrade to no draft when a storage write throws", async () => {
+  test("should degrade to no draft when a storage write throws", () => {
     const original = Object.getOwnPropertyDescriptor(window, "localStorage");
     Object.defineProperty(window, "localStorage", {
       configurable: true,
@@ -757,7 +648,6 @@ describe("draft helpers", () => {
         removeItem: () => undefined,
       },
     });
-    vi.mocked(client.post).mockResolvedValueOnce({ success: true } as never);
 
     try {
       expect(() => writeDraft("too big", sessionA)).not.toThrow();
@@ -766,7 +656,9 @@ describe("draft helpers", () => {
       expect(() =>
         writeDraft("still fine after the quota error", sessionA)
       ).not.toThrow();
-      await expect(deleteSession(sessionA)).resolves.toBeUndefined();
+      // Clearing must still work after a failed write, or a draft that failed to
+      // save could never be discarded either.
+      expect(() => clearDraft(sessionA)).not.toThrow();
     } finally {
       if (original) {
         Object.defineProperty(window, "localStorage", original);

@@ -7,6 +7,7 @@ import { MobXProviderContext } from "mobx-react";
 import { ThemeProvider } from "styled-components";
 import { buildLightTheme } from "@shared/styles/theme";
 import RootStore from "~/stores/RootStore";
+import { flushDrafts, writeDraft } from "~/utils/aiChat";
 import AIChatPanel from "./AIChatPanel";
 import type * as AiChatModule from "~/utils/aiChat";
 
@@ -369,6 +370,29 @@ describe("AIChatPanel — history, status markers, disclosure", () => {
 
     expect(rootStore.aiChatSessions.get("session-b")).toBeUndefined();
     expect(rootStore.aiChatSessions.sessionsByRecency).toHaveLength(1);
+
+    panel.cleanup();
+  });
+
+  it("garbage-collects the deleted session's draft", async () => {
+    const { rootStore, panel } = await mountWith([alphaSeed, betaSeed]);
+
+    writeDraft("half-typed question", "session-b");
+    flushDrafts();
+    // Assert against the literal storage key, not `draftKey`, so the test pins
+    // the real contract in `localStorage` rather than the helper's own naming.
+    expect(window.localStorage.getItem("aiChat.draft.session-b")).toBe(
+      "half-typed question"
+    );
+
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-delete-session-b"));
+    await panel.click(panel.query("ai-chat-delete-confirm-session-b"));
+
+    expect(rootStore.aiChatSessions.get("session-b")).toBeUndefined();
+    // Nothing else removes this key. Without the delete path clearing it, the
+    // draft outlives a conversation that can no longer be reopened.
+    expect(window.localStorage.getItem("aiChat.draft.session-b")).toBeNull();
 
     panel.cleanup();
   });

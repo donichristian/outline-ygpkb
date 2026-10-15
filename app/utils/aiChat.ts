@@ -2,7 +2,6 @@ import { debounce } from "es-toolkit/compat";
 import EDITOR_VERSION from "@shared/editor/version";
 import { CSRF } from "@shared/constants";
 import { getCSRFToken } from "./csrf";
-import { client } from "~/utils/ApiClient";
 
 /**
  * A single message in an AI chat conversation. Mirrors the server schema in
@@ -492,120 +491,6 @@ async function toHttpError(res: Response): Promise<AiChatError> {
   }
 
   return new AiChatError(message, "http", res.status);
-}
-
-/** A stored chat session, as the sessions API returns it. */
-export interface AiChatSessionSummary {
-  /** The session identifier. */
-  id: string;
-  /** The user-supplied name, or null while the session is untitled. */
-  title: string | null;
-  /** When the session was created. */
-  createdAt: string;
-  /** When the session last received a turn; the sessions list sorts on this. */
-  updatedAt: string;
-}
-
-/** A stored chat turn, as the messages API returns it. */
-export interface AiChatStoredMessage {
-  /** The message identifier. */
-  id: string;
-  /** The position of this turn within the session. */
-  seq: number;
-  /** The author of the turn. */
-  role: AiChatMessage["role"];
-  /** The message body. */
-  content: string;
-  /** How the turn ended. */
-  status: AiChatTurnStatus;
-  /** The generation run that produced this turn, when it has one. */
-  runId: string | null;
-  /** When the turn was recorded. */
-  createdAt: string;
-}
-
-/**
- * One page of session history. `truncated` means older turns exist below this
- * page; `cursor` is the `seq` to pass as `beforeSeq` to reach them, and is only
- * present while there is something to fetch.
- */
-export interface AiChatMessagePage {
-  /** The turns in this page, newest `seq` first. */
-  messages: AiChatStoredMessage[];
-  /** Whether older turns exist beyond this page. */
-  truncated: boolean;
-  /** The cursor for the next page, when one exists. */
-  cursor?: number;
-}
-
-/**
- * Creates a stored chat session.
- *
- * @param title an optional name for the conversation.
- * @returns the created session.
- */
-export async function createSession(
-  title?: string
-): Promise<AiChatSessionSummary> {
-  const res = await client.post<{ data: AiChatSessionSummary }>(
-    "/ai.sessions.create",
-    title === undefined ? {} : { title }
-  );
-
-  return res.data;
-}
-
-/**
- * Lists the caller's chat sessions, newest activity first.
- *
- * @returns every session visible to the current user.
- */
-export async function listSessions(): Promise<AiChatSessionSummary[]> {
-  const res = await client.post<{
-    data: { sessions: AiChatSessionSummary[] };
-  }>("/ai.sessions.list", {});
-
-  return res.data.sessions;
-}
-
-/**
- * Loads one page of a session's history, newest turn first.
- *
- * @param sessionId the session to read.
- * @param beforeSeq an exclusive upper bound, to page backwards through history.
- * @returns the page together with its truncation flag and cursor.
- */
-export async function listMessages(
-  sessionId: string,
-  beforeSeq?: number
-): Promise<AiChatMessagePage> {
-  const res = await client.post<{
-    data: {
-      messages: AiChatStoredMessage[];
-      truncated: boolean;
-      cursor?: number;
-    };
-  }>(
-    "/ai.messages.list",
-    beforeSeq === undefined ? { sessionId } : { sessionId, beforeSeq }
-  );
-
-  return {
-    messages: res.data.messages,
-    truncated: res.data.truncated,
-    cursor: res.data.cursor,
-  };
-}
-
-/**
- * Deletes a chat session and its turns, and garbage-collects the draft stored
- * under its key so an unreachable draft cannot outlive its conversation.
- *
- * @param id the session to delete.
- */
-export async function deleteSession(id: string): Promise<void> {
-  await client.post("/ai.sessions.delete", { id });
-  clearDraft(id);
 }
 
 /** The `localStorage` key prefix a composer draft is stored under. */

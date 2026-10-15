@@ -159,8 +159,13 @@ export function AIChatProvider({ children }: { children: React.ReactNode }) {
 
 /**
  * Returns the AI chat panel controls, or `null` when AI chat is not enabled for
- * the current workspace. Todo 6 (the command-bar action) should call this hook
- * and invoke `open()` from the action's `perform`.
+ * the current workspace.
+ *
+ * This hook is for in-tree React callers – the sidebar content that mounts the
+ * panel reads `close` from it. The command-bar action is a plain object with no
+ * React context, so it does not use this hook: it calls the module bridge
+ * {@link openAIChatPanel}, which invokes the provider's `open` callback when one
+ * is registered and is a no-op otherwise.
  *
  * @returns the panel controls, or `null` when disabled.
  */
