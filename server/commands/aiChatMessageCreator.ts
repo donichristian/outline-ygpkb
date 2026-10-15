@@ -104,9 +104,7 @@ export default async function aiChatMessageCreator({
         runId: runId ?? null,
       });
 
-      const updates: { updatedAt: Date; title?: string } = {
-        updatedAt: new Date(),
-      };
+      const updates: { title?: string } = {};
 
       // The title is only ever filled in once, a later turn must not rename a
       // conversation the user has already seen.
@@ -114,13 +112,13 @@ export default async function aiChatMessageCreator({
         updates.title = truncate(content.trim(), { length: titleMaxLength });
       }
 
-      // A targeted column update. Saving the model would write back every
-      // column it was loaded with and clobber a concurrent write.
-      await AIChatSession.update(updates, {
-        where: { id: session.id },
-        transaction,
-        silent: true,
-      });
+      // An instance update rather than a static one: `save` writes only the
+      // attributes `set` marked as changed (plus `updatedAt`), so the column
+      // footprint is the targeted one – and unlike the static `update` it fires
+      // the instance `@AfterUpdate` hook, so the timestamp bump is audited
+      // instead of writing an event row for nothing at all. The row is already
+      // held `FOR UPDATE` above, so no concurrent write can be clobbered.
+      await session.updateWithCtx(txCtx, updates);
 
       return message;
     })

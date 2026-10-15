@@ -1,20 +1,18 @@
 import Router from "koa-router";
 import { Op } from "sequelize";
-import { TeamPreference } from "@shared/types";
 import aiChatSessionCreator from "@server/commands/aiChatSessionCreator";
 import aiChatSessionDestroyer from "@server/commands/aiChatSessionDestroyer";
-import env from "@server/env";
 import { NotFoundError } from "@server/errors";
 import auth from "@server/middlewares/authentication";
 import { rateLimiter } from "@server/middlewares/rateLimiter";
 import { transaction } from "@server/middlewares/transaction";
 import validate from "@server/middlewares/validate";
 import { AIChatMessage, AIChatSession } from "@server/models";
-import type { User } from "@server/models";
 import { authorize } from "@server/policies";
 import { presentAIChatMessage, presentAIChatSession } from "@server/presenters";
 import type { APIContext } from "@server/types";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
+import { assertAiChatEnabled } from "./enabled";
 import * as T from "./schema";
 import { AiChatMaxMessages } from "./schema";
 
@@ -26,32 +24,6 @@ import { AiChatMaxMessages } from "./schema";
 const messagesPageSize = AiChatMaxMessages;
 
 const router = new Router();
-
-/**
- * Asserts that the AI chat feature is available to the requesting user's
- * workspace. Mirrors the gate on `ai.chat`: a base URL *and* a model are both
- * required, because a base URL without a model could only produce a broken
- * upstream request. All three conditions produce a 404 so an unavailable
- * endpoint is indistinguishable from one that was never registered.
- *
- * Every route here calls this before any ownership check. A route that resolved
- * ownership first would answer 403 for a session that is not the caller's and
- * 404 for one that is, which turns the endpoint into an oracle for whether a
- * given session id exists in the workspace.
- *
- * @param user the requesting user.
- * @throws NotFoundError when the workspace preference is off or no provider is
- * configured.
- */
-function assertAiChatEnabled(user: User) {
-  if (
-    !user.team.getPreference(TeamPreference.AIChat) ||
-    !env.AI_CHAT_BASE_URL ||
-    !env.AI_CHAT_MODEL
-  ) {
-    throw NotFoundError();
-  }
-}
 
 router.post(
   "ai.sessions.create",
@@ -117,6 +89,14 @@ router.post(
 
     const { id } = ctx.input.body;
     const session = await AIChatSession.findOwned(ctx, id, user);
+
+    // A session that does not exist and one belonging to someone else are the
+    // same answer, so a missing row is a 404 and never the 403 `authorize`
+    // would raise for a null target.
+    if (!session) {
+      throw NotFoundError();
+    }
+
     authorize(user, "delete", session);
 
     await aiChatSessionDestroyer({ session, ctx });
@@ -142,6 +122,14 @@ router.post(
     // Permission for a message is resolved through its session: the message
     // carries no owner column and has no policy of its own.
     const session = await AIChatSession.findOwned(ctx, sessionId, user);
+
+    // A session that does not exist and one belonging to someone else are the
+    // same answer, so a missing row is a 404 and never the 403 `authorize`
+    // would raise for a null target.
+    if (!session) {
+      throw NotFoundError();
+    }
+
     authorize(user, "read", session);
 
     // One row beyond the page size is read so that "are there older messages?"

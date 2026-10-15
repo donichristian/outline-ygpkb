@@ -3,7 +3,6 @@ import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { t } from "i18next";
 import Router from "koa-router";
 import { v4 as uuidv4 } from "uuid";
-import { TeamPreference } from "@shared/types";
 import { toError } from "@shared/utils/error";
 import { Minute } from "@shared/utils/time";
 import aiChatMessageCreator from "@server/commands/aiChatMessageCreator";
@@ -24,6 +23,7 @@ import { AuthenticationType } from "@server/types";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
 import { requestContext } from "@server/storage/requestContext";
 import Redis from "@server/storage/redis";
+import { assertAiChatEnabled } from "./enabled";
 import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
 
@@ -255,19 +255,7 @@ router.post(
   validate(T.AiChatSchema),
   async (ctx: APIContext<T.AiChatSchemaReq>) => {
     const { user } = ctx.state.auth;
-
-    // The feature is gated per-workspace and requires a fully configured
-    // provider – a base URL *and* a model. A base URL without a model can only
-    // produce a broken upstream request, so it is treated as no provider at
-    // all. All three conditions return a 404 so the endpoint is
-    // indistinguishable from any other unknown route when unavailable.
-    if (
-      !user.team.getPreference(TeamPreference.AIChat) ||
-      !env.AI_CHAT_BASE_URL ||
-      !env.AI_CHAT_MODEL
-    ) {
-      throw NotFoundError();
-    }
+    assertAiChatEnabled(user);
 
     const { messages, sessionId } = ctx.input.body;
     const requestId = ctx.get("x-request-id");

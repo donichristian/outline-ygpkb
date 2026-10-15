@@ -197,6 +197,21 @@ describe("aiChatMessageCreator", () => {
     }
   });
 
+  it("records an event for the session timestamp bump", async () => {
+    const user = await buildUser();
+    const session = await buildSession(user);
+
+    await append(user, session.id, "Hello");
+
+    const event = await Event.findOne({
+      where: { modelId: session.id, name: "ai_chat_sessions.update" },
+    });
+    expect(event?.changes).toMatchObject({
+      attributes: { title: "Hello" },
+      previous: { title: null },
+    });
+  });
+
   it("defaults the status to completed and the run to none", async () => {
     const user = await buildUser();
     const session = await buildSession(user);

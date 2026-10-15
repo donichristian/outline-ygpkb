@@ -278,8 +278,19 @@ describe("POST /api/ai.messages.list", () => {
       body: { sessionId: session.id },
     });
 
-    expect([403, 404]).toContain(res.status);
+    expect(res.status).toEqual(404);
     expect(await countRows(session.id)).toEqual(before);
+  });
+
+  it("answers 404, not 403, for a session that does not exist", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+
+    const res = await server.post("/api/ai.messages.list", user, {
+      body: { sessionId: unknownSessionId },
+    });
+
+    expect(res.status).toEqual(404);
   });
 
   it("pages by cursor rather than by offset", async () => {
@@ -404,17 +415,35 @@ describe("POST /api/ai.sessions.delete", () => {
       body: { id: session.id },
     });
 
-    expect([403, 404]).toContain(res.status);
+    expect(res.status).toEqual(404);
     expect(await AIChatSession.findByPk(session.id)).not.toBeNull();
+  });
+
+  it("answers 404, not 403, for a session that does not exist", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+
+    const res = await server.post("/api/ai.sessions.delete", user, {
+      body: { id: unknownSessionId },
+    });
+
+    expect(res.status).toEqual(404);
   });
 });
 
 describe("feature gate", () => {
+  // Every AI route, including the streaming one in `ai.ts`. The gate is one
+  // exported definition, so a route that answered anything but 404 here would
+  // mean it bypassed it.
   const routes = [
     { path: "/api/ai.sessions.create", body: {} },
     { path: "/api/ai.sessions.list", body: {} },
     { path: "/api/ai.messages.list", body: { sessionId: unknownSessionId } },
     { path: "/api/ai.sessions.delete", body: { id: unknownSessionId } },
+    {
+      path: "/api/ai.chat",
+      body: { messages: [{ role: "user", content: "hi" }] },
+    },
   ];
 
   it.each(routes)(
