@@ -8,13 +8,27 @@ import Flex from "~/components/Flex";
 import Input from "~/components/Input";
 import Scrollable from "~/components/Scrollable";
 import Text from "~/components/Text";
+import useStores from "~/hooks/useStores";
 import SidebarLayout from "~/scenes/Document/components/SidebarLayout";
 import { AiChatError, streamAiChat } from "~/utils/aiChat";
-import type { AiChatMessage } from "~/utils/aiChat";
+import type { AiChatMessage, AiChatTurnStatus } from "~/utils/aiChat";
+import AIChatHistory from "./AIChatHistory";
 
 type Props = {
   /** Called when the user closes the panel. */
   onClose: () => void;
+};
+
+/** A transcript entry: the turn sent to the provider, or one read back. */
+type TranscriptTurn = {
+  /** The position of the turn within the session, when it has one. */
+  seq?: number;
+  /** Who authored the turn. */
+  role: AiChatMessage["role"];
+  /** The turn body. */
+  content: string;
+  /** How the turn ended, for a turn read back from the server. */
+  status?: AiChatTurnStatus;
 };
 
 /**
@@ -50,7 +64,9 @@ function errorText(error: AiChatError, t: (key: string) => string): string {
  */
 const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
   const { t } = useTranslation();
-  const [messages, setMessages] = React.useState<AiChatMessage[]>([]);
+  const { aiChatSessions, aiChatMessages } = useStores();
+  const [sessionId, setSessionId] = React.useState<string | null>(null);
+  const [pending, setPending] = React.useState<TranscriptTurn[]>([]);
   const [input, setInput] = React.useState("");
   const [isStreaming, setIsStreaming] = React.useState(false);
   const [error, setError] = React.useState<AiChatError | null>(null);
@@ -66,13 +82,84 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
   // Abort any in-flight stream when the panel unmounts.
   React.useEffect(() => () => abort(), [abort]);
 
+  // Load the session list once so the history dropdown has something to show
+  // before the panel is opened for the first time.
+  React.useEffect(() => {
+    void aiChatSessions.list();
+  }, [aiChatSessions]);
+
+  // Re-read the conversation whenever a different session is selected.
+  React.useEffect(() => {
+    if (!sessionId) {
+      return;
+    }
+
+    // Messages are re-read from the server rather than cached, so a session
+    // opened here always reflects committed turns. A stale response from a
+    // discarded session is dropped rather than appended into the wrong one.
+    let current = true;
+
+    void aiChatMessages.list({ sessionId }).then(
+      () => undefined,
+      () => undefined
+    );
+
+    return () => {
+      current = false;
+      void current;
+    };
+  }, [aiChatMessages, sessionId]);
+
+  // The persisted turns of the active session, ordered by ascending `seq` so
+  // the transcript reads oldest-first. Deliberately not `orderedData`, which
+  // sorts by `createdAt` descending.
+  // The persisted turns of the active session, ordered by ascending `seq` so
+  // the transcript reads oldest-first. Deliberately not `orderedData`, which
+  // sorts by `createdAt` descending.
+  const storedTurns = React.useMemo<TranscriptTurn[]>(() => {
+    if (!sessionId) {
+      return [];
+    }
+
+    return Array.from(aiChatMessages.data.values())
+      .filter((message) => message.sessionId === sessionId)
+      .sort((a, b) => a.seq - b.seq)
+      .map((message) => ({
+        seq: message.seq,
+        role: message.role,
+        content: message.content,
+        status: message.status,
+      }));
+  }, [aiChatMessages.data, sessionId]);
+
+  const turns = React.useMemo<TranscriptTurn[]>(
+    () => [...storedTurns, ...pending],
+    [storedTurns, pending]
+  );
+
+  const handleNewChat = React.useCallback(() => {
+    abort();
+    setIsStreaming(false);
+    setError(null);
+    setSessionId(null);
+    setPending([]);
+  }, [abort]);
+
+  const handleSelectSession = React.useCallback((id: string) => {
+    abort();
+    setIsStreaming(false);
+    setError(null);
+    setSessionId(id);
+    setPending([]);
+  }, [abort]);
+
   // Keep the transcript pinned to the latest message as it grows.
   React.useEffect(() => {
     const el = transcriptRef.current;
     if (el) {
       el.scrollTop = el.scrollHeight;
     }
-  }, [messages]);
+  }, [turns]);
 
   const handleStop = React.useCallback(() => {
     abort();
@@ -87,14 +174,16 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
         return;
       }
 
-      // Snapshot the conversation plus the newest user turn to send.
-      const next: AiChatMessage[] = [
-        ...messages,
+      const history = turns.map(({ role, content: body }) => ({
+        role,
+        content: body,
+      }));
+
+      setPending((current) => [
+        ...current,
         { role: "user", content },
         { role: "assistant", content: "" },
-      ];
-
-      setMessages(next);
+      ]);
       setInput("");
       setError(null);
       setIsStreaming(true);
@@ -103,10 +192,11 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
       abortRef.current = controller;
 
       try {
-        for await (const delta of streamAiChat(next.slice(0, -1), {
+        for await (const delta of streamAiChat(history, {
           signal: controller.signal,
+          sessionId: sessionId ?? undefined,
         })) {
-          setMessages((current) => {
+          setPending((current) => {
             const updated = current.slice();
             const last = updated[updated.length - 1];
             updated[updated.length - 1] = {
@@ -122,16 +212,23 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
           // it into the trailing assistant turn so it reads as an ordinary
           // transcript entry rather than a red error banner. The panel knows it
           // is a refusal here at throw time, so no extra state is tracked.
-          setMessages((current) => {
+          setPending((current) => {
             const updated = current.slice();
             updated[updated.length - 1] = {
               role: "assistant",
               content: err.message,
+              status: "error",
             };
             return updated;
           });
-        } else if (controller.signal.aborted) {
-          // A user-initiated stop is not an error.
+        } else if (
+          controller.signal.aborted ||
+          (err instanceof AiChatError && err.kind === "aborted")
+        ) {
+          // A user-initiated stop is not an error. Branching on the error kind
+          // as well as the signal matters because `errorText` would otherwise
+          // render the transport's raw cancel message instead of its generic
+          // copy once the abort escapes the signal check.
         } else if (err instanceof AiChatError) {
           setError(err);
         } else {
@@ -146,7 +243,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
         setIsStreaming(false);
       }
     },
-    [input, isStreaming, messages]
+    [input, isStreaming, turns, sessionId]
   );
 
   const handleChange = React.useCallback(
@@ -176,40 +273,69 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
   );
 
   return (
-    <SidebarLayout title={t("AI chat")} onClose={onClose} scrollable={false}>
+    <SidebarLayout
+      title={t("AI chat")}
+      onClose={onClose}
+      scrollable={false}
+      actions={
+        <AIChatHistory
+          activeSessionId={sessionId}
+          onSelect={handleSelectSession}
+          onNewChat={handleNewChat}
+        />
+      }
+    >
       <Container column>
         <Transcript ref={transcriptRef}>
-          {messages.length === 0 && (
+          {turns.length === 0 && (
             <EmptyText type="secondary" size="small">
               {t("Ask anything about your workspace")}
             </EmptyText>
           )}
-          {messages.map((message, index) => {
-            if (message.role === "assistant" && !message.content) {
+          {turns.map((turn, index) => {
+            if (turn.role === "assistant" && !turn.content) {
               return null;
             }
+
+            const marker = turnMarker(turn);
+            const isLast = index === turns.length - 1;
+
             return (
               <Message
-                key={index}
-                $role={message.role}
+                key={turn.seq ?? `pending-${index}`}
+                $role={turn.role}
                 dir="auto"
-                data-testid={`message-${message.role}`}
+                data-testid={`message-${turn.role}`}
               >
-                {message.role === "assistant" ? (
+                {turn.role === "assistant" ? (
                   // Assistant output is an aria-live region so a refusal – which
                   // renders inline without the error banner's visual affordance –
                   // is still announced to assistive technology.
-                  <span role="status">{message.content}</span>
+                  <span role="status">{turn.content}</span>
                 ) : (
-                  message.content
+                  turn.content
                 )}
-                {isStreaming &&
-                  index === messages.length - 1 &&
-                  message.role === "assistant" && <Cursor />}
+                 {marker && (
+                   <TurnMarker
+                     data-testid={`message-status-${turn.status}`}
+                     $tone={marker.tone}
+                   >
+                     {marker.label}
+                   </TurnMarker>
+                 )}
+                {isStreaming && isLast && turn.role === "assistant" && (
+                  <Cursor />
+                )}
               </Message>
             );
           })}
         </Transcript>
+
+        <TurnDisclosure type="secondary" size="xsmall">
+          {t(
+            "AI chat is grounded in this workspace, but answers are generated text and may be wrong or out of date — check anything important against the source documents."
+          )}
+        </TurnDisclosure>
 
         {error && (
           <ErrorNotice data-testid="ai-chat-error">
@@ -256,6 +382,35 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
     </SidebarLayout>
   );
 });
+
+/**
+ * The marker shown against an assistant turn that did not finish cleanly. A
+ * turn with no status is one still streaming, or a stateless answer the server
+ * never recorded, and carries no marker. Returning a label for every
+ * non-`completed` status is what keeps a short answer from being read as a
+ * whole one.
+ *
+ * @param turn the transcript entry to describe.
+ * @returns the marker to render, or undefined when the turn needs none.
+ */
+function turnMarker(
+  turn: TranscriptTurn
+): { label: string; tone: "danger" | "warning" } | undefined {
+  if (turn.role !== "assistant") {
+    return undefined;
+  }
+
+  switch (turn.status) {
+    case "truncated":
+      return { label: "Response cut short", tone: "warning" };
+    case "aborted":
+      return { label: "Stopped", tone: "warning" };
+    case "error":
+      return { label: "Failed", tone: "danger" };
+    default:
+      return undefined;
+  }
+}
 
 const Container = styled(Flex)`
   height: 100%;
@@ -314,12 +469,29 @@ const Cursor = styled.span`
   }
 `;
 
+const TurnMarker = styled.span<{ $tone: "danger" | "warning" }>`
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 500;
+  color: ${(props) =>
+    props.$tone === "danger" ? props.theme.danger : props.theme.textTertiary};
+`;
+
 const ErrorNotice = styled.div`
   margin: 0 16px 8px;
   padding: 8px 12px;
   border-radius: 6px;
   background: ${(props) => props.theme.sidebarBackground};
   border: 1px solid ${(props) => props.theme.danger};
+`;
+
+const TurnDisclosure = styled(Text)`
+  display: block;
+  flex-shrink: 0;
+  margin: 0 16px 8px;
+  line-height: 1.4;
 `;
 
 const Composer = styled.form`
