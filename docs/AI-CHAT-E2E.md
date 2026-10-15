@@ -32,7 +32,7 @@ surface that no test of any kind reaches.
 
 ## 3. The standing gate
 
-`yarn test:app` (37 files / 350 tests) and `yarn test:server server/routes/api/ai`
+`yarn test:app` (37 files / 345 tests) and `yarn test:server server/routes/api/ai`
 (7 files / 117 tests), green. Representative names, each grepped out of the file
 it is cited from:
 
