@@ -196,26 +196,33 @@ export function isUntokenizableScript(normalizedPrompt: string): boolean {
  * nothing and is refused, so prompts cannot be used to probe for inaccessible
  * collections.
  *
- * Fails closed. If retrieval is unavailable the prompt is refused rather than
- * passed through ungrounded.
+ * A prompt that yields no term to probe is NOT gated. Refusing it answered a
+ * bare greeting with a lecture about the knowledge base, which is the one
+ * response a user cannot act on. A prompt with no distinctive term also has
+ * nothing to match a document against, so the probe would decide nothing either
+ * way.
+ *
+ * Fails closed from the probe onwards. If retrieval is unavailable the prompt is
+ * refused rather than passed through ungrounded.
  *
  * ponytail: a lexical hit is a claim, not a measurement – no false-reject rate
  * has been measured against the live corpus, and a full-text OR both over-matches
  * a document that merely shares a word and under-matches a paraphrase that shares
  * none. Deliberately biased toward refusing, because a refusal is visible and a
  * hallucinated answer is not. Costs one search (two or three indexed queries on
- * the read replica) on a route that previously did no database read. Upgrade path
- * if this proves too blunt: rank with embeddings, or keep the probe and add a
- * post-hoc check that the upstream stream actually cites a `/doc/` URL before any
- * token of it is flushed.
+ * the read replica) on a route that previously did no database read. The bias
+ * applies to prompts that carry terms; a prompt carrying none is ungated, since
+ * refusing it is pure cost. Upgrade path if this proves too blunt: rank with
+ * embeddings, or keep the probe and add a post-hoc check that the upstream stream
+ * actually cites a `/doc/` URL before any token of it is flushed.
  *
  * ponytail: the term extractor assumes space-delimited scripts. A
  * whitespace-free script (Han, Thai, Khmer, …) arrives as one long "word", so
  * the probe degrades to near-total refusal regardless of what the workspace
  * contains. That ceiling is now *distinguishable in the logs* as
- * `unsupported script`, while a single-token prompt reports
- * `no distinctive terms` – but neither is fixed here. Only the reason string
- * changed; the decision did not. Upgrade path if this proves too blunt: segment
+ * `unsupported script`, while a single-character prompt is no longer gated at
+ * all – but neither is fixed here. Only the reason string changed; the decision
+ * did not. Upgrade path if this proves too blunt: segment
  * the prompt with a language-aware tokenizer before extracting terms, and
  * index those languages rather than relying on the default `tsquery` config.
  *
@@ -236,8 +243,12 @@ export async function findUngroundedReason(
 
   const query = buildProbeQuery(prompt);
 
+  // Deliberately ungated. A prompt with no term to probe carries no evidence
+  // either way, so gating it decides nothing and answers a greeting with a
+  // lecture. Every sibling branch below returns a reason; this one does not,
+  // and that is the point — every word of "hi" is in `WeakTerms`.
   if (!query) {
-    return "no distinctive terms";
+    return undefined;
   }
 
   try {

@@ -88,17 +88,16 @@ describe("findUngroundedReason", () => {
     expect(reason).toEqual("unsupported script");
   });
 
-  it("reports `no distinctive terms` for a single-token whitespace-free prompt", async () => {
+  it("passes a single-character prompt through ungated", async () => {
     // `好` normalizes to one token of length 1, which `buildProbeQuery` drops
-    // (`word.length < 2`). The function returns before the search, so the
-    // ceiling looks different from the multi-character case above: the new
-    // `unsupported script` reason only covers multi-character prompts.
+    // (`word.length < 2`). With no term left to probe there is nothing to match
+    // a document against, so the gate does not run and no search is spent.
     const searchForUser = vi.fn(async () => ({ total: 0 }));
     stubProvider({ searchForUser });
 
     const reason = await findUngroundedReason(fakeUser(), userTurn("好"));
 
-    expect(reason).toEqual("no distinctive terms");
+    expect(reason).toBeUndefined();
     expect(searchForUser).not.toHaveBeenCalled();
   });
 

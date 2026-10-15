@@ -436,6 +436,11 @@ describe("AIChatPanel", () => {
     expect(query("message-user")?.textContent).toBe("hi");
     expect(query("message-assistant")?.textContent).toContain(refusal);
     expect(query("ai-chat-error")).toBeNull();
+    // A refusal completed normally, so it carries no turn marker at all.
+    // `error` here rendered a danger "Failed" badge under the refusal text,
+    // which is what made the boundary read as a failure.
+    expect(query("message-status-error")).toBeNull();
+    expect(query("message-status-completed")).toBeNull();
     cleanup();
   });
 

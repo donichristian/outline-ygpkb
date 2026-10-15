@@ -276,7 +276,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
             updated[updated.length - 1] = {
               role: "assistant",
               content: err.message,
-              status: "error",
+              status: "completed",
             };
             return updated;
           });

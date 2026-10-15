@@ -421,14 +421,60 @@ describe("POST /api/ai.chat", () => {
       await expectRefused(user, "What are the Zanzibar severance bands?");
     });
 
-    it("refuses a prompt whose only terms carry no topic", async () => {
+    it("lets a prompt whose only terms carry no topic through to the provider", async () => {
       const user = await buildUser();
       await configureAiChat(user.team);
       // Every word here is a function or question word, so there is no term to
-      // search with even though the workspace does have documents.
+      // search with. A prompt that names nothing is not evidence of an
+      // out-of-scope question, and refusing it answered a greeting with a
+      // lecture, so the provider is asked instead.
       await seedReadableDocument(user, "Quarterly planning notes");
 
-      await expectRefused(user, "Can you tell me anything about it?");
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          streamingResponse([
+            'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
+            "data: [DONE]\n\n",
+          ])
+        );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: {
+          messages: [
+            { role: "user", content: "Can you tell me anything about it?" },
+          ],
+        },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(await res.text()).not.toContain(OutOfScopeRefusal);
+    });
+
+    it("does not gate a bare greeting", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+      await seedReadableDocument(user, "Quarterly planning notes");
+
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          streamingResponse([
+            'data: {"choices":[{"delta":{"content":"Halo"}}]}\n\n',
+            "data: [DONE]\n\n",
+          ])
+        );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: { messages: [{ role: "user", content: "hi" }] },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(await res.text()).not.toContain(OutOfScopeRefusal);
     });
 
     it("refuses whitespace-only content", async () => {
