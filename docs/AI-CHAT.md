@@ -1,11 +1,11 @@
 # AI chat
 
-A workspace-gated, **read-only**, streaming AI chat for the Outline fork. It is
-delivered as a **transport spike** (slice 1): a hand-rolled Koa Server-Sent
-Events (SSE) route that proxies an OpenAI-compatible gateway to a React panel in
-the right sidebar. Slice 1 adds **no new npm dependencies**. TanStack AI is
-layered on this proven transport in slice 2 (see
-[Slice 2 (deferred)](#slice-2-deferred)).
+A workspace-gated streaming AI chat for the Outline fork: a hand-rolled Koa
+Server-Sent Events (SSE) route that proxies an OpenAI-compatible gateway to a
+React panel in the right sidebar, and — when a `sessionId` is supplied — persists
+the conversation server-side behind four RPC endpoints. The transport adds **no
+new npm dependencies**. TanStack AI is layered on this proven transport in slice 2
+(see [Slice 2 (deferred)](#slice-2-deferred)).
 
 > This is the **operational/usage** document: env vars, the settings toggle, and
 > curl recipes. The architecture — request path, the KB-scope grounding gate, the
@@ -14,9 +14,11 @@ layered on this proven transport in slice 2 (see
 > to understand *why* the code is shaped this way.
 >
 > This document describes what the code actually does. It is grounded in
-> `server/routes/api/ai/ai.ts`, `server/routes/api/ai/scope.ts`,
-> `server/routes/api/ai/schema.ts`, `app/utils/aiChat.ts`,
-> `app/components/AIChat/`, `server/env.ts`, and `app/scenes/Settings/Features.tsx`.
+> `server/routes/api/ai/ai.ts`, `server/routes/api/ai/aiSessions.ts`,
+> `server/routes/api/ai/scope.ts`, `server/routes/api/ai/schema.ts`,
+> `app/utils/aiChat.ts`, `app/components/AIChat/`, `app/stores/AIChat*Store.ts`,
+> `server/env.ts`, `server/queues/tasks/CleanupDeletedUsersTask.ts`, and
+> `app/scenes/Settings/Features.tsx`.
 
 ## What it is
 
@@ -30,9 +32,15 @@ layered on this proven transport in slice 2 (see
   (bypassing `ApiClient`) and yields incremental text deltas; a right-sidebar
   panel (`app/components/AIChat/`) renders them, opened from a floating trigger
   or the command bar.
-- **Read-only by construction**: the route performs a retrieval probe and a
-  single upstream `fetch`. It calls **no** `server/commands/` write path and
-  persists nothing. There is **no write endpoint**.
+- **Persisted, server-authoritative sessions**: when a request carries a
+  `sessionId`, the conversation is stored in `ai_chat_sessions` and
+  `ai_chat_messages` and the provider's prompt window is rebuilt from those rows.
+  A request without `sessionId` stores nothing. Four RPC endpoints expose the
+  model — see [The session API](#the-session-api).
+
+**Read-only with respect to your documents.** The route never writes a
+document, never modifies a collection, and never injects document content into
+the prompt. Its only writes are to the two AI chat tables above.
 
 ## The gate
 
@@ -62,7 +70,8 @@ the preference is on, and the command-bar action `openAIChat`
 
 ### 2. Scope gate (grounding)
 
-Past the feature gate, the route calls `findUngroundedReason(user, messages)`
+Past the feature gate, the route calls
+`findUngroundedReason(user, resolvedMessages)`
 (`server/routes/api/ai/scope.ts`) **before** contacting the provider. The prompt
 is reduced to distinctive terms (newest user turn first, OR-joined, capped at 8)
 and searched against the requesting user's **own accessible documents**. If
@@ -161,11 +170,14 @@ Defined in `server/env.ts` (the `AI_CHAT_*` block). Notes:
 
 ### Direct checks
 
-**Gate-off returns 404.** With the toggle off (or `AI_CHAT_BASE_URL` unset) the
-endpoint is not reachable:
+**Gate-off returns 404.** With the toggle off (or `AI_CHAT_BASE_URL` / `AI_CHAT_MODEL`
+unset) the endpoint is not reachable. `auth()` runs *before* the handler body, so
+the request still needs credentials — without them you get **401**, not 404:
 
 ```sh
 curl -i -X POST http://localhost:3050/api/ai.chat \
+  -b "accessToken=<session token>; csrfToken=<token>" \
+  -H "x-csrf-token: <token>" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"hi"}]}'
 # => HTTP/1.1 404 Not Found
@@ -179,12 +191,16 @@ Read the cookie from a browser session and pass it both ways:
 
 ```sh
 curl -N -i -X POST http://localhost:3050/api/ai.chat \
-  -b "csrfToken=<token>" \
+  -b "accessToken=<session token>; csrfToken=<token>" \
   -H "x-csrf-token: <token>" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"<a question answerable from the workspace KB>"}]}'
 # => text/event-stream, incremental "data:" frames, no Content-Encoding
 ```
+
+Pass `"sessionId":"<uuid>"` instead of `messages` to run a session-backed turn;
+the response is the same shape but ends with an `event: complete` (or
+`event: truncated`) terminal frame, and the turn is written to storage.
 
 A missing or mismatched token yields **403** (JSON), thrown by
 `server/middlewares/csrf.ts`.
@@ -200,12 +216,13 @@ the provider is contacted:
 
 ```sh
 curl -N -i -X POST http://localhost:3050/api/ai.chat \
-  -b "csrfToken=<token>" -H "x-csrf-token: <token>" \
+  -b "accessToken=<session token>; csrfToken=<token>" \
+  -H "x-csrf-token: <token>" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"What is the capital of France?"}]}'
 # => HTTP/1.1 200 text/event-stream
 # => event: error
-# => data: {"error":"This assistant only answers from this workspace’s knowledge base"}
+# => data: {"error":"This assistant only answers from this workspace’s knowledge base","kind":"refusal"}
 ```
 
 **Request body.** `messages` is an array (1–50 items) of
@@ -213,9 +230,223 @@ curl -N -i -X POST http://localhost:3050/api/ai.chat \
 capped at 8000 characters (`AiChatMaxMessageLength`). The `system` role is
 **rejected** so a caller cannot override server-side instructions.
 
+`messages` is now **optional when `sessionId` is present**, and required
+otherwise. A `.refine()` in `server/routes/api/ai/schema.ts` enforces exactly
+that: a body with neither `messages` nor `sessionId` is rejected with
+`messages is required when sessionId is not provided`. Send either
+
+```sh
+# stateless turn — the client array is the whole conversation, nothing is stored
+-d '{"messages":[{"role":"user","content":"…"}]}'
+
+# session-backed turn — the window is rebuilt from storage
+-d '{"sessionId":"<uuid>"}'
+```
+
+Both may be sent together; `messages` then supplies only the **new** turn, while
+the rest of the window comes from the stored rows.
+
+## The session API
+
+The API is **RPC-style**, not REST: every call is `POST /api/<resource>.<action>`
+with a JSON body, including the reads. `README.md` describes "RESTful endpoints
+under `/api/`"; that is wrong for this codebase, and `server/routes/api/` is the
+authority.
+
+All four endpoints live in `server/routes/api/ai/aiSessions.ts`. Each one calls
+`assertAiChatEnabled` **first**, so with the toggle off or the provider
+unconfigured they all return **404**, exactly like `ai.chat`.
+
+`auth()` runs before the handler body, so every recipe below needs credentials:
+pass the `accessToken` cookie (session token) plus the CSRF pair. A recipe
+missing `accessToken` returns **401** and never reaches the handler.
+
+**Auth.** `auth()` with no type restriction, so a session cookie, a Bearer
+session token **or an API key** may call them. Unlike `ai.chat`, which is
+`auth({ type: [APP] })`. A request not owned by the caller is **404**, not 403 —
+the gate runs before ownership so the endpoint cannot be used to probe which
+session ids exist.
+
+**CSRF.** All four resolve to `Scope.Write` or `Scope.Create`, so a
+cookie-authenticated request needs the matching `x-csrf-token` header and CSRF
+cookie, same as `ai.chat`. Bearer-token and API-key requests skip CSRF.
+
+### `ai.sessions.create`
+
+Creates an empty session owned by the caller. Rate limit **25/min**.
+
+```sh
+curl -i -X POST http://localhost:3050/api/ai.sessions.create \
+  -b "accessToken=<session token>; csrfToken=<token>" \
+  -H "x-csrf-token: <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Quarterly planning"}'
+```
+
+`title` is optional and capped at 200 characters
+(`AiChatMaxSessionTitleLength`); omit it for `null`. Response:
+
+```json
+{
+  "data": {
+    "id": "3f6d…",
+    "title": "Quarterly planning",
+    "createdAt": "2026-10-15T09:12:00.000Z",
+    "updatedAt": "2026-10-15T09:12:00.000Z"
+  }
+}
+```
+
+`teamId` and `userId` are deliberately absent from the serialized session: they
+are ownership internals, and exposing them would invite clients to reason about
+ownership instead of being authorized.
+
+### `ai.sessions.list`
+
+Every session belonging to the caller, newest activity first. Rate limit
+**100/min**.
+
+```sh
+curl -X POST http://localhost:3050/api/ai.sessions.list \
+  -b "accessToken=<session token>; csrfToken=<token>" \
+  -H "x-csrf-token: <token>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+Response — note the extra `sessions` wrapper:
+
+```json
+{
+  "data": {
+    "sessions": [
+      { "id": "3f6d…", "title": "Quarterly planning",
+        "createdAt": "2026-10-15T09:12:00.000Z",
+        "updatedAt": "2026-10-15T09:41:00.000Z" }
+    ]
+  }
+}
+```
+
+The `where` clause on `(teamId, userId)` *is* the authorization: it matches the
+`[teamId, userId, updatedAt]` index prefix, so other users' rows are excluded in
+one read rather than filtered per row.
+
+### `ai.sessions.delete`
+
+Permanently deletes a session and, by way of the `ai_chat_messages.sessionId`
+foreign key, every message in it. Sessions are **not** soft deleted. Rate limit
+**25/min**.
+
+```sh
+curl -X POST http://localhost:3050/api/ai.sessions.delete \
+  -b "accessToken=<session token>; csrfToken=<token>" \
+  -H "x-csrf-token: <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"3f6d…"}'
+# => {"success": true}
+```
+
+`id` is a required UUID. It must be owned by the caller; anything else is 404.
+
+### `ai.messages.list`
+
+One page of a session's turns, newest `seq` first. Rate limit **100/min**.
+
+```sh
+curl -X POST http://localhost:3050/api/ai.messages.list \
+  -b "accessToken=<session token>; csrfToken=<token>" \
+  -H "x-csrf-token: <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"sessionId":"3f6d…"}'
+```
+
+`sessionId` is required (UUID). `beforeSeq` is optional: an **exclusive** upper
+bound cursor — messages are returned from there downwards.
+
+```json
+{
+  "data": {
+    "messages": [
+      {
+        "id": "9b21…",
+        "seq": 4,
+        "role": "assistant",
+        "content": "…",
+        "status": "completed",
+        "runId": "c1d0…",
+        "createdAt": "2026-10-15T09:41:00.000Z"
+      }
+    ],
+    "truncated": false
+  }
+}
+```
+
+- `status` is one of **`completed`**, **`aborted`**, **`error`**, **`truncated`**
+  — see [Turn status](#turn-status).
+- `truncated: true` means older messages exist that this page does not include.
+- `cursor` is present **only** when `truncated` is true, and equals the oldest
+  `seq` on this page. Pass it as `beforeSeq` to fetch the next older page. Paging
+  by cursor rather than offset keeps the window stable while a turn is appended
+  concurrently, which an offset would shift underneath.
+
+The page size is `AiChatMaxMessages` (50), so one page is one upstream prompt
+window: paging through history never needs to look at more than the model is
+ever sent. The handler reads one row beyond the page so "are there older
+messages?" is answered by the page already fetched rather than a second query.
+
+Permission for a message is resolved **through its session** — messages carry no
+owner column and have no policy of their own.
+
+## Turn status
+
+Each stored assistant turn carries a `status`:
+
+| Status | Meaning |
+|---|---|
+| `completed` | the provider sent a `finish_reason`; the answer is whole |
+| `truncated` | the stream ended with no `finish_reason`; the answer may be incomplete |
+| `aborted` | the user stopped the turn, or the socket went away |
+| `error` | the turn failed mid-stream |
+
+`aborted` and `error` are terminal states rather than answers: they describe a
+turn that stopped without producing a whole reply.
+
+**A grounding refusal is stored as `completed`,** carrying the exact string that
+was sent, locale-frozen at send time. It is an answer the boundary gave, not a
+failure, and reopening the session replays the text the sender received rather
+than a later translation of a key.
+
+### How the client learns the outcome
+
+For a **session-backed** turn the server authors its own last frame:
+
+```
+event: complete
+data: {"runId":"<uuid>","finishReason":"stop"}
+```
+
+or `event: truncated` with `finishReason: null`. The payload is `{ runId,
+finishReason }`, derived from the upstream `finish_reason` — **never** from
+`data: [DONE]`, which the OpenAI SDK consumes and never forwards. A session-backed
+stream that ends without an `event: complete` frame raises
+`AiChatError kind="truncated"`, however much text it produced. A **stateless**
+turn gets no terminal frame and completes whenever the stream ends.
+
+### Retention
+
+AI chat data belonging to a **deleted** user is permanently destroyed after a
+**30-day** window by `CleanupDeletedUsersTask`
+(`server/queues/tasks/CleanupDeletedUsersTask.ts`, `RetentionDays = 30`, hourly
+with a 15-minute partition window). The reason a dedicated task exists at all:
+`User.destroy()` is a *soft* delete, so the `ai_chat_sessions.userId` foreign key
+never cascades.
+
 ## Verified constraints
 
-These are the properties the spike proves; they are load-bearing, not incidental.
+These are the properties the feature proves; they are load-bearing, not
+incidental.
 
 - **Same-origin, no Vite proxy.** The SPA is served by Koa and `/api` is mounted
   there; Vite serves only `/static/`. The client calls `/api/ai.chat` directly.
@@ -239,9 +470,21 @@ These are the properties the spike proves; they are load-bearing, not incidental
   because the `apiResponse` middleware skips `Readable` (and `Buffer`), so the
   stream is piped through untouched.
 - **Abort on disconnect.** An `AbortController` aborts the upstream request when
-  the client disconnects (`ctx.req.on("close", …)`), so the provider connection
-  is not left open. A mid-stream upstream error is interposed as an in-band
-  `event: error` SSE frame rather than a broken pipe.
+  the client disconnects (`ctx.res.on("close", …)`, not `ctx.req` — see the
+  design doc), so the provider connection is not left open. A mid-stream upstream
+  error is interposed as an in-band `event: error` SSE frame rather than a broken
+  pipe.
+- **Ownership is resolved before the stream exists.** With a `sessionId`, a
+  non-owned session is a JSON **404**, never a 200 carrying SSE, and the rows are
+  never loaded.
+- **The window comes from storage, not the client.** `resolveUpstreamMessages`
+  rebuilds the provider prompt from committed rows, re-asserting the role
+  allow-list per row, so a replayed `messages` array cannot rewrite a stored
+  conversation.
+- **The response ends only after the turn is durable.** The terminal frame is
+  written before the stream ends and the assistant row is committed before
+  `end()`, so a client that reloads history the moment it sees the frame cannot
+  race the insert.
 
 ## Panel behaviour
 
@@ -249,7 +492,7 @@ The panel (`app/components/AIChat/AIChatPanel.tsx`) is mounted into the
 **ephemeral** `RightSidebarContext` by `AIChatProvider`
 (`app/components/AIChat/AIChatContext.tsx`) — its open state is React state, not
 a field on `UiStore`, because the persisted `ui.rightSidebar` enum drives the
-Document comments/history panels. Three UI facts worth knowing:
+Document comments/history panels. A few UI facts worth knowing:
 
 - **Single-line composer.** The input is `type="text"`, not a textarea.
 - **Enter sends.** `Input` only fires `onRequestSubmit` on **Cmd+Enter**; the
@@ -258,6 +501,15 @@ Document comments/history panels. Three UI facts worth knowing:
 - **Floating trigger.** `AIChatTrigger` renders a fixed sparkle button
   (bottom-right, `z-index: depths.sidebar - 1` = 899, just below the sliding
   `Aside` at 900) and hides itself while the panel is open.
+- **Session history.** `AIChatHistory`
+  (`app/components/AIChat/AIChatHistory.tsx`) lists the caller's sessions from
+  `AIChatSessionsStore` and deletes one behind a confirmation prompt. Opening a
+  session loads its turns through `AIChatMessagesStore.list({ sessionId })`;
+  closing and reopening replays the stored transcript rather than a
+  client-only one, because the transcript the panel renders is the store's rows.
+- **One turn in flight per session.** A second send while a turn is streaming is
+  refused in-band with `kind: "busy"`; the panel surfaces it as a
+  retry-later message rather than as an error banner.
 
 The panel is rendered with `SidebarLayout scrollable={false}` so the transcript
 scrolls internally and the composer stays pinned. This and the clickability
@@ -294,7 +546,7 @@ for a clean disabled state.
 
 ## Production open items (out of scope)
 
-Slice 1 targets local development. Before production, address:
+The current feature targets local development. Before production, address:
 
 - Provider/host selection and TLS/domain termination.
 - Secret management and rotation for `AI_CHAT_API_KEY`.
