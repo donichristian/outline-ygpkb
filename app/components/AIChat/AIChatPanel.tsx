@@ -10,7 +10,14 @@ import Scrollable from "~/components/Scrollable";
 import Text from "~/components/Text";
 import useStores from "~/hooks/useStores";
 import SidebarLayout from "~/scenes/Document/components/SidebarLayout";
-import { AiChatError, streamAiChat } from "~/utils/aiChat";
+import {
+  AiChatError,
+  clearDraft,
+  flushDrafts,
+  readDraft,
+  streamAiChat,
+  writeDraft,
+} from "~/utils/aiChat";
 import type { AiChatMessage, AiChatTurnStatus } from "~/utils/aiChat";
 import AIChatHistory from "./AIChatHistory";
 
@@ -32,25 +39,47 @@ type TranscriptTurn = {
 };
 
 /**
- * Renders the user-facing message for a failed chat request. A 404 means the
- * feature is disabled for the workspace, a 403 means the CSRF token was
- * rejected, and every other failure is presented as a generic, retryable error.
+ * Renders the user-facing message for a failed chat request. The HTTP status
+ * decides first, since a rejected request is the case a user can act on – a
+ * 404 means the feature is off for the workspace, a 403 an expired session –
+ * and the transport's failure kind decides the rest.
  *
  * @param error the error thrown while streaming.
  * @param t the translation function.
  * @returns the message to display to the user.
  */
 function errorText(error: AiChatError, t: (key: string) => string): string {
-  if (error.status === 404) {
-    return t("AI chat is not enabled for this workspace");
+  switch (error.status) {
+    case 404:
+      return t("AI chat is not enabled for this workspace");
+    case 403:
+      return t("Your session has expired, refresh the page to continue");
+    case 429:
+      return t("Too many requests, try again shortly");
+    default:
+      break;
   }
-  if (error.status === 403) {
-    return t("Your session has expired, refresh the page to continue");
+
+  // `error.message` is an English literal from the transport and can never be
+  // localized, so every failure is rendered from its kind instead.
+  switch (error.kind) {
+    case "network":
+      return t("A network error occurred, try again?");
+    case "stream":
+      return t("The AI chat stream failed, try again?");
+    case "busy":
+      return t("Another AI chat response is still in progress");
+    case "truncated":
+      return t("The AI chat answer stopped before it finished");
+    case "malformed":
+      return t("The AI chat response could not be read");
+    case "refusal":
+      return t("The AI chat request was declined");
+    case "aborted":
+      return t("The AI chat request was cancelled");
+    default:
+      return t("The AI chat request failed, try again?");
   }
-  if (error.kind === "network") {
-    return t("The AI chat request failed, try again?");
-  }
-  return error.message || t("The AI chat request failed, try again?");
 }
 
 /**
@@ -65,9 +94,11 @@ function errorText(error: AiChatError, t: (key: string) => string): string {
 const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
   const { t } = useTranslation();
   const { aiChatSessions, aiChatMessages } = useStores();
-  const [sessionId, setSessionId] = React.useState<string | null>(null);
+  const sessionId = aiChatSessions.selectedSessionId;
   const [pending, setPending] = React.useState<TranscriptTurn[]>([]);
-  const [input, setInput] = React.useState("");
+  const [input, setInput] = React.useState(() =>
+    readDraft(sessionId ?? undefined)
+  );
   const [isStreaming, setIsStreaming] = React.useState(false);
   const [error, setError] = React.useState<AiChatError | null>(null);
   const abortRef = React.useRef<AbortController | null>(null);
@@ -79,8 +110,16 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
     abortRef.current = null;
   }, []);
 
-  // Abort any in-flight stream when the panel unmounts.
-  React.useEffect(() => () => abort(), [abort]);
+  // Abort any in-flight stream when the panel unmounts, and commit whatever
+  // the composer has typed but not yet written. Without the flush, a draft
+  // typed in the last moments before closing is lost to the debounce.
+  React.useEffect(
+    () => () => {
+      abort();
+      flushDrafts();
+    },
+    [abort]
+  );
 
   // Load the session list once so the history dropdown has something to show
   // before the panel is opened for the first time.
@@ -95,24 +134,22 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
     }
 
     // Messages are re-read from the server rather than cached, so a session
-    // opened here always reflects committed turns. A stale response from a
-    // discarded session is dropped rather than appended into the wrong one.
-    let current = true;
-
+    // opened here always reflects committed turns. A failure here is swallowed
+    // only to keep the rejection out of the console; the rows a slow request
+    // returns still land in the store stamped with this session id.
     void aiChatMessages.list({ sessionId }).then(
       () => undefined,
       () => undefined
     );
-
-    return () => {
-      current = false;
-      void current;
-    };
   }, [aiChatMessages, sessionId]);
 
-  // The persisted turns of the active session, ordered by ascending `seq` so
-  // the transcript reads oldest-first. Deliberately not `orderedData`, which
-  // sorts by `createdAt` descending.
+  // Show the draft belonging to whichever conversation is open, both on mount
+  // and whenever the selection changes, so an unsent question is never carried
+  // into – or lost with – a different conversation.
+  React.useEffect(() => {
+    setInput(readDraft(sessionId ?? undefined));
+  }, [sessionId]);
+
   // The persisted turns of the active session, ordered by ascending `seq` so
   // the transcript reads oldest-first. Deliberately not `orderedData`, which
   // sorts by `createdAt` descending.
@@ -141,17 +178,20 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
     abort();
     setIsStreaming(false);
     setError(null);
-    setSessionId(null);
+    aiChatSessions.setSelectedSessionId(null);
     setPending([]);
-  }, [abort]);
+  }, [abort, aiChatSessions]);
 
-  const handleSelectSession = React.useCallback((id: string) => {
-    abort();
-    setIsStreaming(false);
-    setError(null);
-    setSessionId(id);
-    setPending([]);
-  }, [abort]);
+  const handleSelectSession = React.useCallback(
+    (id: string) => {
+      abort();
+      setIsStreaming(false);
+      setError(null);
+      aiChatSessions.setSelectedSessionId(id);
+      setPending([]);
+    },
+    [abort, aiChatSessions]
+  );
 
   // Keep the transcript pinned to the latest message as it grows.
   React.useEffect(() => {
@@ -185,6 +225,9 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
         { role: "assistant", content: "" },
       ]);
       setInput("");
+      // The question is now a transcript turn, so it must not also come back as
+      // a draft for this conversation.
+      clearDraft(sessionId ?? undefined);
       setError(null);
       setIsStreaming(true);
 
@@ -248,9 +291,11 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
 
   const handleChange = React.useCallback(
     (ev: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-      setInput(ev.target.value);
+      const text = ev.target.value;
+      setInput(text);
+      writeDraft(text, sessionId ?? undefined);
     },
-    []
+    [sessionId]
   );
 
   const requestSubmit = React.useCallback(() => {
@@ -320,7 +365,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
                      data-testid={`message-status-${turn.status}`}
                      $tone={marker.tone}
                    >
-                     {marker.label}
+                     {t(marker.labelKey)}
                    </TurnMarker>
                  )}
                 {isStreaming && isLast && turn.role === "assistant" && (
@@ -390,23 +435,26 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
  * non-`completed` status is what keeps a short answer from being read as a
  * whole one.
  *
+ * The label is a translation key rather than text, so the copy is resolved by
+ * the caller's `t` at render time.
+ *
  * @param turn the transcript entry to describe.
  * @returns the marker to render, or undefined when the turn needs none.
  */
 function turnMarker(
   turn: TranscriptTurn
-): { label: string; tone: "danger" | "warning" } | undefined {
+): { labelKey: string; tone: "danger" | "warning" } | undefined {
   if (turn.role !== "assistant") {
     return undefined;
   }
 
   switch (turn.status) {
     case "truncated":
-      return { label: "Response cut short", tone: "warning" };
+      return { labelKey: "Response cut short", tone: "warning" };
     case "aborted":
-      return { label: "Stopped", tone: "warning" };
+      return { labelKey: "Stopped", tone: "warning" };
     case "error":
-      return { label: "Failed", tone: "danger" };
+      return { labelKey: "Failed", tone: "danger" };
     default:
       return undefined;
   }

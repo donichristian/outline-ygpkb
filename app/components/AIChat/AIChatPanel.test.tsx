@@ -6,7 +6,7 @@ import { MobXProviderContext } from "mobx-react";
 import { ThemeProvider } from "styled-components";
 import { buildLightTheme } from "@shared/styles/theme";
 import RootStore from "~/stores/RootStore";
-import { AiChatError } from "~/utils/aiChat";
+import { AiChatError, clearDraft, flushDrafts } from "~/utils/aiChat";
 import AIChatPanel from "./AIChatPanel";
 import { client } from "~/utils/ApiClient";
 import type * as AiChatModule from "~/utils/aiChat";
@@ -218,6 +218,9 @@ function renderPanel(rootStore: RootStore) {
       )
     ).map((el) => el.textContent);
 
+  const inputValue = () =>
+    (query("ai-chat-input") as HTMLInputElement).value;
+
   return {
     query,
     click,
@@ -225,6 +228,7 @@ function renderPanel(rootStore: RootStore) {
     pressEnter,
     submit,
     transcripts,
+    inputValue,
     onClose,
     cleanup,
   };
@@ -234,6 +238,11 @@ describe("AIChatPanel", () => {
   afterEach(() => {
     streamAiChat.mockReset();
     document.body.innerHTML = "";
+    // Drafts live in module-level state and `localStorage`, which survive both
+    // the DOM reset above and a panel's unmount – the very behaviour under
+    // test. `clearDraft` drops the queued write and the stored key together,
+    // so the next test does not inherit a stale composer.
+    clearDraft();
     // The session/message seeding helpers point the global ApiClient mock at
     // the AI endpoints, so restore its default implementation.
     vi.mocked(client.post).mockImplementation(
@@ -408,7 +417,23 @@ describe("AIChatPanel", () => {
     cleanup();
   });
 
-  it("keeps the transcript when the panel is closed and reopened", async () => {
+  it("restores an unsent draft after the panel is unmounted and remounted", async () => {
+    mockEndpoints([]);
+    const rootStore = new RootStore();
+
+    let panel = renderPanel(rootStore);
+    panel.typeMessage("half-typed question");
+    // The draft writer debounces; commit what the keystrokes queued rather
+    // than sleeping past the debounce window.
+    flushDrafts();
+    panel.cleanup();
+
+    panel = renderPanel(rootStore);
+    expect(panel.inputValue()).toBe("half-typed question");
+    panel.cleanup();
+  });
+
+  it("restores the active conversation when the panel is closed and reopened", async () => {
     mockEndpoints([
       {
         id: "session-a",
@@ -439,26 +464,60 @@ describe("AIChatPanel", () => {
       content: "question one",
     });
 
-    const selectSession = async () => {
-      const panel = renderPanel(rootStore);
-      await panel.click(panel.query("ai-chat-history-trigger"));
-      await panel.click(panel.query("ai-chat-session-session-a"));
-      return panel;
-    };
-
-    let panel = await selectSession();
+    // First open: the panel starts on a new conversation, so the session is
+    // picked explicitly.
+    let panel = renderPanel(rootStore);
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-session-session-a"));
     expect(panel.transcripts()).toEqual(["question one", "answer one"]);
     panel.cleanup();
 
-    // Closing the panel is an unmount; reopening mounts a fresh component.
-    panel = await selectSession();
+    // Reopen. No dropdown interaction of any kind – closing the panel is an
+    // unmount, and the user must come back to the conversation they were
+    // reading without re-picking it from the list.
+    panel = renderPanel(rootStore);
     expect(panel.transcripts()).toEqual(["question one", "answer one"]);
     panel.cleanup();
 
     // A second close/reopen cycle must converge on the same transcript, not
     // accumulate duplicates of the messages.
-    panel = await selectSession();
+    panel = renderPanel(rootStore);
     expect(panel.transcripts()).toEqual(["question one", "answer one"]);
+    panel.cleanup();
+  });
+
+  it("leaves the panel on an empty conversation after an explicit New chat", async () => {
+    mockEndpoints([
+      {
+        id: "session-a",
+        title: "Alpha conversation",
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-02T00:00:00.000Z",
+      },
+    ]);
+    const rootStore = new RootStore();
+    rootStore.aiChatSessions.add({
+      id: "session-a",
+      title: "Alpha conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    } as never);
+    seedMessage(rootStore, "session-a", {
+      id: "m-a1",
+      seq: 1,
+      role: "user",
+      content: "question one",
+    });
+
+    const panel = renderPanel(rootStore);
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-session-session-a"));
+    expect(panel.transcripts()).toEqual(["question one"]);
+
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-new"));
+    expect(panel.transcripts()).toEqual([]);
+
     panel.cleanup();
   });
 

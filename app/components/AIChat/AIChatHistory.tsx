@@ -113,7 +113,7 @@ const AIChatHistory = observer(function AIChatHistory({
       </PopoverTrigger>
       <PopoverContent
         aria-label={t("Chat history")}
-        side={isMobile ? "bottom" : "bottom"}
+        side="bottom"
         align={isMobile ? "center" : "start"}
         shrink
         scrollable={false}
