@@ -695,10 +695,22 @@ describe("POST /api/ai.chat turn persistence", () => {
         )
     );
 
-    // The test database is shared and not empty, so the invariant is a delta
-    // rather than an absolute count.
-    const messagesBefore = await AIChatMessage.count();
-    const sessionsBefore = await AIChatSession.count();
+    // The shared test database is inserted into by every other suite running
+    // concurrently, so a global count moves; scope to the user built here.
+    const messagesForUser = async () => {
+      const owned = await AIChatSession.findAll({
+        where: { userId: user.id },
+        attributes: ["id"],
+      });
+      return AIChatMessage.count({
+        where: { sessionId: owned.map((session) => session.id) },
+      });
+    };
+    const sessionsForUser = () =>
+      AIChatSession.count({ where: { userId: user.id } });
+
+    const messagesBefore = await messagesForUser();
+    const sessionsBefore = await sessionsForUser();
 
     const res = await server.post("/api/ai.chat", user, {
       body: {
@@ -716,8 +728,8 @@ describe("POST /api/ai.chat turn persistence", () => {
         "data: [DONE]\n\n"
     );
 
-    expect(await AIChatMessage.count()).toEqual(messagesBefore);
-    expect(await AIChatSession.count()).toEqual(sessionsBefore);
+    expect(await messagesForUser()).toEqual(messagesBefore);
+    expect(await sessionsForUser()).toEqual(sessionsBefore);
   });
 
   it("writes nothing and never contacts the provider for another user's session", async () => {

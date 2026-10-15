@@ -73,6 +73,34 @@ describe("aiChatMessageCreator", () => {
     expect(session.updatedAt.getTime()).toBeGreaterThan(before);
   });
 
+  it("bumps the session timestamp on every turn, not only the first", async () => {
+    const user = await buildUser();
+    const session = await buildSession(user);
+
+    await append(user, session.id, "What is Outline?");
+    await session.reload();
+    const afterFirst = session.updatedAt.getTime();
+
+    // Postgres keeps millisecond precision, so a second append in the same
+    // millisecond would make the assertion below pass by accident.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // The title is already set, so this turn has no other attribute to change.
+    await append(user, session.id, "What is a collection?");
+    await session.reload();
+    expect(session.updatedAt.getTime()).toBeGreaterThan(afterFirst);
+
+    const events = await Event.findAll({
+      where: { modelId: session.id, name: "ai_chat_sessions.update" },
+    });
+    expect(events).toHaveLength(2);
+    expect(
+      events.every((event) =>
+        Object.keys(event.changes?.attributes ?? {}).includes("updatedAt")
+      )
+    ).toBe(true);
+  });
+
   it("titles the session from the first turn only", async () => {
     const user = await buildUser();
     const session = await buildSession(user);

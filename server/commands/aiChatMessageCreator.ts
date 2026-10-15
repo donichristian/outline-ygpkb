@@ -104,6 +104,18 @@ export default async function aiChatMessageCreator({
         runId: runId ?? null,
       });
 
+      // Sequelize makes `updatedAt` read-only: `set` returns without assigning it on
+      // a persisted row (node_modules/sequelize/lib/model.js:2281), and the
+      // `raw` escape from that guard skips the change bookkeeping that would
+      // otherwise record it (:2288). `save` only adds `updatedAt` to the column
+      // list once something else has already changed (:2374, :2393), and
+      // returns early when the list is empty (:2470). A turn after the first
+      // changes nothing else, so the timestamp and the changed flag both have
+      // to be set by hand or the row writes nothing and `@AfterUpdate` – the
+      // hook that writes the audit Event – never fires.
+      session.dataValues.updatedAt = new Date();
+      session.changed("updatedAt", true);
+
       const updates: { title?: string } = {};
 
       // The title is only ever filled in once, a later turn must not rename a
@@ -112,12 +124,9 @@ export default async function aiChatMessageCreator({
         updates.title = truncate(content.trim(), { length: titleMaxLength });
       }
 
-      // An instance update rather than a static one: `save` writes only the
-      // attributes `set` marked as changed (plus `updatedAt`), so the column
-      // footprint is the targeted one – and unlike the static `update` it fires
-      // the instance `@AfterUpdate` hook, so the timestamp bump is audited
-      // instead of writing an event row for nothing at all. The row is already
-      // held `FOR UPDATE` above, so no concurrent write can be clobbered.
+      // An instance update rather than a static one, so the `@AfterUpdate` hook
+      // fires and the bump is audited. The row is already held `FOR UPDATE`
+      // above, so the explicit `updatedAt` cannot clobber a concurrent write.
       await session.updateWithCtx(txCtx, updates);
 
       return message;
