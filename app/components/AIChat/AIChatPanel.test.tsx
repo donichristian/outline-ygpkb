@@ -1,19 +1,38 @@
+import "~/stores";
 import * as React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { MobXProviderContext } from "mobx-react";
 import { ThemeProvider } from "styled-components";
 import { buildLightTheme } from "@shared/styles/theme";
+import RootStore from "~/stores/RootStore";
 import { AiChatError } from "~/utils/aiChat";
 import AIChatPanel from "./AIChatPanel";
+import { client } from "~/utils/ApiClient";
 import type * as AiChatModule from "~/utils/aiChat";
+
+// The panel reads the session and message stores, so it needs a root store in
+// context. Seeding it with no sessions leaves the panel on an empty, unselected
+// conversation, which is the state these transcript/composer tests exercise.
+const rootStore = new RootStore();
 
 // The panel composes SidebarLayout, which reaches into stores, the Aside
 // container and framer-motion. None of that is under test here – the panel's
 // transcript, composer and abort behaviour are – so it is stubbed to a plain
-// form/container passthrough.
+// form/container passthrough. `actions` is forwarded so the header's
+// AIChatHistory dropdown stays drivable.
 vi.mock("~/scenes/Document/components/SidebarLayout", () => ({
-  default: ({ children }: { children?: React.ReactNode }) => (
-    <div data-testid="sidebar-layout">{children}</div>
+  default: ({
+    children,
+    actions,
+  }: {
+    children?: React.ReactNode;
+    actions?: React.ReactNode;
+  }) => (
+    <div data-testid="sidebar-layout">
+      <div data-testid="sidebar-header">{actions}</div>
+      {children}
+    </div>
   ),
 }));
 
@@ -25,6 +44,36 @@ vi.mock("~/components/Button", () => ({
     return <button {...rest}>{children}</button>;
   },
 }));
+
+// The header's AIChatHistory composes NudeButton (through ActionButton) and
+// Tooltip (portal + delay timer). Mocking them at the root keeps the
+// dropdown drivable with plain DOM clicks.
+vi.mock("~/components/ActionButton", () => ({
+  default: ({
+    children,
+    ...rest
+  }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
+    <button {...rest}>{children}</button>
+  ),
+}));
+
+vi.mock("~/components/Tooltip", () => ({
+  default: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
+}));
+
+// jsdom's matchMedia has no listener methods, and useMobile subscribes with
+// addEventListener, so a stub that reports no match is installed.
+const matchMediaStub = (query: string) => ({
+  matches: false,
+  media: query,
+  onchange: null,
+  addEventListener: () => {},
+  removeEventListener: () => {},
+  addListener: () => {},
+  removeListener: () => {},
+  dispatchEvent: () => false,
+});
+window.matchMedia = matchMediaStub as unknown as typeof window.matchMedia;
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -49,11 +98,54 @@ vi.mock("~/utils/aiChat", async (importOriginal) => {
 
 const theme = buildLightTheme({});
 
+// The default ApiClient mock answers every path with a benign auth envelope.
+// The two AI endpoints the panel reads need a proper shape instead, so the
+// helper answers them; the shared afterEach restores the default afterwards.
+type SessionSeed = {
+  id: string;
+  title: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+// The panel's mount effect re-reads the session list through
+// aiChatSessions.list(), which replaces the local set with the server's
+// answer. Without this the call wipes out every session added directly to
+// the store, so the mock must agree with what was seeded.
+function mockEndpoints(sessions: SessionSeed[]) {
+  const post = vi.mocked(client.post);
+  post.mockImplementation((async (path: string) => {
+    if (path === "/ai.sessions.list") {
+      return { data: { sessions } };
+    }
+    if (path === "/ai.messages.list") {
+      return { data: { messages: [], truncated: false } };
+    }
+    return { data: { user: {}, team: {}, groups: [], groupUsers: [] } };
+  }) as never);
+}
+
+function seedMessage(
+  store: RootStore,
+  sessionId: string,
+  message: Record<string, unknown>
+) {
+  store.aiChatMessages.add(
+    {
+      sessionId,
+      status: "completed",
+      createdAt: "2024-01-02T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+      ...message,
+    } as never
+  );
+}
+
 /**
  * Renders the panel into a fresh container and returns helpers for driving and
  * inspecting it. The container and React root are torn down by `cleanup`.
  */
-function renderPanel() {
+function renderPanel(rootStore: RootStore) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -62,9 +154,11 @@ function renderPanel() {
 
   act(() => {
     root.render(
-      <ThemeProvider theme={theme}>
-        <AIChatPanel onClose={onClose} />
-      </ThemeProvider>
+      <MobXProviderContext.Provider value={{ rootStore }}>
+        <ThemeProvider theme={theme}>
+          <AIChatPanel onClose={onClose} />
+        </ThemeProvider>
+      </MobXProviderContext.Provider>
     );
   });
 
@@ -74,7 +168,14 @@ function renderPanel() {
   };
 
   const query = (testid: string) =>
-    container.querySelector(`[data-testid="${testid}"]`);
+    document.querySelector(`[data-testid="${testid}"]`);
+
+  const click = async (el: Element | null) => {
+    await act(async () => {
+      el?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+  };
 
   const typeMessage = (text: string) => {
     const input = query("ai-chat-input") as HTMLInputElement;
@@ -110,13 +211,37 @@ function renderPanel() {
     });
   };
 
-  return { container, query, typeMessage, pressEnter, submit, onClose, cleanup };
+  const transcripts = () =>
+    Array.from(
+      document.querySelectorAll(
+        '[data-testid="message-user"], [data-testid="message-assistant"]'
+      )
+    ).map((el) => el.textContent);
+
+  return {
+    query,
+    click,
+    typeMessage,
+    pressEnter,
+    submit,
+    transcripts,
+    onClose,
+    cleanup,
+  };
 }
 
 describe("AIChatPanel", () => {
   afterEach(() => {
     streamAiChat.mockReset();
     document.body.innerHTML = "";
+    // The session/message seeding helpers point the global ApiClient mock at
+    // the AI endpoints, so restore its default implementation.
+    vi.mocked(client.post).mockImplementation(
+      () =>
+        Promise.resolve({
+          data: { user: {}, team: {}, groups: [], groupUsers: [] },
+        }) as never
+    );
   });
 
   it("sends the message when Enter is pressed in the prompt", async () => {
@@ -124,7 +249,8 @@ describe("AIChatPanel", () => {
       yield { type: "delta", text: "ok" };
     });
 
-    const { query, typeMessage, pressEnter, cleanup } = renderPanel();
+    const { query, typeMessage, pressEnter, cleanup } =
+      renderPanel(rootStore);
     typeMessage("hi");
     await pressEnter();
 
@@ -147,7 +273,7 @@ describe("AIChatPanel", () => {
       yield { type: "delta", text: "lo" };
     });
 
-    const { query, typeMessage, submit, cleanup } = renderPanel();
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
     await submit();
 
@@ -188,7 +314,7 @@ describe("AIChatPanel", () => {
       }
     );
 
-    const { query, typeMessage, submit, cleanup } = renderPanel();
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
     await submit();
     await act(async () => {
@@ -219,7 +345,7 @@ describe("AIChatPanel", () => {
       yield { type: "delta", text: "" };
     });
 
-    const { query, typeMessage, submit, cleanup } = renderPanel();
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
     await submit();
 
@@ -236,7 +362,7 @@ describe("AIChatPanel", () => {
       yield { type: "delta", text: "" };
     });
 
-    const { query, typeMessage, submit, cleanup } = renderPanel();
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
     await submit();
 
@@ -255,7 +381,7 @@ describe("AIChatPanel", () => {
       yield { type: "delta", text: "" };
     });
 
-    const { query, typeMessage, submit, cleanup } = renderPanel();
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
     await submit();
 
@@ -272,7 +398,7 @@ describe("AIChatPanel", () => {
       yield { type: "delta", text: "" };
     });
 
-    const { query, typeMessage, submit, cleanup } = renderPanel();
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
     await submit();
 
@@ -280,5 +406,122 @@ describe("AIChatPanel", () => {
       "Your session has expired, refresh the page to continue"
     );
     cleanup();
+  });
+
+  it("keeps the transcript when the panel is closed and reopened", async () => {
+    mockEndpoints([
+      {
+        id: "session-a",
+        title: "Alpha conversation",
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-02T00:00:00.000Z",
+      },
+    ]);
+    const rootStore = new RootStore();
+    rootStore.aiChatSessions.add({
+      id: "session-a",
+      title: "Alpha conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    } as never);
+    // Inserted newest-first on purpose: the transcript must render in seq
+    // order, not in store-insertion order.
+    seedMessage(rootStore, "session-a", {
+      id: "m-a2",
+      seq: 2,
+      role: "assistant",
+      content: "answer one",
+    });
+    seedMessage(rootStore, "session-a", {
+      id: "m-a1",
+      seq: 1,
+      role: "user",
+      content: "question one",
+    });
+
+    const selectSession = async () => {
+      const panel = renderPanel(rootStore);
+      await panel.click(panel.query("ai-chat-history-trigger"));
+      await panel.click(panel.query("ai-chat-session-session-a"));
+      return panel;
+    };
+
+    let panel = await selectSession();
+    expect(panel.transcripts()).toEqual(["question one", "answer one"]);
+    panel.cleanup();
+
+    // Closing the panel is an unmount; reopening mounts a fresh component.
+    panel = await selectSession();
+    expect(panel.transcripts()).toEqual(["question one", "answer one"]);
+    panel.cleanup();
+
+    // A second close/reopen cycle must converge on the same transcript, not
+    // accumulate duplicates of the messages.
+    panel = await selectSession();
+    expect(panel.transcripts()).toEqual(["question one", "answer one"]);
+    panel.cleanup();
+  });
+
+  it("shows each session's own transcript when switching between sessions", async () => {
+    mockEndpoints([
+      {
+        id: "session-a",
+        title: "Alpha conversation",
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-02T00:00:00.000Z",
+      },
+      {
+        id: "session-b",
+        title: "Beta conversation",
+        createdAt: "2024-01-03T00:00:00.000Z",
+        updatedAt: "2024-01-04T00:00:00.000Z",
+      },
+    ]);
+    const rootStore = new RootStore();
+    rootStore.aiChatSessions.add({
+      id: "session-a",
+      title: "Alpha conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    } as never);
+    rootStore.aiChatSessions.add({
+      id: "session-b",
+      title: "Beta conversation",
+      createdAt: "2024-01-03T00:00:00.000Z",
+      updatedAt: "2024-01-04T00:00:00.000Z",
+    } as never);
+    seedMessage(rootStore, "session-a", {
+      id: "m-a",
+      seq: 1,
+      role: "user",
+      content: "Alpha question",
+    });
+    seedMessage(rootStore, "session-b", {
+      id: "m-b",
+      seq: 1,
+      role: "user",
+      content: "Beta question",
+    });
+    seedMessage(rootStore, "session-b", {
+      id: "m-b2",
+      seq: 2,
+      role: "assistant",
+      content: "Beta answer",
+    });
+
+    const panel = renderPanel(rootStore);
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-session-session-b"));
+
+    // Exactly the messages of session B, nothing from A.
+    expect(panel.transcripts()).toEqual(["Beta question", "Beta answer"]);
+
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-session-session-a"));
+
+    // Switching back shows exactly the messages of session A.
+    expect(panel.transcripts()).toEqual(["Alpha question"]);
+
+    panel.cleanup();
   });
 });

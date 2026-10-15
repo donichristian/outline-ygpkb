@@ -29,9 +29,17 @@ type Props = Omit<React.HTMLAttributes<HTMLDivElement>, "title"> & {
   onClose?: () => void;
   /* Whether the sidebar should be scrollable */
   scrollable?: boolean;
+  /* Controls rendered at the trailing end of the header, before the close button */
+  actions?: React.ReactNode;
 };
 
-function SidebarLayout({ title, onClose, children, scrollable = true }: Props) {
+function SidebarLayout({
+  title,
+  onClose,
+  children,
+  scrollable = true,
+  actions,
+}: Props) {
   const { t } = useTranslation();
   const isMobile = useMobile();
   const isWrapped = React.useContext(RightSidebarWrappedContext);
@@ -63,6 +71,7 @@ function SidebarLayout({ title, onClose, children, scrollable = true }: Props) {
     <>
       <Header>
         <Title>{title}</Title>
+        {actions && <Actions>{actions}</Actions>}
         <Tooltip content={t("Close")} shortcut="Esc">
           <Button
             icon={<ForwardIcon />}
@@ -112,6 +121,11 @@ const Header = styled(Flex)`
   padding-inline: 16px 12px;
   min-height: ${HEADER_HEIGHT}px;
   color: ${s("text")};
+  flex-shrink: 0;
+`;
+
+const Actions = styled(Flex)`
+  align-items: center;
   flex-shrink: 0;
 `;
 
