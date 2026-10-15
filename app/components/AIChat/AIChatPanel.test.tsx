@@ -141,6 +141,41 @@ function seedMessage(
   );
 }
 
+// The wire body is what regressed, so the tests below drive the REAL transport
+// against a stubbed `fetch` instead of the module mock: what they assert is the
+// JSON the panel actually puts on the wire, not what it hands to a stub.
+async function useRealTransport() {
+  const actual = await vi.importActual<typeof AiChatModule>("~/utils/aiChat");
+  streamAiChat.mockImplementation(actual.streamAiChat);
+}
+
+/** A 200 response whose body is the given SSE frames, for running a turn to completion. */
+function sseResponse(frames: string) {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(frames));
+      controller.close();
+    },
+  });
+
+  return { ok: true, status: 200, body } as unknown as Response;
+}
+
+/** The API's rejection envelope, which is what a 400 on `/api/ai.chat` returns. */
+function validationErrorResponse(message: string) {
+  return {
+    ok: false,
+    status: 400,
+    json: async () => ({
+      ok: false,
+      error: "validation_error",
+      status: 400,
+      message,
+    }),
+  } as unknown as Response;
+}
+
 /**
  * Renders the panel into a fresh container and returns helpers for driving and
  * inspecting it. The container and React root are torn down by `cleanup`.
@@ -237,6 +272,10 @@ function renderPanel(rootStore: RootStore) {
 describe("AIChatPanel", () => {
   afterEach(() => {
     streamAiChat.mockReset();
+    document.body.innerHTML = "";
+    // The wire-body tests swap in a real transport and a stubbed `fetch`; the
+    // global is restored here so no test can see the previous one's stub.
+    vi.unstubAllGlobals();
     document.body.innerHTML = "";
     // Drafts live in module-level state and `localStorage`, which survive both
     // the DOM reset above and a panel's unmount – the very behaviour under
@@ -581,6 +620,105 @@ describe("AIChatPanel", () => {
     // Switching back shows exactly the messages of session A.
     expect(panel.transcripts()).toEqual(["Alpha question"]);
 
+    panel.cleanup();
+  });
+
+  it("sends the typed question as the last message when the conversation is new", async () => {
+    await useRealTransport();
+
+    const bodies: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        bodies.push(String(init.body));
+        return sseResponse(
+          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+        );
+      })
+    );
+
+    // No session is selected, so this is the very first turn of a brand-new
+    // conversation – the one that went out as `{ messages: [] }`.
+    const panel = renderPanel(new RootStore());
+    panel.typeMessage("what is our refund policy?");
+    await panel.submit();
+
+    expect(bodies).toHaveLength(1);
+    const body = JSON.parse(bodies[0]);
+    expect(Array.isArray(body.messages)).toBe(true);
+    expect(body.messages.length).toBeGreaterThan(0);
+    expect(body.messages.at(-1)).toEqual({
+      role: "user",
+      content: "what is our refund policy?",
+    });
+    panel.cleanup();
+  });
+
+  it("sends only the sessionId for a turn inside a stored conversation", async () => {
+    await useRealTransport();
+
+    const bodies: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init: RequestInit) => {
+        bodies.push(String(init.body));
+        // A session-backed turn is only whole once the server says so.
+        return sseResponse(
+          'event: complete\ndata: {"runId":"run-1","finishReason":"stop"}\n\n'
+        );
+      })
+    );
+
+    mockEndpoints([
+      {
+        id: "session-a",
+        title: "Alpha conversation",
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-02T00:00:00.000Z",
+      },
+    ]);
+    const rootStore = new RootStore();
+    rootStore.aiChatSessions.add({
+      id: "session-a",
+      title: "Alpha conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    } as never);
+
+    const panel = renderPanel(rootStore);
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-session-session-a"));
+    panel.typeMessage("and the deadline?");
+    await panel.submit();
+
+    expect(bodies).toHaveLength(1);
+    // The server rebuilds the prompt window from committed rows, so the body
+    // carries the session alone – no `messages` key at all.
+    expect(JSON.parse(bodies[0])).toEqual({ sessionId: "session-a" });
+    panel.cleanup();
+  });
+
+  it("surfaces the server's message when it rejects the request", async () => {
+    await useRealTransport();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        validationErrorResponse(
+          "messages: Too small: expected array to have >=1 items"
+        )
+      )
+    );
+
+    const panel = renderPanel(new RootStore());
+    panel.typeMessage("hi");
+    await panel.submit();
+
+    const notice = panel.query("ai-chat-error")?.textContent ?? "";
+    expect(notice).toContain(
+      "messages: Too small: expected array to have >=1 items"
+    );
+    expect(notice).not.toContain("The AI chat request failed, try again?");
     panel.cleanup();
   });
 });

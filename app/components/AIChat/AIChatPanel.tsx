@@ -60,9 +60,14 @@ function errorText(error: AiChatError, t: (key: string) => string): string {
       break;
   }
 
-  // `error.message` is an English literal from the transport and can never be
-  // localized, so every failure is rendered from its kind instead.
+  // A rejected request's `error.message` is the server's own JSON envelope
+  // message, already localized server-side, so it is surfaced verbatim – it
+  // names the field or rule that refused the turn, which the generic copy
+  // below cannot. Every other kind's message is an English literal from the
+  // transport that can never be localized, so those render from their kind.
   switch (error.kind) {
+    case "http":
+      return error.message;
     case "network":
       return t("A network error occurred, try again?");
     case "stream":
@@ -214,10 +219,16 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
         return;
       }
 
-      const history = turns.map(({ role, content: body }) => ({
-        role,
-        content: body,
-      }));
+      // The outgoing turn is appended here, not just into `pending`, because
+      // the wire body is the whole conversation: on the first message of a new
+      // one `turns` is empty and `sessionId` is null, so a history built only
+      // from the transcript puts `{ messages: [] }` on the wire and the server
+      // rejects it. Do not "simplify" this away — the question being asked is
+      // part of the request, never a follow-up to it.
+      const history: AiChatMessage[] = [
+        ...turns.map(({ role, content: body }) => ({ role, content: body })),
+        { role: "user", content },
+      ];
 
       setPending((current) => [
         ...current,
@@ -255,6 +266,11 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
           // it into the trailing assistant turn so it reads as an ordinary
           // transcript entry rather than a red error banner. The panel knows it
           // is a refusal here at throw time, so no extra state is tracked.
+          //
+          // Must stay `completed`, not `error`: `turnMarker` renders `error`
+          // as a danger "Failed" badge, which is what this branch avoids. A
+          // session-backed refusal is persisted as Completed server-side, so
+          // this also keeps the client from disagreeing with the stored row.
           setPending((current) => {
             const updated = current.slice();
             updated[updated.length - 1] = {
