@@ -1,7 +1,7 @@
 import { observer } from "mobx-react";
 import * as React from "react";
 import { TeamPreference } from "@shared/types";
-import { useSetRightSidebar } from "~/components/RightSidebarContext";
+import { useSetRightSidebarOverride } from "~/components/RightSidebarContext";
 import useCurrentTeam from "~/hooks/useCurrentTeam";
 import AIChatPanel from "./AIChatPanel";
 
@@ -81,7 +81,7 @@ const AIChatContent = observer(function AIChatContent({
 }: {
   isOpen: boolean;
 }) {
-  const setSidebar = useSetRightSidebar();
+  const setSidebar = useSetRightSidebarOverride();
 
   // Memoized so the sidebar element is referentially stable for the lifetime of
   // the provider. Handing the sidebar a different element tears the panel subtree
