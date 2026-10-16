@@ -35,8 +35,11 @@ new npm dependencies**. TanStack AI is layered on this proven transport in slice
 - **Persisted, server-authoritative sessions**: when a request carries a
   `sessionId`, the conversation is stored in `ai_chat_sessions` and
   `ai_chat_messages` and the provider's prompt window is rebuilt from those rows.
-  A request without `sessionId` stores nothing. Four RPC endpoints expose the
-  model — see [The session API](#the-session-api).
+  The panel creates a session on the first send of a new chat and sends the new
+  turn alongside it, so a conversation always persists and survives closing the
+  panel. At the API level a request with neither `sessionId` nor `messages`
+  stores nothing. Four RPC endpoints expose the model — see
+  [The session API](#the-session-api).
 
 **Read-only with respect to your documents.** The route never writes a
 document, never modifies a collection, and never injects document content into
@@ -86,6 +89,13 @@ probe for documents the user cannot read. The refusal arrives as a normal SSE
 stream containing one `event: error` frame, so the panel renders it as ordinary
 text.
 
+> **The probe can be turned off with `AI_CHAT_GROUNDING=false`.** The local probe
+> is a lexical search over the caller's *Outline* documents. When the provider is
+> itself a retrieval agent over a different corpus (the Hermes KB agent, say),
+> the probe refuses prompts that corpus cannot lexically match, and the provider's
+> own scope rules are the boundary instead. The default remains `true`; only flip
+> it when the provider enforces the boundary itself.
+
 > **The gate is deliberately blunt.** A lexical hit is a claim, not a
 > measurement — no false-reject rate has been measured against the live corpus,
 > and a full-text OR over-matches shared words while under-matching paraphrase.
@@ -113,6 +123,7 @@ once a provider is configured.
 | `AI_CHAT_BASE_URL` | no | Base URL of an OpenAI-compatible provider, e.g. a URL ending in `/v1`. The route appends `/chat/completions`. When unset, the feature is disabled. |
 | `AI_CHAT_API_KEY` | no | **SECRET.** Sent as `Authorization: Bearer <key>` to the provider. **Server-side only — never sent to the browser.** |
 | `AI_CHAT_MODEL` | **when `AI_CHAT_BASE_URL` is set** | Model id forwarded as `model` in the upstream request body. With a base URL configured but no model, the route returns **404** and no upstream request is made. |
+| `AI_CHAT_GROUNDING` | no | Whether the route runs the local grounding probe (§2). Defaults to `true`. Set to `false` when the provider is itself a retrieval agent that enforces the knowledge-base boundary — the local lexical probe would otherwise refuse prompts the provider can answer. |
 
 Defined in `server/env.ts` (the `AI_CHAT_*` block). Notes:
 
@@ -492,8 +503,20 @@ The panel (`app/components/AIChat/AIChatPanel.tsx`) is mounted into the
 **ephemeral** `RightSidebarContext` by `AIChatProvider`
 (`app/components/AIChat/AIChatContext.tsx`) — its open state is React state, not
 a field on `UiStore`, because the persisted `ui.rightSidebar` enum drives the
-Document comments/history panels. A few UI facts worth knowing:
+Document comments/history panels. It writes the context's **override** slot
+rather than its scene slot, so a scene clearing its own sidebar content on route
+change (following a source citation) does not evict the panel: it stays open
+until the user closes it. A few UI facts worth knowing:
 
+- **Source citations stay in the panel.** An assistant answer's bare URLs render
+  as links; a same-origin document URL navigates client-side, so the panel stays
+  mounted and open beside the document.
+- **Reasoning is a collapsed disclosure.** A `choices[0].delta.reasoning_content`
+  chunk is shown behind a collapsed `<details>` whose summary reads "Loading…",
+  never as the reply; it is live-only and never persisted. Mid-turn narration
+  still arrives as `content` until Hermes is set
+  `display.platforms.api_server.interim_assistant_messages: false` — see
+  [design §3.2](./AI-CHAT-DESIGN.md#32-why-the-client-needed-no-rewrite).
 - **Single-line composer.** The input is `type="text"`, not a textarea.
 - **Enter sends.** `Input` only fires `onRequestSubmit` on **Cmd+Enter**; the
   panel handles plain `Enter` locally and calls `preventDefault()` so the browser
@@ -507,6 +530,11 @@ Document comments/history panels. A few UI facts worth knowing:
   session loads its turns through `AIChatMessagesStore.list({ sessionId })`;
   closing and reopening replays the stored transcript rather than a
   client-only one, because the transcript the panel renders is the store's rows.
+- **Fullscreen.** A grow/shrink button in the header passes `fullscreen` to
+  `SidebarLayout`, which then covers the viewport instead of docking to the
+  sidebar edge (a fixed overlay above the sidebars, below menus/popovers). The
+  panel — header, transcript and composer — fills the screen; the toggle is
+  header-only, so on mobile, where the panel is already a drawer, it is not shown.
 - **One turn in flight per session.** A second send while a turn is streaming is
   refused in-band with `kind: "busy"`; the panel surfaces it as a
   retry-later message rather than as an error banner.
