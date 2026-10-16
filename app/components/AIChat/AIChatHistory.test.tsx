@@ -18,6 +18,7 @@ vi.mock("~/scenes/Document/components/SidebarLayout", () => ({
   }: {
     children?: React.ReactNode;
     actions?: React.ReactNode;
+    fullscreen?: boolean;
   }) => (
     <div data-testid="sidebar-layout">
       <div data-testid="sidebar-header">{actions}</div>
@@ -51,8 +52,9 @@ vi.mock("~/components/Tooltip", () => ({
   default: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
 }));
 
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
-  true;
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
 
 class ResizeObserverStub {
   observe() {}
@@ -101,6 +103,19 @@ async function mockEndpoints(sessions: SessionSeed[]) {
     }
     if (path === "/ai.messages.list") {
       return { data: { messages: [], truncated: false } };
+    }
+    // The panel creates a conversation on the first send of a new chat; the
+    // envelope must carry an id and dates, or the history list throws on the
+    // missing timestamp.
+    if (path === "/ai.sessions.create") {
+      return {
+        data: {
+          id: "session-new",
+          title: null,
+          createdAt: "2024-01-05T00:00:00.000Z",
+          updatedAt: "2024-01-05T00:00:00.000Z",
+        },
+      };
     }
     return { data: { user: {}, team: {}, groups: [], groupUsers: [] } };
   }) as never);
@@ -216,7 +231,14 @@ function renderPanel(rootStore: RootStore) {
     });
   };
 
-  return { container: document.body, query, click, typeMessage, submit, cleanup };
+  return {
+    container: document.body,
+    query,
+    click,
+    typeMessage,
+    submit,
+    cleanup,
+  };
 }
 
 describe("AIChatPanel — history, status markers, disclosure", () => {
@@ -231,6 +253,17 @@ describe("AIChatPanel — history, status markers, disclosure", () => {
     seedSessions(rootStore);
     return { rootStore, panel: renderPanel(rootStore) };
   }
+
+  it("lays the session list out vertically so it can scroll", async () => {
+    const { panel } = await mountWith([alphaSeed, betaSeed]);
+    await panel.click(panel.query("ai-chat-history-trigger"));
+
+    const list = panel.query("ai-chat-sessions");
+    expect(list).not.toBeNull();
+    // Flex defaults to a row; a long history must stack, not run sideways.
+    expect(getComputedStyle(list as Element).flexDirection).toBe("column");
+    panel.cleanup();
+  });
 
   it("lists the user's sessions and switches to the correct transcript", async () => {
     const { rootStore, panel } = await mountWith([alphaSeed, betaSeed]);
@@ -337,7 +370,9 @@ describe("AIChatPanel — history, status markers, disclosure", () => {
     expect(panel.query("message-status-aborted")?.textContent).toContain(
       "Stopped"
     );
-    expect(panel.query("message-status-error")?.textContent).toContain("Failed");
+    expect(panel.query("message-status-error")?.textContent).toContain(
+      "Failed"
+    );
 
     panel.cleanup();
   });
@@ -430,7 +465,8 @@ describe("AIChatPanel — history, status markers, disclosure", () => {
     expect(panel.query("message-user")).toBeNull();
     expect(panel.query("ai-chat-input")).not.toBeNull();
 
-    // A message typed now is streamed statelessly, without a sessionId.
+    // A message typed now creates a conversation and streams under it, so the
+    // exchange is stored and survives closing the panel.
     streamAiChat.mockImplementation(async function* () {
       yield { type: "delta", text: "fresh" };
     });
@@ -438,7 +474,7 @@ describe("AIChatPanel — history, status markers, disclosure", () => {
     await panel.submit();
 
     const options = streamAiChat.mock.calls[0][1] as { sessionId?: string };
-    expect(options.sessionId).toBeUndefined();
+    expect(options.sessionId).toBe("session-new");
     expect(panel.query("message-user")?.textContent).toBe("a new question");
 
     panel.cleanup();
@@ -447,7 +483,9 @@ describe("AIChatPanel — history, status markers, disclosure", () => {
   it("shows a one-line disclosure framed as fabrication risk, not a leak", async () => {
     const { panel } = await mountWith([]);
 
-    expect(panel.container.textContent).toContain("may be wrong or out of date");
+    expect(panel.container.textContent).toContain(
+      "may be wrong or out of date"
+    );
     expect(panel.container.textContent).not.toContain("permission");
     expect(panel.container.textContent).not.toContain("exfiltrat");
     expect(panel.container.textContent).not.toContain("access");

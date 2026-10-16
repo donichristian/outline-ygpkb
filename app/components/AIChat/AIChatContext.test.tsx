@@ -28,11 +28,12 @@ vi.mock("~/hooks/useCurrentTeam", () => ({
 // `setSidebar` is spied rather than driven through a real RightSidebarProvider:
 // a context consumer only re-renders when the value changes, so it cannot
 // observe "was setSidebar called again". The setter call log is the only place
-// that difference is visible.
+// that difference is visible. The provider writes the override slot, so that is
+// the hook the spy replaces.
 const setSidebar = vi.hoisted(() => vi.fn());
 vi.mock("~/components/RightSidebarContext", async (importOriginal) => {
   const actual = await importOriginal<typeof SidebarContext>();
-  return { ...actual, useSetRightSidebar: () => setSidebar };
+  return { ...actual, useSetRightSidebarOverride: () => setSidebar };
 });
 
 /**

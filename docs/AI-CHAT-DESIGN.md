@@ -198,7 +198,11 @@ Per-route the stack is `auth({ type: [AuthenticationType.APP] })` →
 exclusive in practice: a `.refine()` in `server/routes/api/ai/schema.ts` requires
 at least one of the two, so `messages` is **optional when `sessionId` is present**
 and required otherwise. When both are supplied, `messages` supplies only the
-*new* turn; the window the provider sees is rebuilt from storage (§2.3).
+*new* turn; the window the provider sees is rebuilt from storage (§2.3). The
+panel sends **both** on every session-backed turn — it creates the session on
+the first send of a new chat and always includes the outgoing turn, because a
+turn sent with the session alone gives the server nothing to append and an empty
+prompt.
 
 Either way the array holds 1–50 messages (`AiChatMaxMessages`), each `content`
 1–8000 characters (`AiChatMaxMessageLength`), and `role` is restricted to `user`
@@ -261,6 +265,7 @@ within 10 ms and `req` never fired at all.
 | Prompt not grounded | in-band `event: error` frame (`kind: "refusal"`), upstream never called; the refusal is stored as a `completed` assistant turn | refusal rendered as ordinary transcript text |
 | Another turn already streaming for this `(user, session)` | Redis `SET … NX` misses → in-band `event: error` frame with `kind: "busy"` | `kind=busy`, "another answer is still being generated" |
 | Upstream non-OK | `ctx.throw(res.status, "AI chat provider error")`; upstream detail logged only | JSON error status, `kind=http` |
+| Upstream unreachable | `fetch` rejects with no HTTP status → `ProviderUnavailableError` (502) | 502 JSON, `kind=http`, "provider is unavailable" |
 | Upstream mid-stream error | `event: error` frame pushed into the same stream | `kind=stream`, provider message |
 | Transport failure / abort | `fetch` rejects or reader rejects | `kind=network`, or `kind=aborted` when the caller aborted |
 | Unparseable frame | `JSON.parse` throws in `parseFrame` | `kind=malformed` |
@@ -282,6 +287,33 @@ and are dropped — and `extractDelta` returns `""` for any frame without
 `choices[0].delta.content`. Frames split across `read()` boundaries are buffered
 until the `\n\n` terminator arrives, so punctuation mid-frame cannot corrupt
 accumulation.
+
+**Reasoning is a third frame kind, routed rather than dropped.** Hermes sends the
+model's thinking as a standard chunk carrying `choices[0].delta.reasoning_content`
+(the DeepSeek-style field). The client parses that into a `reasoning` event (see
+`extractReasoning`) and the panel renders it behind a collapsed `<details>`
+disclosure whose summary reads "Loading…", never as the reply. It is deliberately
+*not* accumulated server-side — `inspectChunk` reads only `choices[].delta.content`
+— so a reopened conversation shows the answer without the thinking that produced
+it.
+
+**Mid-turn narration still pollutes `content`, and that *is* a Hermes setting.** A
+separate stream — mid-turn assistant messages ("Let me fetch…"), gated by
+`display.interim_assistant_messages` — is delivered as ordinary `content` and
+therefore lands in the answer text. The `api_server` platform defaults it **on**
+(`gateway/display_config.py`, `_TIER_HIGH`), so it must be turned off there:
+
+```yaml
+display:
+  platforms:
+    api_server:
+      interim_assistant_messages: false   # no mid-turn narration in `content`
+      tool_progress: off                  # no `hermes.tool.progress` breadcrumbs
+```
+
+`reasoning_content` is unaffected by `show_reasoning` on this surface: the
+chat-completions SSE writer emits the reasoning delta whenever the agent produces
+one, so reasoning keeps flowing to the disclosure regardless of that toggle.
 
 ### 3.3 The terminal frame, and why the server authors it
 
@@ -534,7 +566,7 @@ flowchart TD
 subgraph render["Right sidebar render path"]
 SidebarCtx["RightSidebarContext<br/>ephemeral content slot"]
 Layout["AuthenticatedLayout > Layout<br/>AnimatePresence initial=false"]
-SidebarLayout["SidebarLayout scrollable=false<br/>header + content, no second Scrollable"]
+SidebarLayout["SidebarLayout scrollable=false<br/>header + content, toggles fullscreen overlay"]
 Panel["AIChatPanel<br/>Transcript + Composer"]
 History["AIChatHistory<br/>session dropdown, delete confirmation"]
 Stores["AIChatSessionsStore + AIChatMessagesStore<br/>RootStore keys aiChatSessions / aiChatMessages"]
@@ -694,10 +726,12 @@ document.
 | `AI_CHAT_BASE_URL` | `@Public`, `@IsUrl` (http/https). Appends `/chat/completions`. Unset disables the feature. |
 | `AI_CHAT_API_KEY` | **Secret.** Deliberately **not** `@Public`, so it never serializes to the client. |
 | `AI_CHAT_MODEL` | Forwarded as `model` in the upstream body (§7). **Required to enable the route**: with `AI_CHAT_BASE_URL` set but no model, `POST /api/ai.chat` returns 404 and is never sent upstream. |
+| `AI_CHAT_GROUNDING` | `@IsBoolean`, default `true`. Runs the local grounding probe (§4). Set `false` to skip it when the provider is itself the retrieval agent and enforces the boundary, so the lexical probe does not refuse prompts the provider can answer. |
 
-All three are `@CannotUseWithout("AI_CHAT_BASE_URL")`, so setting the key or the
-model without the base URL is rejected at boot. The feature **fails soft**: an
-unset configuration is a safe no-op, not a broken server.
+`AI_CHAT_API_KEY` and `AI_CHAT_MODEL` are `@CannotUseWithout("AI_CHAT_BASE_URL")`,
+so setting either without the base URL is rejected at boot. `AI_CHAT_GROUNDING`
+is independent of the base URL. The feature **fails soft**: an unset
+configuration is a safe no-op, not a broken server.
 
 The converse — a base URL configured **without** a model — is **not** a boot
 failure. `server/env.ts` logs a non-fatal warning and the process stays up; the

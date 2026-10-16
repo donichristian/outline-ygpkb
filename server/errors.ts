@@ -7,6 +7,15 @@ export function InternalError(message = "Internal error") {
   });
 }
 
+export function ProviderUnavailableError(
+  message = "AI chat provider is unavailable"
+) {
+  return httpErrors(502, message, {
+    id: "provider_unavailable",
+    isReportable: false,
+  });
+}
+
 export function AuthenticationError(
   message = "Authentication required",
   redirectPath = "/"

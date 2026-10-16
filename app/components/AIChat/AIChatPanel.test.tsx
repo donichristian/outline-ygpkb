@@ -3,6 +3,7 @@ import * as React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { MobXProviderContext } from "mobx-react";
+import { MemoryRouter } from "react-router-dom";
 import { ThemeProvider } from "styled-components";
 import { buildLightTheme } from "@shared/styles/theme";
 import RootStore from "~/stores/RootStore";
@@ -25,11 +26,13 @@ vi.mock("~/scenes/Document/components/SidebarLayout", () => ({
   default: ({
     children,
     actions,
+    fullscreen,
   }: {
     children?: React.ReactNode;
     actions?: React.ReactNode;
+    fullscreen?: boolean;
   }) => (
-    <div data-testid="sidebar-layout">
+    <div data-testid="sidebar-layout" data-fullscreen={String(!!fullscreen)}>
       <div data-testid="sidebar-header">{actions}</div>
       {children}
     </div>
@@ -75,8 +78,9 @@ const matchMediaStub = (query: string) => ({
 });
 window.matchMedia = matchMediaStub as unknown as typeof window.matchMedia;
 
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
-  true;
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
 
 // jsdom does not implement ResizeObserver, which Scrollable observes.
 class ResizeObserverStub {
@@ -121,8 +125,30 @@ function mockEndpoints(sessions: SessionSeed[]) {
     if (path === "/ai.messages.list") {
       return { data: { messages: [], truncated: false } };
     }
-    return { data: { user: {}, team: {}, groups: [], groupUsers: [] } };
+    return defaultPost(path);
   }) as never);
+}
+
+/**
+ * The default ApiClient answer. The panel creates a conversation on the first
+ * send of a new chat, so `/ai.sessions.create` must return a session with an id;
+ * every other path gets a benign auth envelope.
+ *
+ * @param path the requested RPC path.
+ * @returns the mocked response envelope.
+ */
+function defaultPost(path: string) {
+  if (path === "/ai.sessions.create") {
+    return {
+      data: {
+        id: "session-new",
+        title: null,
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-01T00:00:00.000Z",
+      },
+    };
+  }
+  return { data: { user: {}, team: {}, groups: [], groupUsers: [] } };
 }
 
 function seedMessage(
@@ -130,15 +156,13 @@ function seedMessage(
   sessionId: string,
   message: Record<string, unknown>
 ) {
-  store.aiChatMessages.add(
-    {
-      sessionId,
-      status: "completed",
-      createdAt: "2024-01-02T00:00:00.000Z",
-      updatedAt: "2024-01-02T00:00:00.000Z",
-      ...message,
-    } as never
-  );
+  store.aiChatMessages.add({
+    sessionId,
+    status: "completed",
+    createdAt: "2024-01-02T00:00:00.000Z",
+    updatedAt: "2024-01-02T00:00:00.000Z",
+    ...message,
+  } as never);
 }
 
 // The wire body is what regressed, so the tests below drive the REAL transport
@@ -191,7 +215,9 @@ function renderPanel(rootStore: RootStore) {
     root.render(
       <MobXProviderContext.Provider value={{ rootStore }}>
         <ThemeProvider theme={theme}>
-          <AIChatPanel onClose={onClose} />
+          <MemoryRouter>
+            <AIChatPanel onClose={onClose} />
+          </MemoryRouter>
         </ThemeProvider>
       </MobXProviderContext.Provider>
     );
@@ -253,8 +279,7 @@ function renderPanel(rootStore: RootStore) {
       )
     ).map((el) => el.textContent);
 
-  const inputValue = () =>
-    (query("ai-chat-input") as HTMLInputElement).value;
+  const inputValue = () => (query("ai-chat-input") as HTMLInputElement).value;
 
   return {
     query,
@@ -270,6 +295,16 @@ function renderPanel(rootStore: RootStore) {
 }
 
 describe("AIChatPanel", () => {
+  // Installed before every test, not just restored after: the panel creates a
+  // conversation on its first send, and the automocked `client.post` resolves
+  // `undefined` until an implementation is set. `invariant` is stripped in this
+  // build, so an undefined envelope is added to the store as a session with no
+  // dates, which blows up the history list.
+  beforeEach(() => {
+    vi.mocked(client.post).mockImplementation(((path: string) =>
+      Promise.resolve(defaultPost(path))) as never);
+  });
+
   afterEach(() => {
     streamAiChat.mockReset();
     document.body.innerHTML = "";
@@ -284,12 +319,8 @@ describe("AIChatPanel", () => {
     clearDraft();
     // The session/message seeding helpers point the global ApiClient mock at
     // the AI endpoints, so restore its default implementation.
-    vi.mocked(client.post).mockImplementation(
-      () =>
-        Promise.resolve({
-          data: { user: {}, team: {}, groups: [], groupUsers: [] },
-        }) as never
-    );
+    vi.mocked(client.post).mockImplementation(((path: string) =>
+      Promise.resolve(defaultPost(path))) as never);
   });
 
   it("sends the message when Enter is pressed in the prompt", async () => {
@@ -297,8 +328,7 @@ describe("AIChatPanel", () => {
       yield { type: "delta", text: "ok" };
     });
 
-    const { query, typeMessage, pressEnter, cleanup } =
-      renderPanel(rootStore);
+    const { query, typeMessage, pressEnter, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
     await pressEnter();
 
@@ -338,6 +368,114 @@ describe("AIChatPanel", () => {
     cleanup();
   });
 
+  it("renders assistant markdown as plain text with a clickable source link", async () => {
+    streamAiChat.mockImplementation(async function* () {
+      yield {
+        type: "delta",
+        text: "See **POS Akademik 01** at http://localhost:3050/doc/pos-akademik-01-Olc4Zkpd4D",
+      };
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+
+    const bubble = query("message-assistant");
+    // Emphasis markers are stripped, not shown literally.
+    expect(bubble?.textContent).toContain("POS Akademik 01 at");
+    expect(bubble?.textContent).not.toContain("**");
+    // The bare source URL is rendered as a link.
+    const link = bubble?.querySelector("a");
+    expect(link).not.toBeNull();
+    expect(link?.getAttribute("href")).toContain(
+      "/doc/pos-akademik-01-Olc4Zkpd4D"
+    );
+    cleanup();
+  });
+
+  it("shows model reasoning in a loading disclosure, never as the answer", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    streamAiChat.mockImplementation(async function* () {
+      yield { type: "reasoning", text: "Let me search the KB" };
+      await gate;
+      yield { type: "delta", text: "The answer" };
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+
+    const disclosure = query("ai-chat-reasoning");
+    expect(disclosure).not.toBeNull();
+    expect(disclosure?.textContent).toContain("Loading");
+    expect(disclosure?.textContent).toContain("Let me search the KB");
+
+    // The answer span excludes the reasoning: it is a disclosure, not the reply.
+    const answerSpan = () =>
+      query("message-assistant")?.querySelector('span[role="status"]')
+        ?.textContent;
+    expect(answerSpan() ?? "").not.toContain("Let me search the KB");
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+
+    expect(answerSpan()).toContain("The answer");
+    // The disclosure is live-only: it is gone once the turn completes.
+    expect(query("ai-chat-reasoning")).toBeNull();
+    cleanup();
+  });
+
+  it("toggles the panel into fullscreen and back", async () => {
+    const { query, click, cleanup } = renderPanel(rootStore);
+    const layout = () =>
+      query("sidebar-layout")?.getAttribute("data-fullscreen");
+
+    expect(layout()).toBe("false");
+
+    await click(query("ai-chat-fullscreen"));
+    expect(layout()).toBe("true");
+
+    await click(query("ai-chat-fullscreen"));
+    expect(layout()).toBe("false");
+    cleanup();
+  });
+
+  it("shows a loading spinner while the response streams, then clears it", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    streamAiChat.mockImplementation(async function* () {
+      yield { type: "delta", text: "" };
+      await gate;
+      yield { type: "delta", text: "done" };
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+
+    // Before the first token arrives the assistant bubble is empty, so the
+    // spinner is the only thing the panel can show for that turn.
+    expect(query("ai-chat-spinner")).not.toBeNull();
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+
+    expect(query("ai-chat-spinner")).toBeNull();
+    expect(query("message-assistant")?.textContent).toContain("done");
+    cleanup();
+  });
+
   it("aborts the in-flight stream when Stop is pressed", async () => {
     let capturedSignal: AbortSignal | undefined;
     let resolveStarted: () => void = () => undefined;
@@ -345,22 +483,20 @@ describe("AIChatPanel", () => {
       resolveStarted = resolve;
     });
 
-    streamAiChat.mockImplementation(
-      async function* (
-        _messages: unknown,
-        options: { signal?: AbortSignal } = {}
-      ) {
-        capturedSignal = options.signal;
-        resolveStarted();
-        yield { type: "delta", text: "" };
-        // Never yield content – the test asserts the abort propagates to the signal.
-        await new Promise<void>((_resolve, reject) => {
-          options.signal?.addEventListener("abort", () =>
-            reject(new Error("aborted"))
-          );
-        });
-      }
-    );
+    streamAiChat.mockImplementation(async function* (
+      _messages: unknown,
+      options: { signal?: AbortSignal } = {}
+    ) {
+      capturedSignal = options.signal;
+      resolveStarted();
+      yield { type: "delta", text: "" };
+      // Never yield content – the test asserts the abort propagates to the signal.
+      await new Promise<void>((_resolve, reject) => {
+        options.signal?.addEventListener("abort", () =>
+          reject(new Error("aborted"))
+        );
+      });
+    });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
@@ -384,11 +520,7 @@ describe("AIChatPanel", () => {
 
   it("renders a visible error notice when the stream throws AiChatError", async () => {
     streamAiChat.mockImplementation(async function* () {
-      throw new AiChatError(
-        "Too many requests",
-        "http",
-        429
-      );
+      throw new AiChatError("Too many requests", "http", 429);
       // eslint-disable-next-line no-unreachable
       yield { type: "delta", text: "" };
     });
@@ -565,6 +697,78 @@ describe("AIChatPanel", () => {
     panel.cleanup();
   });
 
+  it("restores both turns of a stored conversation from the messages endpoint", async () => {
+    const post = vi.mocked(client.post);
+    post.mockImplementation((async (path: string) => {
+      if (path === "/ai.sessions.list") {
+        return {
+          data: {
+            sessions: [
+              {
+                id: "session-a",
+                title: "Alpha conversation",
+                createdAt: "2024-01-01T00:00:00.000Z",
+                updatedAt: "2024-01-02T00:00:00.000Z",
+              },
+            ],
+          },
+        };
+      }
+      if (path === "/ai.messages.list") {
+        return {
+          data: {
+            messages: [
+              {
+                id: "m2",
+                seq: 2,
+                role: "assistant",
+                content: "answer one",
+                status: "completed",
+                runId: "run-1",
+                createdAt: "2024-01-02T00:00:00.000Z",
+              },
+              {
+                id: "m1",
+                seq: 1,
+                role: "user",
+                content: "question one",
+                status: "completed",
+                runId: "run-1",
+                createdAt: "2024-01-01T00:00:00.000Z",
+              },
+            ],
+            truncated: false,
+          },
+        };
+      }
+      return defaultPost(path);
+    }) as never);
+
+    const rootStore = new RootStore();
+    rootStore.aiChatSessions.add({
+      id: "session-a",
+      title: "Alpha conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    } as never);
+    rootStore.aiChatSessions.setSelectedSessionId("session-a");
+
+    const panel = renderPanel(rootStore);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    // Read back through `ai.messages.list`, the path a reopen actually takes:
+    // the assistant turn must render alongside the question.
+    expect(vi.mocked(client.post)).toHaveBeenCalledWith("/ai.messages.list", {
+      sessionId: "session-a",
+    });
+    expect(panel.transcripts()).toEqual(["question one", "answer one"]);
+    panel.cleanup();
+  });
+
   it("shows each session's own transcript when switching between sessions", async () => {
     mockEndpoints([
       {
@@ -634,8 +838,12 @@ describe("AIChatPanel", () => {
     const bodies: string[] = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (_url: string, init: RequestInit) => {
-        bodies.push(String(init.body));
+      vi.fn(async (url: string, init: RequestInit) => {
+        // i18n loads its locale over `fetch` as well; only the chat request is
+        // under test.
+        if (String(url).includes("/api/ai.chat")) {
+          bodies.push(String(init.body));
+        }
         return sseResponse(
           'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
         );
@@ -659,14 +867,18 @@ describe("AIChatPanel", () => {
     panel.cleanup();
   });
 
-  it("sends only the sessionId for a turn inside a stored conversation", async () => {
+  it("sends the new turn alongside the sessionId for a stored conversation", async () => {
     await useRealTransport();
 
     const bodies: string[] = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (_url: string, init: RequestInit) => {
-        bodies.push(String(init.body));
+      vi.fn(async (url: string, init: RequestInit) => {
+        // Only the chat request is under test; i18n loads its locale over
+        // `fetch` too, and would otherwise be recorded as a body.
+        if (String(url).includes("/api/ai.chat")) {
+          bodies.push(String(init.body));
+        }
         // A session-backed turn is only whole once the server says so.
         return sseResponse(
           'event: complete\ndata: {"runId":"run-1","finishReason":"stop"}\n\n'
@@ -697,9 +909,46 @@ describe("AIChatPanel", () => {
     await panel.submit();
 
     expect(bodies).toHaveLength(1);
-    // The server rebuilds the prompt window from committed rows, so the body
-    // carries the session alone – no `messages` key at all.
-    expect(JSON.parse(bodies[0])).toEqual({ sessionId: "session-a" });
+    // The server rebuilds the prompt window from committed rows but appends only
+    // the last message, so the new turn must travel with the session.
+    expect(JSON.parse(bodies[0])).toEqual({
+      messages: [{ role: "user", content: "and the deadline?" }],
+      sessionId: "session-a",
+    });
+    panel.cleanup();
+  });
+
+  it("creates a session on the first send and stores the turn under it", async () => {
+    await useRealTransport();
+
+    const bodies: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        // i18n loads its locale over `fetch` as well; only the chat request is
+        // under test.
+        if (String(url).includes("/api/ai.chat")) {
+          bodies.push(String(init.body));
+        }
+        return sseResponse(
+          'event: complete\ndata: {"runId":"run-1","finishReason":"stop"}\n\n'
+        );
+      })
+    );
+
+    const panel = renderPanel(new RootStore());
+    panel.typeMessage("what is our refund policy?");
+    await panel.submit();
+
+    // A conversation is created before the turn is sent, so the server has a
+    // session to write both rows into – without one the turn is stateless and
+    // the transcript dies with the panel.
+    expect(vi.mocked(client.post)).toHaveBeenCalledWith(
+      "/ai.sessions.create",
+      {}
+    );
+    expect(bodies).toHaveLength(1);
+    expect(JSON.parse(bodies[0]).sessionId).toBe("session-new");
     panel.cleanup();
   });
 

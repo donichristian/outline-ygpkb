@@ -7,7 +7,7 @@ import { toError } from "@shared/utils/error";
 import { Minute } from "@shared/utils/time";
 import aiChatMessageCreator from "@server/commands/aiChatMessageCreator";
 import env from "@server/env";
-import { NotFoundError } from "@server/errors";
+import { NotFoundError, ProviderUnavailableError } from "@server/errors";
 import Logger from "@server/logging/Logger";
 import auth from "@server/middlewares/authentication";
 import { rateLimiter } from "@server/middlewares/rateLimiter";
@@ -444,7 +444,13 @@ router.post(
     // costs no upstream call or latency on a refusal. The refusal is delivered
     // with a `kind: "refusal"` discriminator (see `refuseWithSseError`) so the
     // panel renders it as an ordinary transcript turn rather than an error.
-    const ungroundedReason = await findUngroundedReason(user, resolvedMessages);
+    //
+    // Skipped entirely when `AI_CHAT_GROUNDING` is off: a provider that is itself
+    // a retrieval agent enforces the boundary, and the local lexical probe would
+    // only refuse prompts that corpus cannot lexically match.
+    const ungroundedReason = env.AI_CHAT_GROUNDING
+      ? await findUngroundedReason(user, resolvedMessages)
+      : undefined;
     if (ungroundedReason) {
       Logger.warn("AI chat prompt rejected as ungrounded", {
         requestId,
@@ -555,7 +561,18 @@ router.post(
       upstream = Readable.fromWeb(res.body as NodeReadableStream<Uint8Array>);
     } catch (err) {
       await releaseInFlightLock();
-      throw err;
+
+      // A non-OK upstream response is thrown above as an `http-error` carrying
+      // the provider's own status. Anything else – a refused connection, a DNS
+      // failure – arrives as a plain error with no status, which the global
+      // handler would relabel "Internal error" and report; surface it as an
+      // upstream failure instead, so the panel can tell a downed provider from a
+      // bug in this route.
+      if (typeof (err as { status?: unknown }).status === "number") {
+        throw err;
+      }
+
+      throw ProviderUnavailableError();
     }
 
     setSseHeaders(ctx);

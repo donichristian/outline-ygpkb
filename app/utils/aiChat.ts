@@ -27,6 +27,20 @@ export interface AiChatDelta {
 }
 
 /**
+ * A chunk of the model's reasoning ("thinking") output. Hermes streams it as a
+ * standard chunk with `choices[0].delta.reasoning_content` — the DeepSeek-style
+ * field Open WebUI and the Vercel AI SDK render as a thinking block — so it
+ * never becomes answer text: the server accumulates only `content`, and the
+ * panel shows reasoning behind a disclosure rather than as the reply.
+ */
+export interface AiChatReasoning {
+  /** Discriminator identifying an incremental reasoning chunk. */
+  type: "reasoning";
+  /** The reasoning text produced since the previous chunk. */
+  text: string;
+}
+
+/**
  * Discriminates the category of an {@link AiChatError} so the UI can render an
  * appropriate message and decide whether retrying is meaningful.
  */
@@ -71,6 +85,8 @@ export type AiChatTurnStatus =
 export type AiChatStreamEvent =
   /** An incremental chunk of assistant output. */
   | { type: "delta"; text: string }
+  /** An incremental chunk of the model's reasoning, shown as a disclosure. */
+  | { type: "reasoning"; text: string }
   /** The server's terminal frame, closing the stream. */
   | {
       type: "terminal";
@@ -92,8 +108,8 @@ export interface AiChatOptions {
   signal?: AbortSignal;
   /**
    * The stored conversation to append this turn to, sent in the request body.
-   * When supplied, the server rebuilds the prompt window from committed rows
-   * and the caller sends no `messages` at all.
+   * When supplied, the server rebuilds the prompt window from committed rows;
+   * `messages` is still sent, carrying the new turn the server appends.
    */
   sessionId?: string;
 }
@@ -133,7 +149,7 @@ export class AiChatError extends Error {
  */
 interface ChatCompletionChunk {
   choices?: Array<{
-    delta?: { content?: string };
+    delta?: { content?: string; reasoning_content?: string };
     finish_reason?: string | null;
   }>;
 }
@@ -152,6 +168,22 @@ function extractDelta(payload: unknown): string {
   const content = choice?.delta?.content;
 
   return typeof content === "string" ? content : "";
+}
+
+/**
+ * Extracts the incremental reasoning from a single decoded SSE `data:` payload.
+ * Hermes sends it as `choices[0].delta.reasoning_content`, alongside — never
+ * inside — the answer's `content`.
+ *
+ * @param payload the parsed `data:` JSON payload.
+ * @returns the reasoning delta, or an empty string when the frame carries none.
+ */
+function extractReasoning(payload: unknown): string {
+  const chunk = payload as ChatCompletionChunk;
+  const choice = chunk.choices?.[0];
+  const reasoning = choice?.delta?.reasoning_content;
+
+  return typeof reasoning === "string" ? reasoning : "";
 }
 
 /**
@@ -206,14 +238,18 @@ export async function* parseSSEStream(
             return;
           }
 
-          if (event.done) {
-            return;
-          }
-
-          // Role-only openers, keep-alives and finish markers carry no text.
-          const text = extractDelta(event.data);
-          if (text) {
-            yield { type: "delta", text };
+          // Reasoning rides the same chunk shape as content, on its own
+          // `reasoning_content` field, and is checked first so a chunk carrying
+          // both never reports the thinking as the answer.
+          const reasoning = extractReasoning(event.data);
+          if (reasoning) {
+            yield { type: "reasoning", text: reasoning };
+          } else {
+            // Role-only openers, keep-alives and finish markers carry no text.
+            const text = extractDelta(event.data);
+            if (text) {
+              yield { type: "delta", text };
+            }
           }
         }
 
@@ -226,14 +262,12 @@ export async function* parseSSEStream(
 }
 
 /**
- * The result of parsing one SSE frame: a decoded payload, a server-authored
- * terminal frame, or the upstream `[DONE]` sentinel.
+ * The result of parsing one SSE frame: a decoded payload or a server-authored
+ * terminal frame.
  */
 interface ParsedFrame {
   /** The decoded `data:` payload, or `undefined` for a terminator. */
   data?: unknown;
-  /** Whether the frame ends the stream. */
-  done: boolean;
   /** The outcome named by a server-authored terminal frame. */
   terminal?: "complete" | "truncated";
   /** The run identifier carried by a terminal frame, when present. */
@@ -274,15 +308,20 @@ function parseFrame(frame: string): ParsedFrame | undefined {
   }
 
   if (event === "complete" || event === "truncated") {
-    return { done: true, terminal: event, ...terminalFields(raw) };
+    return { terminal: event, ...terminalFields(raw) };
   }
 
+  // The upstream `[DONE]` sentinel is skipped, not treated as the end. It is
+  // forwarded ahead of the server's own terminal frame, so returning here would
+  // stop iteration one frame short and every session-backed answer would look
+  // truncated. Skipping it lets the read continue to that frame, or to the
+  // socket closing for a stateless turn that has no terminal frame at all.
   if (raw === "[DONE]") {
-    return { done: true };
+    return undefined;
   }
 
   try {
-    return { data: JSON.parse(raw), done: false };
+    return { data: JSON.parse(raw) };
   } catch {
     throw new AiChatError("Received a malformed response frame", "malformed");
   }
@@ -374,9 +413,10 @@ function errorKind(raw: string): "refusal" | "busy" | "stream" {
  * produced. A stateless turn has no terminal frame to wait for (see the check
  * below), so it completes whenever the stream ends.
  *
- * @param messages the conversation to send, oldest first. Omitted from the
- * request body when `options.sessionId` is given, since the server then rebuilds
- * the prompt window from committed rows.
+ * @param messages the conversation to send, oldest first. With a
+ * `options.sessionId` the server rebuilds the prompt window from committed rows
+ * and uses only the last message as the turn to append, so this array must still
+ * carry the question being asked.
  * @param options additional request options.
  * @returns an async generator of assistant text deltas.
  * @throws {AiChatError} when the request is rejected, the stream fails, the
@@ -385,7 +425,7 @@ function errorKind(raw: string): "refusal" | "busy" | "stream" {
 export async function* streamAiChat(
   messages: AiChatMessage[],
   options: AiChatOptions = {}
-): AsyncGenerator<AiChatDelta> {
+): AsyncGenerator<AiChatDelta | AiChatReasoning> {
   let res: Response;
 
   try {
@@ -397,10 +437,15 @@ export async function* streamAiChat(
         [CSRF.headerName]: getCSRFToken(),
         "x-editor-version": EDITOR_VERSION,
       },
+      // The new turn is sent even with a `sessionId`. The server rebuilds the
+      // prompt window from committed rows and takes only the *last* message as
+      // the turn to append, so dropping `messages` here left it with nothing to
+      // write and an empty prompt – the question being asked must travel with
+      // the session.
       body: JSON.stringify(
         options.sessionId === undefined
           ? { messages }
-          : { sessionId: options.sessionId }
+          : { messages, sessionId: options.sessionId }
       ),
       signal: options.signal,
     });
@@ -424,7 +469,7 @@ export async function* streamAiChat(
 
   try {
     for await (const event of parseSSEStream(res.body)) {
-      if (event.type === "delta") {
+      if (event.type === "delta" || event.type === "reasoning") {
         yield event;
         continue;
       }

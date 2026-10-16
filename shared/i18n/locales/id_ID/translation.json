@@ -1922,5 +1922,6 @@
   "Add content": "Add content",
   "Tomorrow": "Tomorrow",
   "Group admin": "Group admin",
-  "Member": "Anggota"
+  "Member": "Anggota",
+  "AI chat is grounded in this workspace, but answers are generated text and may be wrong or out of date — check anything important against the source documents.": "AI chat didasarkan pada basis pengetahuan workspace ini, tetapi jawabannya adalah teks yang dihasilkan dan bisa saja salah atau usang — verifikasi hal-hal penting pada dokumen sumbernya."
 }
