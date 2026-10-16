@@ -91,16 +91,52 @@ describe("#parseSSEStream", () => {
     ]);
   });
 
-  test("should stop iterating at the [DONE] terminator", async () => {
+  test("should read past the [DONE] sentinel to the server's terminal frame", async () => {
+    // The upstream `[DONE]` is forwarded ahead of the server-authored terminal
+    // frame, so treating it as the end stopped one frame short and reported a
+    // completed answer as truncated.
     const stream = streamOf(
       encodeFrames([
         'data: {"choices":[{"delta":{"content":"a"}}]}\n\n',
         "data: [DONE]\n\n",
-        'data: {"choices":[{"delta":{"content":"ignored"}}]}\n\n',
+        'event: complete\ndata: {"runId":"run-1","finishReason":"stop"}\n\n',
       ])
     );
 
-    expect(await collect(parseSSEStream(stream))).toHaveLength(1);
+    expect(await collect(parseSSEStream(stream))).toEqual([
+      { type: "delta", text: "a" },
+      {
+        type: "terminal",
+        outcome: "complete",
+        runId: "run-1",
+        finishReason: "stop",
+      },
+    ]);
+  });
+
+  test("should yield a reasoning event for a reasoning_content chunk, apart from deltas", async () => {
+    // Hermes sends reasoning as `choices[0].delta.reasoning_content`, the
+    // DeepSeek-style field, never inside `content`, so it can be shown as a
+    // disclosure rather than as the answer.
+    const stream = streamOf(
+      encodeFrames([
+        'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n\n',
+        'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n',
+        "data: [DONE]\n\n",
+        'event: complete\ndata: {"runId":"run-1","finishReason":"stop"}\n\n',
+      ])
+    );
+
+    expect(await collect(parseSSEStream(stream))).toEqual([
+      { type: "reasoning", text: "thinking" },
+      { type: "delta", text: "answer" },
+      {
+        type: "terminal",
+        outcome: "complete",
+        runId: "run-1",
+        finishReason: "stop",
+      },
+    ]);
   });
 
   test("should throw a typed error for an event: error frame", async () => {
@@ -335,7 +371,7 @@ describe("#streamAiChat", () => {
     expect(headers["x-editor-version"]).toBe("17.0.0");
   });
 
-  test("should send sessionId in the request body and no messages", async () => {
+  test("should send sessionId alongside the new turn in the request body", async () => {
     const fetchMock = stubStream([complete]);
 
     await collect(streamAiChat(messages, { sessionId: "session-42" }));
@@ -343,8 +379,11 @@ describe("#streamAiChat", () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(init.body as string) as Record<string, unknown>;
 
+    // The server appends only the last message as the new turn, so the question
+    // must travel with the session; sending the session alone left it nothing to
+    // write and an empty prompt.
     expect(body.sessionId).toBe("session-42");
-    expect(body).not.toHaveProperty("messages");
+    expect(body.messages).toEqual(messages);
   });
 
   test("should omit sessionId from the request body when not supplied", async () => {
@@ -456,6 +495,33 @@ describe("#streamAiChat", () => {
     } else {
       expect(raised).toMatchObject({ kind: "truncated" });
     }
+  });
+
+  test("does not report a session-backed answer as truncated when [DONE] precedes the terminal frame", async () => {
+    // The upstream sentinel sits between the deltas and the server's terminal
+    // frame, which is the real wire order. Reading it as the end reported a
+    // finished answer as truncated, the bug this locks against.
+    const fetchMock = stubStream([
+      deltaFrame("An answer"),
+      "data: [DONE]\n\n",
+      complete,
+    ]);
+
+    const seen: string[] = [];
+    let raised: unknown;
+    try {
+      for await (const delta of streamAiChat(messages, {
+        sessionId: "session-1",
+      })) {
+        seen.push(delta.text);
+      }
+    } catch (err) {
+      raised = err;
+    }
+
+    expect(seen).toEqual(["An answer"]);
+    expect(raised).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   test("should raise kind: aborted, distinct from network, on a user Stop", async () => {
