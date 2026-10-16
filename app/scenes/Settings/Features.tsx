@@ -31,6 +31,15 @@ function Features() {
     [team, t]
   );
 
+  const handleAIChatChange = React.useCallback(
+    async (checked: boolean) => {
+      team.setPreference(TeamPreference.AIChat, checked);
+      await team.save();
+      toast.success(t("Settings saved"));
+    },
+    [team, t]
+  );
+
   const handleGuidanceMCPChange = React.useCallback(
     async (ev: React.ChangeEvent<HTMLTextAreaElement>) => {
       team.guidanceMCP = ev.target.value || null;
@@ -138,6 +147,22 @@ function Features() {
           }
         />
       )}
+
+      <SettingRow
+        name={TeamPreference.AIChat}
+        label={t("AI chat")}
+        border={!team.getPreference(TeamPreference.AIChat)}
+        description={t(
+          "Allow members to use the built-in AI chat to ask questions about this workspace."
+        )}
+      >
+        <Switch
+          id={TeamPreference.AIChat}
+          name={TeamPreference.AIChat}
+          checked={team.getPreference(TeamPreference.AIChat)}
+          onChange={handleAIChatChange}
+        />
+      </SettingRow>
 
       <SettingRow
         name="answers"

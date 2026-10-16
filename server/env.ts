@@ -34,6 +34,18 @@ export class Environment {
   constructor() {
     process.nextTick(() => {
       void validate(this).then((errors) => {
+        // Non-fatal: a provider without a model disables one route, it does not
+        // invalidate the configuration of the other services in the cluster. A
+        // hard failure here would take down web, worker, cron, collaboration and
+        // websockets alike, and would crash-loop a two-step env rollout whose
+        // intermediate state is exactly this one. The route gates on the model
+        // itself (see `server/routes/api/ai/ai.ts`).
+        if (this.AI_CHAT_BASE_URL && !this.AI_CHAT_MODEL) {
+          console.warn(
+            "AI_CHAT_BASE_URL is set without AI_CHAT_MODEL; the AI chat route will return 404 until AI_CHAT_MODEL is set."
+          );
+        }
+
         if (errors.length > 0) {
           let output =
             "Environment configuration is invalid, please check the following:\n\n";
@@ -341,6 +353,46 @@ export class Environment {
   @IsOptional()
   @CannotUseWithout("SSL_KEY")
   public SSL_CERT = this.toOptionalString(environment.SSL_CERT);
+
+  /**
+   * The base URL of the AI chat provider, e.g. an OpenAI-compatible endpoint.
+   * When unset, the AI chat feature is disabled.
+   */
+  @Public
+  @IsOptional()
+  @IsUrl({
+    protocols: ["http", "https"],
+    require_protocol: true,
+    require_tld: false,
+  })
+  public AI_CHAT_BASE_URL = this.toOptionalString(environment.AI_CHAT_BASE_URL);
+
+  /**
+   * The API key used to authenticate with the AI chat provider. This is a
+   * secret and is intentionally never exposed to the client.
+   */
+  @IsOptional()
+  @CannotUseWithout("AI_CHAT_BASE_URL")
+  public AI_CHAT_API_KEY = this.toOptionalString(environment.AI_CHAT_API_KEY);
+
+  /**
+   * The model identifier to use for AI chat requests.
+   */
+  @IsOptional()
+  @CannotUseWithout("AI_CHAT_BASE_URL")
+  public AI_CHAT_MODEL = this.toOptionalString(environment.AI_CHAT_MODEL);
+
+  /**
+   * Whether the AI chat route runs the local grounding probe – the full-text
+   * search over the requesting user's own Outline documents that refuses a
+   * prompt before the provider is contacted. Defaults to true. Set to false when
+   * the provider is itself a retrieval agent that enforces the knowledge-base
+   * boundary, so the local probe does not refuse prompts the provider can answer.
+   */
+  @IsBoolean()
+  public AI_CHAT_GROUNDING = this.toBoolean(
+    environment.AI_CHAT_GROUNDING ?? "true"
+  );
 
   /**
    * The default interface language. See translate.getoutline.com for a list of

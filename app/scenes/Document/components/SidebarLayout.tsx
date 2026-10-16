@@ -4,6 +4,7 @@ import * as React from "react";
 import { useTranslation } from "react-i18next";
 import styled from "styled-components";
 import { s, ellipsis } from "@shared/styles";
+import depths from "@shared/styles/depths";
 import Button from "~/components/Button";
 import Flex from "~/components/Flex";
 import { HEADER_HEIGHT } from "~/components/Header";
@@ -29,9 +30,20 @@ type Props = Omit<React.HTMLAttributes<HTMLDivElement>, "title"> & {
   onClose?: () => void;
   /* Whether the sidebar should be scrollable */
   scrollable?: boolean;
+  /* Controls rendered at the trailing end of the header, before the close button */
+  actions?: React.ReactNode;
+  /* When true, cover the whole viewport instead of docking to the sidebar edge */
+  fullscreen?: boolean;
 };
 
-function SidebarLayout({ title, onClose, children, scrollable = true }: Props) {
+function SidebarLayout({
+  title,
+  onClose,
+  children,
+  scrollable = true,
+  actions,
+  fullscreen = false,
+}: Props) {
   const { t } = useTranslation();
   const isMobile = useMobile();
   const isWrapped = React.useContext(RightSidebarWrappedContext);
@@ -63,6 +75,7 @@ function SidebarLayout({ title, onClose, children, scrollable = true }: Props) {
     <>
       <Header>
         <Title>{title}</Title>
+        {actions && <Actions>{actions}</Actions>}
         <Tooltip content={t("Close")} shortcut="Esc">
           <Button
             icon={<ForwardIcon />}
@@ -76,12 +89,33 @@ function SidebarLayout({ title, onClose, children, scrollable = true }: Props) {
     </>
   );
 
+  if (fullscreen) {
+    return <FullscreenRoot role="complementary">{inner}</FullscreenRoot>;
+  }
+
   if (isWrapped) {
     return inner;
   }
 
   return <Aside>{inner}</Aside>;
 }
+
+const FullscreenRoot = styled.div`
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: ${s("background")};
+  /* Above the docked sidebars, below menus/popovers/tooltips so the header's
+     controls still layer over the panel. */
+  z-index: ${depths.overlay};
+
+  /* The header stays put; the panel body takes the rest and scrolls itself. */
+  > *:last-child {
+    flex: 1;
+    min-height: 0;
+  }
+`;
 
 const ForwardIcon = styled(BackIcon)`
   transform: rotate(180deg);
@@ -112,6 +146,11 @@ const Header = styled(Flex)`
   padding-inline: 16px 12px;
   min-height: ${HEADER_HEIGHT}px;
   color: ${s("text")};
+  flex-shrink: 0;
+`;
+
+const Actions = styled(Flex)`
+  align-items: center;
   flex-shrink: 0;
 `;
 

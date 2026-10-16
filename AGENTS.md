@@ -12,6 +12,64 @@ Read these before working here:
 - `docs/ARCHITECTURE.md` — upstream architecture
 - `docs/NON-TECHNICAL-GUIDE.md` — non-engineering overview
 
+## Where to look
+
+| Task | Location | Notes |
+|------|----------|-------|
+| Frontend feature/bug | `app/` | React 19 SPA, MobX stores, react-router v5. See `app/AGENTS.md`. |
+| API endpoint | `server/routes/api/<resource>/<resource>.ts` | RPC-style `POST /api/x.y`. See `server/AGENTS.md`. |
+| DB model / soft-delete | `server/models/*.ts` + `models/helpers/` | Sequelize. See `server/models/AGENTS.md`. |
+| Multi-step write workflow | `server/commands/` | Cross-model orchestration (create/move/import). |
+| Authorization rule | `server/policies/*.ts` | cancan-style; one file per model. |
+| Rich-text editor | `shared/editor/` | ProseMirror. See `shared/editor/AGENTS.md`. |
+| Shared types/utils | `shared/` | Used by both app + server. See `shared/AGENTS.md`. |
+| Third-party integration | `plugins/<name>/` | `server/` + `client/` split. See `plugins/AGENTS.md`. |
+| Background job / queue | `server/queues/` | Bull tasks + processors. See `server/queues/AGENTS.md`. |
+| Command bar / context menu action | `app/actions/definitions/` | Definitions consumed by menus + kbar. |
+
+## Subdirectory knowledge base
+
+This file is the root of a hierarchy. Load the child file nearest the code you
+touch (children never restate parent content):
+
+- `app/AGENTS.md` — SPA structure, stores, models, routing, conventions
+- `app/stores/AGENTS.md` — MobX store patterns
+- `app/components/AGENTS.md` — shared component library
+- `app/scenes/AGENTS.md` — route-level pages
+- `server/AGENTS.md` — Koa app, boot, request flow, commands/policies
+- `server/models/AGENTS.md` — Sequelize models + base classes
+- `server/routes/api/AGENTS.md` — RPC route conventions
+- `server/queues/AGENTS.md` — Bull tasks/processors
+- `shared/AGENTS.md` — cross-cutting shared code
+- `shared/editor/AGENTS.md` — ProseMirror editor internals
+- `plugins/AGENTS.md` — plugin architecture
+
+## Repo layout
+
+```
+outline-ygpkb/
+├── app/          React SPA (MobX, react-router v5, styled-components) → "~" alias
+├── server/       Koa + Sequelize + Bull backend (RPC API, services, queues)
+├── shared/       Code used by BOTH app and server (editor, types, utils) → "@shared"
+├── plugins/      23 integrations, each server/ + client/ (slack, github, …)
+├── scripts/      Windows dev launchers (dev-start/check/stop/reset.ps1, dev.js)
+├── docs/         Technical + architecture guides
+├── build/        GENERATED — never edit or commit
+└── server/migrations/   307 Sequelize migrations (compiled before db:migrate)
+```
+
+## Path aliases (critical for crawling imports)
+
+Defined in `tsconfig.json`; **duplicated** in `vitest.config.ts`, `vite.config.ts`
+(only `~` and `@shared`), and `.swcrc`. Keep all in sync.
+
+| Alias | Resolves to |
+|-------|-------------|
+| `~/*` | `app/*` |
+| `@server/*` | `server/*` |
+| `@shared/*` | `shared/*` |
+| `plugins/*` | `plugins/*` (relative imports used inside plugins) |
+
 ## Repository and branch workflow
 
 Fork: `https://github.com/donichristian/outline-ygpkb`
@@ -156,12 +214,9 @@ For multi-line commit messages, read the message from a file and pipe it to
 
 ## Architecture notes
 
-- `app/` React SPA, MobX stores. `server/` Koa + Sequelize + Bull queues.
-  `shared/` types, editor, utilities used by both. `plugins/` integrations.
 - API is RPC-style: `POST /api/documents.create`, `documents.info`, etc.
 - Collaboration is Y.js over WebSocket; document presence lives in Redis.
 - Deletion is **soft** — `deletedAt` + `deletedById`. Trash is
   `documents.deleted`; permanent purge is `documents.permanent_delete`.
 - The API surface is not REST despite `README.md` saying "RESTful endpoints
   under `/api/`". Trust `server/routes/api/` over the README.
-- `build/` is generated output — never edit or commit it.

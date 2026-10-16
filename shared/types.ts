@@ -506,6 +506,8 @@ export enum TeamPreference {
   MCP = "mcp",
   /** List of disabled embed provider titles. */
   DisabledEmbeds = "disabledEmbeds",
+  /** Whether the AI chat workspace feature is enabled. */
+  AIChat = "aiChat",
 }
 
 export type TeamPreferences = {
@@ -523,6 +525,7 @@ export type TeamPreferences = {
   [TeamPreference.EmailDisplay]?: EmailDisplay;
   [TeamPreference.MCP]?: boolean;
   [TeamPreference.DisabledEmbeds]?: string[];
+  [TeamPreference.AIChat]?: boolean;
 };
 
 export enum NavigationNodeType {

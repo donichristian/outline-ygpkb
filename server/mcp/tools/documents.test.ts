@@ -1111,3 +1111,119 @@ describe("delete_document", () => {
     }
   );
 });
+
+// Regression gate for the agent KB read path: a client (e.g. Hermes) must be
+// able to list the pages of a collection — including nested sub-documents —
+// and only the published ones, mirroring how the KB is consumed end-to-end.
+describe("list_collection_documents", () => {
+  it("returns the published documents in a collection", async () => {
+    const { user, accessToken } = await buildOAuthUser();
+    const collection = await buildCollection({
+      teamId: user.teamId,
+      userId: user.id,
+    });
+    const document = await buildDocument({
+      title: "Akademik SOP",
+      teamId: user.teamId,
+      userId: user.id,
+      collectionId: collection.id,
+    });
+
+    const res = await callMcpTool(
+      server,
+      accessToken,
+      "list_collection_documents",
+      { collectionId: collection.id }
+    );
+
+    expect(res?.result?.isError).toBeFalsy();
+    const nodes = parseMcpListContent<{ id: string; title: string; url: string }>(
+      res?.result?.content
+    );
+
+    const match = nodes.find((n) => n.id === document.id);
+    expect(match).toBeDefined();
+    expect(match!.title).toEqual("Akademik SOP");
+    expect(match!.url).toMatch(/^https?:\/\//);
+  });
+
+  it("includes nested sub-documents in the tree", async () => {
+    const { user, accessToken } = await buildOAuthUser();
+    const collection = await buildCollection({
+      teamId: user.teamId,
+      userId: user.id,
+    });
+    const parent = await buildDocument({
+      title: "Parent",
+      teamId: user.teamId,
+      userId: user.id,
+      collectionId: collection.id,
+    });
+    const child = await buildDocument({
+      title: "Child",
+      teamId: user.teamId,
+      userId: user.id,
+      collectionId: collection.id,
+      parentDocumentId: parent.id,
+    });
+
+    const res = await callMcpTool(
+      server,
+      accessToken,
+      "list_collection_documents",
+      { collectionId: collection.id }
+    );
+
+    const nodes = parseMcpListContent<{
+      id: string;
+      children: { id: string }[];
+    }>(res?.result?.content);
+
+    const parentNode = nodes.find((n) => n.id === parent.id);
+    expect(parentNode).toBeDefined();
+    expect(parentNode!.children.map((c) => c.id)).toContain(child.id);
+  });
+
+  it("does not include drafts in the tree", async () => {
+    const { user, accessToken } = await buildOAuthUser();
+    const collection = await buildCollection({
+      teamId: user.teamId,
+      userId: user.id,
+    });
+    const draft = await buildDocument({
+      title: "Draft page",
+      teamId: user.teamId,
+      userId: user.id,
+      collectionId: collection.id,
+      publishedAt: null,
+    });
+
+    const res = await callMcpTool(
+      server,
+      accessToken,
+      "list_collection_documents",
+      { collectionId: collection.id }
+    );
+
+    const nodes = parseMcpListContent<{ id: string }>(res?.result?.content);
+    expect(nodes.map((n) => n.id)).not.toContain(draft.id);
+  });
+
+  it("does not return documents from another team's collection", async () => {
+    const { accessToken } = await buildOAuthUser();
+    const otherUser = await buildUser();
+    const otherCollection = await buildCollection({
+      teamId: otherUser.teamId,
+      userId: otherUser.id,
+    });
+
+    const res = await callMcpTool(
+      server,
+      accessToken,
+      "list_collection_documents",
+      { collectionId: otherCollection.id }
+    );
+
+    expect(res?.result?.isError).toBe(true);
+  });
+});

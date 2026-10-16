@@ -204,3 +204,141 @@ describe("fetch", () => {
     expect(res!.result!.content![1].text).toContain("Body of the template");
   });
 });
+
+// Large-document retrieval: a big body must be paged or sectioned rather than
+// returned whole, so a single tool result cannot overflow the caller's budget.
+describe("fetch document paging and sections", () => {
+  const buildLargeDocument = async (
+    user: { id: string; teamId: string },
+    collectionId: string
+  ) =>
+    buildDocument({
+      title: "Kurikulum PAUD",
+      teamId: user.teamId,
+      userId: user.id,
+      collectionId,
+      text: [
+        "# Struktur Kurikulum PAUD",
+        "",
+        "## Umum",
+        "",
+        "Ringkasan umum kurikulum.",
+        "",
+        "## Struktur pada PAUD",
+        "",
+        "### Kegiatan intrakurikuler",
+        "",
+        "Detail kegiatan.",
+        "",
+        "### Kegiatan ekstrakurikuler",
+        "",
+        "Detail kegiatan tambahan.",
+        "",
+        "## Penutup",
+        "",
+        "Bagian penutup.",
+      ].join("\n"),
+    });
+
+  it("returns only the requested section for a document", async () => {
+    const { user, accessToken } = await buildOAuthUser();
+    const collection = await buildCollection({
+      teamId: user.teamId,
+      userId: user.id,
+    });
+    const document = await buildLargeDocument(user, collection.id);
+
+    const res = await callMcpTool(server, accessToken, "fetch", {
+      resource: "document",
+      id: document.id,
+      section: "Struktur pada PAUD",
+    });
+
+    expect(res?.result?.isError).toBeFalsy();
+    const body = res!.result!.content![1].text ?? "";
+
+    expect(body).toContain("## Struktur pada PAUD");
+    expect(body).toContain("Kegiatan intrakurikuler");
+    expect(body).toContain("Kegiatan ekstrakurikuler");
+    // The next same-level heading closes the section, so "Penutup" is excluded.
+    expect(body).not.toContain("## Penutup");
+    // And the earlier sibling section is excluded too.
+    expect(body).not.toContain("## Umum");
+  });
+
+  it("returns an error when the requested section does not exist", async () => {
+    const { user, accessToken } = await buildOAuthUser();
+    const collection = await buildCollection({
+      teamId: user.teamId,
+      userId: user.id,
+    });
+    const document = await buildLargeDocument(user, collection.id);
+
+    const res = await callMcpTool(server, accessToken, "fetch", {
+      resource: "document",
+      id: document.id,
+      section: "Bagian yang tidak ada",
+    });
+
+    expect(res?.result?.isError).toBe(true);
+  });
+
+  it("chunks a long body and reports paging metadata", async () => {
+    const { user, accessToken } = await buildOAuthUser();
+    const collection = await buildCollection({
+      teamId: user.teamId,
+      userId: user.id,
+    });
+    const document = await buildDocument({
+      title: "Pedoman Panjang",
+      teamId: user.teamId,
+      userId: user.id,
+      collectionId: collection.id,
+      text: `${"A".repeat(300)}`,
+    });
+
+    const res = await callMcpTool(server, accessToken, "fetch", {
+      resource: "document",
+      id: document.id,
+      offset: 0,
+      limit: 100,
+    });
+
+    expect(res?.result?.isError).toBeFalsy();
+    const metadata = JSON.parse(res!.result!.content![0].text ?? "{}");
+    const body = res!.result!.content![1].text ?? "";
+
+    expect(body.length).toBe(100);
+    expect(metadata.paging.total).toBe(300);
+    expect(metadata.paging.start).toBe(0);
+    expect(metadata.paging.end).toBe(100);
+    expect(metadata.paging.hasMore).toBe(true);
+  });
+
+  it("returns a later chunk when offset is supplied", async () => {
+    const { user, accessToken } = await buildOAuthUser();
+    const collection = await buildCollection({
+      teamId: user.teamId,
+      userId: user.id,
+    });
+    const document = await buildDocument({
+      title: "Pedoman Panjang",
+      teamId: user.teamId,
+      userId: user.id,
+      collectionId: collection.id,
+      text: `${"A".repeat(300)}`,
+    });
+
+    const res = await callMcpTool(server, accessToken, "fetch", {
+      resource: "document",
+      id: document.id,
+      offset: 200,
+      limit: 100,
+    });
+
+    const metadata = JSON.parse(res!.result!.content![0].text ?? "{}");
+    expect(metadata.paging.start).toBe(200);
+    expect(metadata.paging.end).toBe(300);
+    expect(metadata.paging.hasMore).toBe(false);
+  });
+});

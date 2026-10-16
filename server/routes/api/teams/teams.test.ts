@@ -96,6 +96,20 @@ describe("#team.update", () => {
     expect(body.data.preferences.publicBranding).toBe(true);
   });
 
+  it("should update the aiChat team preference", async () => {
+    const admin = await buildAdmin();
+    const res = await server.post("/api/team.update", admin, {
+      body: {
+        preferences: {
+          aiChat: true,
+        },
+      },
+    });
+    const body = await res.json();
+    expect(res.status).toEqual(200);
+    expect(body.data.preferences.aiChat).toBe(true);
+  });
+
   it("should fail upon sending unknown team preference", async () => {
     const admin = await buildAdmin();
     const res = await server.post("/api/team.update", admin, {

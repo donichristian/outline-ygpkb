@@ -34,8 +34,11 @@ import presentUser from "./user";
 import presentView from "./view";
 import presentEmoji from "./emoji";
 import presentAccessRequest from "./accessRequest";
+import { presentAIChatMessage, presentAIChatSession } from "./aiChatSession";
 
 export {
+  presentAIChatMessage,
+  presentAIChatSession,
   presentApiKey,
   presentAttachment,
   presentAuthenticationProvider,
