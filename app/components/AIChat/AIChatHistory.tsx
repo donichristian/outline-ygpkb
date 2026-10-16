@@ -146,7 +146,9 @@ const AIChatHistory = observer(function AIChatHistory({
               {t("Your conversations will appear here")}
             </EmptyHint>
           ) : (
-            <SessionList>
+            // Vertical, not the Flex default of a row: a caller can accumulate
+            // many sessions, and a row scrolls sideways out of the dropdown.
+            <SessionList column data-testid="ai-chat-sessions">
               {sessions.map((session) => {
                 const title = session.title
                   ? session.title
