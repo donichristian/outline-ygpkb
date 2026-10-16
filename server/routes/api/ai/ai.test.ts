@@ -103,10 +103,12 @@ function seedReadableDocument(
 
 const originalBaseUrl = env.AI_CHAT_BASE_URL;
 const originalModel = env.AI_CHAT_MODEL;
+const originalGrounding = env.AI_CHAT_GROUNDING;
 
 afterEach(() => {
   env.AI_CHAT_BASE_URL = originalBaseUrl;
   env.AI_CHAT_MODEL = originalModel;
+  env.AI_CHAT_GROUNDING = originalGrounding;
   vi.unstubAllGlobals();
 });
 
@@ -276,16 +278,48 @@ describe("POST /api/ai.chat", () => {
     expect(body.error).not.toContain("upstream boom");
   });
 
+  it("reports the provider as unavailable when it cannot be reached", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+    await seedReadableDocument(user, "Details of the Zanzibar onboarding flow");
+
+    // A connection-level failure (provider down) rejects with no HTTP status, so
+    // the route must not let it fall through to the generic "Internal error".
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("fetch failed"))
+    );
+
+    const res = await server.post("/api/ai.chat", user, {
+      body: {
+        messages: [
+          { role: "user", content: "Describe the Zanzibar onboarding flow" },
+        ],
+      },
+    });
+
+    expect(res.status).toEqual(502);
+    const body = await res.json();
+    expect(body.ok).toBe(false);
+    expect(body.error).toEqual("provider_unavailable");
+    expect(body.message).toContain("provider is unavailable");
+  });
+
   it("terminates the stream with an in-band error frame when the upstream fails mid-flight", async () => {
     const user = await buildUser();
     await configureAiChat(user.team);
-    await seedReadableDocument(user, "Retention policy is reviewed each quarter");
+    await seedReadableDocument(
+      user,
+      "Retention policy is reviewed each quarter"
+    );
 
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(failingStreamResponse()));
 
     const res = await server.post("/api/ai.chat", user, {
       body: {
-        messages: [{ role: "user", content: "When is the retention policy reviewed?" }],
+        messages: [
+          { role: "user", content: "When is the retention policy reviewed?" },
+        ],
       },
     });
 
@@ -395,6 +429,39 @@ describe("POST /api/ai.chat", () => {
       await seedReadableDocument(user, "Office locations and their timezones");
 
       await expectRefused(user, "What is the capital of France?");
+    });
+
+    it("passes the same probe through when grounding is disabled", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+      // The exact prompt the previous test refuses, with the local probe off:
+      // the provider is asked instead of the caller being refused.
+      env.AI_CHAT_GROUNDING = false;
+      await seedReadableDocument(user, "Office locations and their timezones");
+
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValue(
+          streamingResponse([
+            'data: {"choices":[{"delta":{"content":"Paris"}}]}\n\n',
+            "data: [DONE]\n\n",
+          ])
+        );
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: {
+          messages: [
+            { role: "user", content: "What is the capital of France?" },
+          ],
+        },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const text = await res.text();
+      expect(text).toContain('{"choices":[{"delta":{"content":"Paris"}}]}');
+      expect(text).not.toContain('"kind":"refusal"');
     });
 
     it("refuses a prompt whose only match is a document the user cannot read", async () => {

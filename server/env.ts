@@ -365,9 +365,7 @@ export class Environment {
     require_protocol: true,
     require_tld: false,
   })
-  public AI_CHAT_BASE_URL = this.toOptionalString(
-    environment.AI_CHAT_BASE_URL
-  );
+  public AI_CHAT_BASE_URL = this.toOptionalString(environment.AI_CHAT_BASE_URL);
 
   /**
    * The API key used to authenticate with the AI chat provider. This is a
@@ -383,6 +381,18 @@ export class Environment {
   @IsOptional()
   @CannotUseWithout("AI_CHAT_BASE_URL")
   public AI_CHAT_MODEL = this.toOptionalString(environment.AI_CHAT_MODEL);
+
+  /**
+   * Whether the AI chat route runs the local grounding probe – the full-text
+   * search over the requesting user's own Outline documents that refuses a
+   * prompt before the provider is contacted. Defaults to true. Set to false when
+   * the provider is itself a retrieval agent that enforces the knowledge-base
+   * boundary, so the local probe does not refuse prompts the provider can answer.
+   */
+  @IsBoolean()
+  public AI_CHAT_GROUNDING = this.toBoolean(
+    environment.AI_CHAT_GROUNDING ?? "true"
+  );
 
   /**
    * The default interface language. See translate.getoutline.com for a list of
