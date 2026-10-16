@@ -270,6 +270,8 @@ email notifications or magic-link sign-in.
 
 ## Production deployment
 
+For the full step-by-step runbook, see `docs/DEPLOYMENT.md`.
+
 Use the `Dockerfile` and `docker-compose.yml`. Key variables are documented in
 `.env.sample`: `URL`, `SECRET_KEY`, `UTILS_SECRET`, `DATABASE_URL`,
 `REDIS_URL`, `FILE_STORAGE`, one auth provider, and SMTP.
