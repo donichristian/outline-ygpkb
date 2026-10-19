@@ -14,6 +14,21 @@ import { resolveUpstreamMessages, toUpstreamMessages } from "./ai";
 import * as T from "./schema";
 import { OutOfScopeRefusal } from "./scope";
 
+vi.mock("./tanstack", () => ({
+  loadTanstack: () => import("@tanstack/ai"),
+}));
+
+vi.mock("./adapter", () => ({
+  createAiChatAdapter: () =>
+    import("@tanstack/ai-openai/compatible").then((mod) =>
+      mod.openaiCompatibleText("test-model", {
+        api: "chat-completions" as const,
+        baseURL: "http://localhost:20127/v1",
+        apiKey: "test-key",
+      })
+    ),
+}));
+
 const server = getTestServer();
 
 type SeedRow = {
@@ -378,10 +393,8 @@ describe("POST /api/ai.chat with a stored session", () => {
     });
 
     expect(res.status).toEqual(200);
-    const text = await res.text();
-    expect(text).toContain(
-      'data: {"error":"' + OutOfScopeRefusal + '","kind":"refusal"}'
-    );
+    expect(res.headers.get("x-ai-chat-kind")).toEqual("refusal");
+    expect(await res.text()).toContain(OutOfScopeRefusal);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -397,9 +410,11 @@ describe("POST /api/ai.chat with a stored session", () => {
       { role: AIChatMessageRole.Assistant, content: "It is documented." },
     ]);
 
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(streamingResponse(["data: [DONE]\n\n"]));
+    const fetchMock = vi.fn().mockResolvedValue(
+      streamingResponse([
+        'data: {"choices":[{"delta":{"content":"It is documented."},"finish_reason":"stop"}]}\n\n',
+      ])
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const res = await server.post("/api/ai.chat", user, {
@@ -422,7 +437,7 @@ describe("POST /api/ai.chat with a stored session", () => {
       { role: "assistant", content: "It is documented." },
       { role: "user", content: "And the rollback steps?" },
     ]);
-    expect(await res.text()).not.toContain("event: error");
+    expect(await res.text()).not.toContain('"type":"RUN_ERROR"');
   });
 
   it("grounds on the stored window when the request carries no messages", async () => {
@@ -436,9 +451,11 @@ describe("POST /api/ai.chat with a stored session", () => {
       { role: AIChatMessageRole.User, content: "What is the payments deployment runbook?" },
     ]);
 
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValue(streamingResponse(["data: [DONE]\n\n"]));
+    const fetchMock = vi.fn().mockResolvedValue(
+      streamingResponse([
+        'data: {"choices":[{"delta":{"content":"It is documented."},"finish_reason":"stop"}]}\n\n',
+      ])
+    );
     vi.stubGlobal("fetch", fetchMock);
 
     const res = await server.post("/api/ai.chat", user, {
@@ -450,7 +467,7 @@ describe("POST /api/ai.chat with a stored session", () => {
     expect(upstreamBody(fetchMock.mock.calls[0]).messages).toEqual([
       { role: "user", content: "What is the payments deployment runbook?" },
     ]);
-    expect(await res.text()).not.toContain("event: error");
+    expect(await res.text()).not.toContain('"type":"RUN_ERROR"');
   });
 
   it("returns 404 without contacting the provider for another user's session", async () => {

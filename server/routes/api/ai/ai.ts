@@ -26,6 +26,8 @@ import Redis from "@server/storage/redis";
 import { assertAiChatEnabled } from "./enabled";
 import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
+import { loadTanstack } from "./tanstack";
+import { createAiChatAdapter } from "./adapter";
 
 /** The validated context of a chat request. */
 type ChatContext = APIContext<T.AiChatSchemaReq>;
@@ -40,19 +42,6 @@ type StoredMessage = {
   role: string;
   /** The message text. */
   content: string;
-};
-
-/**
- * The subset of an incremental chat-completions frame this route reads while
- * proxying the upstream body. Every field is optional because providers vary
- * and a role-only opener carries neither – `app/utils/aiChat.ts:81` parses the
- * same shape on the client.
- */
-type ChatCompletionChunk = {
-  choices?: {
-    delta?: { content?: string };
-    finish_reason?: string | null;
-  }[];
 };
 
 /**
@@ -171,18 +160,6 @@ export async function resolveUpstreamMessages({
 const router = new Router();
 
 /**
- * Serializes an arbitrary payload as a single Server-Sent Events frame.
- *
- * @param data The payload to serialize.
- * @param event The optional SSE event name.
- * @returns The encoded SSE frame.
- */
-function sseFrame(data: unknown, event?: string): string {
-  const prefix = event ? `event: ${event}\n` : "";
-  return `${prefix}data: ${JSON.stringify(data)}\n\n`;
-}
-
-/**
  * Applies the SSE response headers shared by the streaming and refusal paths.
  *
  * @param ctx the request context.
@@ -209,7 +186,8 @@ function setSseHeaders(ctx: APIContext) {
 const AiChatInFlightLockTtlSeconds = 5 * Minute.seconds;
 
 /**
- * The `kind` discriminators an `event: error` frame may carry.
+ * The `kind` discriminators a refused turn may carry, surfaced to the client as
+ * the `X-AI-Chat-Kind` response header.
  *
  * `refusal` is the grounding gate declining to answer, which the client renders
  * as an ordinary assistant turn. `busy` is a second turn arriving while the
@@ -219,31 +197,59 @@ const AiChatInFlightLockTtlSeconds = 5 * Minute.seconds;
  * and the two want opposite UI. Anything else the client maps to a plain
  * stream failure.
  */
-type SseErrorKind = "refusal" | "busy";
+type ChatFallbackKind = "refusal" | "busy";
+
+/** Inputs for {@link refuseWithAgUiRun}. */
+type RefuseWithAgUiRunProps = {
+  ctx: APIContext;
+  message: string;
+  kind: ChatFallbackKind;
+  runId: string;
+  sessionId?: string;
+};
 
 /**
- * Ends the response with a single in-band `event: error` frame carrying a
- * `kind` discriminator. The event name stays `error` so a browser holding a
- * pre-rename client bundle still reads the payload's `error` field and degrades
- * to the previous banner rather than silently dropping the answer. The `kind`
- * field lets `app/utils/aiChat.ts` raise an `AiChatError` of kind `refusal`,
- * which the panel renders as an ordinary assistant transcript turn – the
- * boundary answering, not a failure – while the browser still receives a
- * well-formed stream rather than a bare error status.
+ * Ends the response with a complete, server-authored AG-UI run delivered as SSE
+ * `data:` frames, followed by no terminal sentinel.
  *
- * @param ctx the request context.
- * @param message the user-facing message to deliver.
- * @param kind the discriminator, defaulting to the grounding refusal.
+ * The five frame types are `RUN_STARTED`, `TEXT_MESSAGE_START`,
+ * `TEXT_MESSAGE_CONTENT`, `TEXT_MESSAGE_END`, `RUN_FINISHED`, matching the shape
+ * the TanStack transport emits for a real answer so the client's stream reader
+ * needs no special case. The `kind` travels only in the `X-AI-Chat-Kind`
+ * response header — the client must branch on that header alone, never on the
+ * message text and never on the run id, both of which are ordinary values a real
+ * answer also carries.
+ *
+ * @param props the context, message, discriminator, run id, and optional session.
  */
-function refuseWithSseError(
-  ctx: APIContext,
-  message: string,
-  kind: SseErrorKind = "refusal"
-) {
+function refuseWithAgUiRun({
+  ctx,
+  message,
+  kind,
+  runId,
+  sessionId,
+}: RefuseWithAgUiRunProps) {
   setSseHeaders(ctx);
+  ctx.set("X-AI-Chat-Kind", kind);
+  ctx.status = 200;
+
+  const messageId = uuidv4();
+  const timestamp = Date.now();
+  const base = sessionId
+    ? { runId, threadId: sessionId, timestamp }
+    : { runId, timestamp };
+  const frames = [
+    { type: "RUN_STARTED", ...base },
+    { type: "TEXT_MESSAGE_START", messageId, role: "assistant", timestamp },
+    { type: "TEXT_MESSAGE_CONTENT", messageId, delta: message, timestamp },
+    { type: "TEXT_MESSAGE_END", messageId, timestamp },
+    { type: "RUN_FINISHED", ...base },
+  ];
 
   const body = new Readable({ read() {} });
-  body.push(Buffer.from(sseFrame({ error: message, kind }, "error")));
+  for (const frame of frames) {
+    body.push(Buffer.from(`data: ${JSON.stringify(frame)}\n\n`));
+  }
   body.push(null);
   ctx.body = body;
 }
@@ -316,11 +322,15 @@ router.post(
         // Refused in-band rather than thrown: the client is already expecting a
         // stream from this endpoint, and a bare HTTP status here would leave it
         // with no frame to attach the answer to.
-        refuseWithSseError(
+        refuseWithAgUiRun({
           ctx,
-          t("Another answer for this conversation is still being generated"),
-          "busy"
-        );
+          message: t(
+            "Another answer for this conversation is still being generated"
+          ),
+          kind: "busy",
+          runId,
+          sessionId: ownedSession?.id,
+        });
         return;
       }
     }
@@ -411,9 +421,20 @@ router.post(
       // actually asked, not an orphan refusal with nothing above it. Persisting
       // after the gate would leave the refusal as the first row and lose the
       // turn that produced it.
+      const pendingContent =
+        pendingTurn.content ??
+        (pendingTurn.parts ?? [])
+          .filter((p): p is { type: "text"; content: string } =>
+            typeof p === "object" &&
+            p !== null &&
+            "content" in p &&
+            typeof p.content === "string"
+          )
+          .map((p) => p.content)
+          .join("");
       await appendTurn(
         AIChatMessageRole.User,
-        pendingTurn.content,
+        pendingContent,
         AIChatMessageStatus.Completed
       );
     }
@@ -442,14 +463,19 @@ router.post(
     // knowledge from memory otherwise. Refuse here, unless the requesting user's
     // own documents can ground the prompt, so the boundary is structural and
     // costs no upstream call or latency on a refusal. The refusal is delivered
-    // with a `kind: "refusal"` discriminator (see `refuseWithSseError`) so the
-    // panel renders it as an ordinary transcript turn rather than an error.
+    // as a synthetic AG-UI run whose `X-AI-Chat-Kind` header is `refusal` (see
+    // `refuseWithAgUiRun`) so the panel renders it as an ordinary transcript
+    // turn rather than an error.
     //
     // Skipped entirely when `AI_CHAT_GROUNDING` is off: a provider that is itself
     // a retrieval agent enforces the boundary, and the local lexical probe would
     // only refuse prompts that corpus cannot lexically match.
     const ungroundedReason = env.AI_CHAT_GROUNDING
-      ? await findUngroundedReason(user, resolvedMessages)
+      ? await findUngroundedReason(
+          user,
+          // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- resolvedMessages content may be undefined for parts-only AG-UI messages; the gate only operates on text.
+          resolvedMessages as unknown as Array<{ role: string; content: string }>
+        )
       : undefined;
     if (ungroundedReason) {
       Logger.warn("AI chat prompt rejected as ungrounded", {
@@ -474,10 +500,15 @@ router.post(
         AIChatMessageStatus.Completed
       );
 
-      refuseWithSseError(
+      refuseWithAgUiRun({
         ctx,
-        t("This assistant only answers from this workspace’s knowledge base")
-      );
+        message: t(
+          "This assistant only answers from this workspace’s knowledge base"
+        ),
+        kind: "refusal",
+        runId,
+        sessionId: ownedSession?.id,
+      });
 
       // A refusal returns before the stream exists, so `finish` never runs for
       // this request. The lock taken above would otherwise sit until its TTL.
@@ -496,253 +527,146 @@ router.post(
     // is the signal this needs; verified against a live abort, where `res`
     // fired within 10ms and `req` never fired at all. `writableEnded`
     // separates a genuine disconnect from the ordinary close after `end()`.
-    //
-    // The listener is also wired in two stages. `clientGone` is set the moment
-    // the socket drops, because the flag alone already separates a disconnect
-    // from a provider failure; `onClientGone` can only be attached once the
-    // stream state exists, which is after the provider has answered.
-    let clientGone = false;
-    let onClientGone: (() => void) | undefined;
+    // The abort surfaces as the chat middleware's `onAbort` terminal hook.
     const ac = new AbortController();
     ctx.res.on("close", () => {
       if (!ctx.res.writableEnded) {
-        clientGone = true;
         ac.abort();
-        onClientGone?.();
       }
     });
 
-    // Opens the upstream stream. Nothing has been written to the client yet, so
-    // a failure here is an ordinary HTTP error rather than a broken pipe – but
-    // it is still an exit, and the lock has to go with it. Releasing inside the
-    // catch keeps the window between "provider unreachable" and "session usable
-    // again" at one round trip instead of the whole TTL.
-    let upstream: Readable;
+    // SECURITY: threadId from server-owned sessionId, runId server-minted.
+    // Client-supplied tools/forwardedProps/state/resume are ignored.
+    const { chat, chatParamsFromRequestBody, toServerSentEventsResponse } =
+      await loadTanstack();
+
+    // ponytail: chatParamsFromRequestBody validates the AG-UI shape. For a
+    // legacy `{ role, content }` body it throws; the zod schema already
+    // validated the body, so we proceed rather than reject. todo 8 finalises
+    // the AG-UI schema contract.
     try {
-      const res = await fetch(`${env.AI_CHAT_BASE_URL}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          ...(env.AI_CHAT_API_KEY
-            ? { Authorization: `Bearer ${env.AI_CHAT_API_KEY}` }
-            : {}),
-        },
-        body: JSON.stringify({
-          model: env.AI_CHAT_MODEL,
-          stream: true,
-          messages: resolvedMessages,
-        }),
-        signal: ac.signal,
+      await chatParamsFromRequestBody(ctx.request.body);
+    } catch {
+      // Legacy body shape; the zod schema already validated it.
+    }
+
+    // Terminal persistence and lock release ride TanStack's own terminal hooks:
+    // each is awaited before the stream closes, so a row is written and the key
+    // freed on every exit (finish, abort, error). This replaces the hand-rolled
+    // `on("end"/"error")` exits the previous transport used.
+    const persistenceMiddleware = {
+      name: "ai-chat-persist",
+      async onFinish(
+        _hookCtx: { accumulatedContent: string },
+        info: { finishReason: string | null; content: string }
+      ) {
+        if (!ownedSession) {
+          return;
+        }
+        const status = info.finishReason
+          ? AIChatMessageStatus.Completed
+          : AIChatMessageStatus.Truncated;
+        await appendTurn(AIChatMessageRole.Assistant, info.content, status);
+        await releaseInFlightLock();
+      },
+      async onAbort(hookCtx: { accumulatedContent?: string }) {
+        if (!ownedSession) {
+          return;
+        }
+        if (hookCtx.accumulatedContent) {
+          await appendTurn(
+            AIChatMessageRole.Assistant,
+            hookCtx.accumulatedContent,
+            AIChatMessageStatus.Aborted
+          );
+        }
+        await releaseInFlightLock();
+      },
+      async onError(
+        hookCtx: { accumulatedContent?: string },
+        info: { error: unknown }
+      ) {
+        // The real cause stays server-side; the wire carries a generic message
+        // (see the sanitizing wrapper below) so a provider failure never leaks
+        // upstream detail to the client.
+        Logger.error("AI chat stream failed", toError(info.error), {
+          requestId,
+        });
+        if (!ownedSession) {
+          return;
+        }
+        // The adapter rejects a Chat Completions stream that ends without a
+        // `finish_reason`, which is the same signal the previous transport read
+        // as a truncated answer. Map it back so a cut-off turn is stored
+        // `truncated` rather than `error`.
+        const truncated =
+          typeof info.error === "object" &&
+          info.error !== null &&
+          (info.error as { code?: unknown }).code === "incomplete-stream";
+        const status = truncated
+          ? AIChatMessageStatus.Truncated
+          : AIChatMessageStatus.Error;
+        if (hookCtx.accumulatedContent) {
+          await appendTurn(
+            AIChatMessageRole.Assistant,
+            hookCtx.accumulatedContent,
+            status
+          );
+        }
+        await releaseInFlightLock();
+      },
+    } as unknown as Array<unknown>;
+
+    let response: Response;
+    try {
+      const adapter = await createAiChatAdapter();
+      // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- AiChatAdapter is a structurally-compatible subtype of AnyTextAdapter; the adapter type is a union that TanStack's generic parameters reject at compile time but accept at runtime.
+      const stream = chat({
+        adapter: adapter as unknown as Parameters<typeof chat>[0]["adapter"],
+        // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- resolvedMessages is AiChatMessageInput[] which is a valid ModelMessage at runtime; TanStack's generic type parameter is too strict for the schema-inferred shape.
+        messages: resolvedMessages as unknown as Parameters<typeof chat>[0]["messages"],
+        threadId: sessionId,
+        runId,
+        abortController: ac,
+        // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- TanStack's middleware generic defaults to `undefined`; a middleware array is accepted at runtime.
+        middleware: [persistenceMiddleware] as unknown as Parameters<
+          typeof chat
+        >[0]["middleware"],
       });
-
-      // The upstream refused the request. Nothing has been written to the
-      // client yet, so throw a normal error that the API error handler renders
-      // as JSON. The provider's own message is logged only – it can carry
-      // prompts, internal hostnames or account identifiers.
-      if (!res.ok) {
-        const detail = await res.text().catch(() => "");
-        Logger.error(
-          "AI chat upstream request failed",
-          toError(
-            new Error(
-              `Upstream returned ${res.status}${detail ? `: ${detail.slice(0, 500)}` : ""}`
-            )
-          ),
-          { status: res.status, requestId }
-        );
-
-        ctx.throw(res.status, "AI chat provider error");
-      }
-
-      if (!res.body) {
-        ctx.throw(502, "AI chat provider returned an empty response");
-      }
-
-      upstream = Readable.fromWeb(res.body as NodeReadableStream<Uint8Array>);
+      // The adapter surfaces the provider's raw error text inside RUN_ERROR;
+      // replace it with a generic message so the wire never leaks upstream
+      // detail. The real cause is logged by the middleware's onError.
+      const sanitized = (async function* () {
+        for await (const chunk of stream) {
+          if (chunk.type === "RUN_ERROR") {
+            yield {
+              ...chunk,
+              message: "The AI chat stream failed",
+              code: undefined,
+            };
+          } else {
+            yield chunk;
+          }
+        }
+      })();
+      response = toServerSentEventsResponse(sanitized, { abortController: ac });
     } catch (err) {
       await releaseInFlightLock();
-
-      // A non-OK upstream response is thrown above as an `http-error` carrying
-      // the provider's own status. Anything else – a refused connection, a DNS
-      // failure – arrives as a plain error with no status, which the global
-      // handler would relabel "Internal error" and report; surface it as an
-      // upstream failure instead, so the panel can tell a downed provider from a
-      // bug in this route.
       if (typeof (err as { status?: unknown }).status === "number") {
         throw err;
       }
-
       throw ProviderUnavailableError();
     }
 
-    setSseHeaders(ctx);
-
-    // Wrap the upstream body so a mid-stream error can be interposed as an
-    // in-band SSE frame rather than surfacing as a broken pipe. `body` is the
-    // only writer on the socket – koa pipes it into `ctx.res` – so a second
-    // writer would interleave and corrupt frames.
-    const body = new Readable({ read() {} });
-    let ended = false;
-
-    const end = () => {
-      if (ended) {
-        return;
-      }
-      ended = true;
-      body.push(null);
-    };
-
-    // The answer as it is produced, and why generation stopped. `data: [DONE]`
-    // cannot decide either: the OpenAI SDK consumes the sentinel and never
-    // forwards it, so nothing downstream can rely on seeing it. `finish_reason`
-    // is the one signal that survives every provider proxy, so the last frame
-    // carrying a non-null one means the answer is whole and anything else means
-    // it was cut – by an output limit, or by the provider disappearing.
-    let assistantText = "";
-    let lastFinishReason: string | null = null;
-    let frameBuffer = "";
-    const decoder = new TextDecoder();
-
-    // Terminal state of this turn, recorded by whichever exit arrives first.
-    // Every exit funnels through `finish`, which is idempotent: an `end` after
-    // an `error`, or the `error` an abort produces after the disconnect handler
-    // already flushed, must not append a second row for the same turn.
-    let flushed = false;
-
-    const finish = (status: AIChatMessageStatus) => {
-      // A stateless chat is a pure byte proxy: no row is written and no
-      // terminal frame is authored, so the wire format is exactly what it was
-      // before turns were stored.
-      if (!ownedSession) {
-        end();
-        return;
-      }
-      if (flushed) {
-        return;
-      }
-      flushed = true;
-
-      // The server authors its own terminal frame rather than leaving the
-      // client to infer one. Only the clean exits carry a distinction worth
-      // reporting – an aborted or failed stream already terminates with
-      // `event: error`, and in the aborted case there is no client left to
-      // read anything.
-      if (
-        status === AIChatMessageStatus.Completed ||
-        status === AIChatMessageStatus.Truncated
-      ) {
-        body.push(
-          Buffer.from(
-            sseFrame(
-              { runId, finishReason: lastFinishReason },
-              status === AIChatMessageStatus.Truncated
-                ? "truncated"
-                : "complete"
-            )
-          )
-        );
-      }
-
-      const content = assistantText;
-
-      // Never persist an empty assistant turn. The client optimistically
-      // appends `content: ""`, so a turn that produced nothing – an abort
-      // before the first token, a provider that only sent `[DONE]` – would
-      // store a blank bubble indistinguishable from a lost answer.
-      if (!content) {
-        void releaseInFlightLock().finally(end);
-        return;
-      }
-
-      // The response is only terminated once the turn is durable, so a client
-      // that reloads history the instant it sees the terminal frame cannot
-      // race the insert. `appendTurn` cannot reject, so `end` always runs.
-      //
-      // The lock is released in the same breath: a later turn acquires it, then
-      // resolves the upstream window from the database, so dropping it before
-      // the row is committed would let that turn read a window missing the
-      // answer it is meant to continue from.
-      void appendTurn(AIChatMessageRole.Assistant, content, status)
-        .then(() => releaseInFlightLock())
-        .finally(end);
-    };
-
-    // Reads the delta text and the terminal reason out of every complete frame
-    // in the chunk. A frame split across chunks stays buffered until its
-    // blank-line terminator arrives, and a payload that is not JSON is skipped
-    // rather than thrown – a malformed frame must not cost the turn its record.
-    const inspectChunk = (chunk: Buffer) => {
-      frameBuffer += decoder.decode(chunk, { stream: true });
-
-      let separator = frameBuffer.indexOf("\n\n");
-      while (separator !== -1) {
-        const frame = frameBuffer.slice(0, separator);
-        frameBuffer = frameBuffer.slice(separator + 2);
-        separator = frameBuffer.indexOf("\n\n");
-
-        const data = frame
-          .split("\n")
-          .filter((line) => line.startsWith("data:"))
-          .map((line) => line.slice("data:".length).replace(/^ /, ""))
-          .join("\n");
-
-        if (!data || data === "[DONE]") {
-          continue;
-        }
-
-        let payload: ChatCompletionChunk;
-        try {
-          payload = JSON.parse(data) as ChatCompletionChunk;
-        } catch {
-          continue;
-        }
-
-        const choice = payload.choices?.[0];
-        if (typeof choice?.delta?.content === "string") {
-          assistantText += choice.delta.content;
-        }
-        if (typeof choice?.finish_reason === "string") {
-          lastFinishReason = choice.finish_reason;
-        }
-      }
-    };
-
-    upstream.on("data", (chunk: Buffer) => {
-      // Inspected before the forwarding guard: a chunk that arrives after the
-      // client vanished still belongs to the answer being recorded.
-      inspectChunk(chunk);
-      if (!ended && !ctx.res.writableEnded) {
-        body.push(chunk);
-      }
+    ctx.status = response.status;
+    response.headers.forEach((value, key) => {
+      ctx.set(key, value);
     });
-    upstream.on("end", () =>
-      finish(
-        lastFinishReason
-          ? AIChatMessageStatus.Completed
-          : AIChatMessageStatus.Truncated
-      )
-    );
-    upstream.on("error", (err: Error) => {
-      Logger.error("AI chat stream failed", toError(err), { requestId });
-
-      // Pushed even when nothing has flushed yet – `body` buffers until koa
-      // pipes it, whereas throwing now would leave the client with a bare 200.
-      if (!ended) {
-        body.push(
-          Buffer.from(sseFrame({ error: "The AI chat stream failed" }, "error"))
-        );
-      }
-
-      // An abort reaches this handler as an `error` and never as an `end`,
-      // which is why it has to be told apart by the disconnect rather than by
-      // the event that carried it.
-      finish(
-        clientGone ? AIChatMessageStatus.Aborted : AIChatMessageStatus.Error
-      );
-    });
-
-    onClientGone = () => finish(AIChatMessageStatus.Aborted);
-    ctx.body = body;
+    ctx.set("X-Accel-Buffering", "no");
+    ctx.compress = false;
+    ctx.req.setTimeout(0);
+    // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- Node's ReadableStream generic is incompatible with Readable.fromWeb; the runtime type is correct.
+    ctx.body = Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>);
   }
 );
 

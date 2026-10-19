@@ -22,10 +22,17 @@ export const AiChatMaxSessionTitleLength = 200;
  * A single message in the conversation. Only `user` and `assistant` roles are
  * accepted from the client – the `system` role is intentionally rejected so a
  * caller cannot override the server-side instructions.
+ *
+ * ponytail: todo 8 finalises the AG-UI schema contract. For now we accept the
+ * legacy `{ role, content }` shape and the AG-UI `{ id, role, parts }` shape,
+ * and keep `.passthrough()` on the body so `chatParamsFromRequestBody` can see
+ * the extra AG-UI fields (`threadId`, `runId`, `state`, `tools`, etc.).
  */
 const AiChatMessageSchema = z.object({
   role: z.enum(["user", "assistant"]),
-  content: z.string().min(1).max(AiChatMaxMessageLength),
+  content: z.string().min(1).max(AiChatMaxMessageLength).optional(),
+  parts: z.array(z.unknown()).optional(),
+  id: z.string().optional(),
 });
 
 export type AiChatMessageInput = z.infer<typeof AiChatMessageSchema>;
@@ -46,8 +53,11 @@ export const AiChatSchema = BaseSchema.extend({
       /** The stored conversation to append this turn to. */
       sessionId: z.uuid().optional(),
     })
+    .passthrough()
     .refine(
-      (body) => body.messages !== undefined || body.sessionId !== undefined,
+      (body) =>
+        "messages" in body && body.messages !== undefined ||
+        "sessionId" in body && body.sessionId !== undefined,
       {
         message: "messages is required when sessionId is not provided",
         // Relative to `body`: zod prepends the parent path, so "body" here

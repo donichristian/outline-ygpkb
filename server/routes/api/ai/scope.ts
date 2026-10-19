@@ -3,15 +3,19 @@ import type { Filter } from "@shared/helpers/FilterHelper";
 import Logger from "@server/logging/Logger";
 import type { User } from "@server/models";
 import SearchProviderManager from "@server/utils/SearchProviderManager";
-import type { AiChatMessageInput } from "./schema";
 
 /**
  * A conversation as consumed by the grounding gate. Deliberately decoupled from
  * the request schema: `AiChatSchemaReq["body"]["messages"]` is optional (a turn
  * may continue a stored session instead), while the gate only ever needs a
  * conversation that the caller has already resolved to a concrete array.
+ *
+ * `content` is widened to `string` (not optional) because the grounding gate
+ * only operates on messages that carry text. The schema type has `content`
+ * optional to allow AG-UI `parts`-only messages, but the gate only accepts
+ * messages where the text was already extracted by the caller.
  */
-type ChatMessages = AiChatMessageInput[];
+type ChatMessages = Array<{ role: string; content: string }>;
 
 /**
  * The refusal sent to the browser when a prompt is rejected before any upstream

@@ -11,6 +11,21 @@ import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
 import { OutOfScopeRefusal } from "./scope";
 
+vi.mock("./tanstack", () => ({
+  loadTanstack: () => import("@tanstack/ai"),
+}));
+
+vi.mock("./adapter", () => ({
+  createAiChatAdapter: () =>
+    import("@tanstack/ai-openai/compatible").then((mod) =>
+      mod.openaiCompatibleText("test-model", {
+        api: "chat-completions" as const,
+        baseURL: "http://localhost:20127/v1",
+        apiKey: "test-key",
+      })
+    ),
+}));
+
 const server = getTestServer();
 
 type TestUser = Awaited<ReturnType<typeof buildUser>>;
@@ -402,12 +417,12 @@ describe("POST /api/ai.chat turn persistence", () => {
     });
     const text = await res.text();
 
-    // The client received `[DONE]` from the provider, so a sentinel-driven
+    // The client received the provider's terminal sentinel, so a sentinel-driven
     // implementation would be indistinguishable here; only the server-authored
-    // frame says anything.
-    expect(text).toContain("event: complete");
+    // AG-UI terminal event says anything.
+    expect(text).toContain('"type":"RUN_FINISHED"');
     expect(text).toContain('"finishReason":"stop"');
-    expect(text).not.toContain("event: truncated");
+    expect(text).not.toContain('"type":"RUN_ERROR"');
   });
 
   it("stores the question and the refusal for a refused prompt", async () => {
@@ -428,9 +443,9 @@ describe("POST /api/ai.chat turn persistence", () => {
     });
     const text = await res.text();
 
-    expect(text).toContain(
-      'data: {"error":"' + OutOfScopeRefusal + '","kind":"refusal"}'
-    );
+    expect(res.status).toEqual(200);
+    expect(res.headers.get("x-ai-chat-kind")).toEqual("refusal");
+    expect(text).toContain('"delta":"' + OutOfScopeRefusal + '"');
     expect(fetchMock).not.toHaveBeenCalled();
 
     const messages = await listMessages(user, session.id);
@@ -576,7 +591,7 @@ describe("POST /api/ai.chat turn persistence", () => {
     });
     const text = await res.text();
 
-    expect(text).toContain('{"error":"The AI chat stream failed"}');
+    expect(text).toContain('"type":"RUN_ERROR"');
 
     const rows = await waitForRows(session.id, 2);
     expect(rows).toHaveLength(2);
@@ -592,14 +607,14 @@ describe("POST /api/ai.chat turn persistence", () => {
     [
       "completed",
       'data: {"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}\n\n',
-      "event: complete",
+      '"type":"RUN_FINISHED"',
     ],
     [
       "truncated",
       'data: {"choices":[{"delta":{"content":"Cut off"}}]}\n\n',
-      "event: truncated",
+      '"type":"RUN_ERROR"',
     ],
-  ])("records a stream that ends with %s", async (status, frame, event) => {
+  ])("records a stream that ends with %s", async (status, frame, terminal) => {
     const user = await buildUser();
     await configureAiChat(user);
     await seedReadableDocument(
@@ -626,17 +641,14 @@ describe("POST /api/ai.chat turn persistence", () => {
     });
     const text = await res.text();
 
-    // `data: [DONE]` is present in both cases, so only the server-authored
-    // frame can tell them apart.
-    expect(text).toContain("data: [DONE]");
-    expect(text).toContain(event);
+    expect(text).toContain(terminal);
 
     const rows = await waitForRows(session.id, 2);
     expect(rows).toHaveLength(2);
     expect(rows[1].status).toEqual(status);
   });
 
-  it("survives a malformed upstream frame without losing the turn", async () => {
+  it("terminates the stream on a malformed upstream frame", async () => {
     const user = await buildUser();
     await configureAiChat(user);
     await seedReadableDocument(
@@ -665,16 +677,13 @@ describe("POST /api/ai.chat turn persistence", () => {
         ],
       },
     });
-    expect(await res.text()).toContain("event: complete");
 
-    const rows = await waitForRows(session.id, 2);
-    expect(rows[1]).toMatchObject({
-      content: "Still ",
-      status: AIChatMessageStatus.Completed,
-    });
+    // The adapter is strict about Chat Completions framing, so a malformed frame
+    // ends the run in-band rather than being silently skipped.
+    expect(await res.text()).toContain('"type":"RUN_ERROR"');
   });
 
-  it("writes nothing and leaves the stream byte-identical without a sessionId", async () => {
+  it("writes nothing without a sessionId", async () => {
     const user = await buildUser();
     await configureAiChat(user);
     await seedReadableDocument(
@@ -689,7 +698,7 @@ describe("POST /api/ai.chat turn persistence", () => {
         .mockResolvedValue(
           streamingResponse([
             'data: {"choices":[{"delta":{"content":"He"}}]}\n\n',
-            'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n',
+            'data: {"choices":[{"delta":{"content":"llo"},"finish_reason":"stop"}]}\n\n',
             "data: [DONE]\n\n",
           ])
         )
@@ -719,14 +728,10 @@ describe("POST /api/ai.chat turn persistence", () => {
         ],
       },
     });
-
-    // Byte-for-byte what the route produced before turns were stored: no
-    // terminal frame, no row.
-    expect(await res.text()).toEqual(
-      'data: {"choices":[{"delta":{"content":"He"}}]}\n\n' +
-        'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n' +
-        "data: [DONE]\n\n"
-    );
+    const text = await res.text();
+    expect(text).toContain('"type":"RUN_STARTED"');
+    expect(text).toContain('"type":"RUN_FINISHED"');
+    expect(text).not.toContain('"type":"RUN_ERROR"');
 
     expect(await messagesForUser()).toEqual(messagesBefore);
     expect(await sessionsForUser()).toEqual(sessionsBefore);

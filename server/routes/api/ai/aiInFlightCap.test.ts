@@ -7,6 +7,21 @@ import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
 import Redis from "@server/storage/redis";
 
+vi.mock("./tanstack", () => ({
+  loadTanstack: () => import("@tanstack/ai"),
+}));
+
+vi.mock("./adapter", () => ({
+  createAiChatAdapter: () =>
+    import("@tanstack/ai-openai/compatible").then((mod) =>
+      mod.openaiCompatibleText("test-model", {
+        api: "chat-completions" as const,
+        baseURL: "http://localhost:20127/v1",
+        apiKey: "test-key",
+      })
+    ),
+}));
+
 const server = getTestServer();
 
 type TestUser = Awaited<ReturnType<typeof buildUser>>;
@@ -324,19 +339,30 @@ describe("POST /api/ai.chat in-flight cap", () => {
       chat(user, groundedBody(session.id)),
     ]);
 
-    const statuses = [first.status, second.status].sort();
+    const statuses = [first.status, second.status].sort((a, b) => a - b);
     expect(statuses).toEqual([200, 200]);
 
-    const bodies = [await first.text(), await second.text()];
-    const refused = bodies.filter((text) => text.includes('"kind":"busy"'));
-    const streamed = bodies.filter((text) => text.includes("event: complete"));
+    const results = await Promise.all(
+      [first, second].map(async (res) => ({
+        kind: res.headers.get("x-ai-chat-kind"),
+        text: await res.text(),
+      }))
+    );
+    const refused = results.filter((result) => result.kind === "busy");
+    const streamed = results.filter(
+      (result) =>
+        result.kind === null && result.text.includes('"type":"RUN_FINISHED"')
+    );
 
-    // The discriminator is the assertion that matters: a bare error status would
-    // leave the client with no frame, and a `refusal` kind would be
-    // indistinguishable from the grounding gate declining to answer.
+    // The header is the assertion that matters: a bare error status would leave
+    // the client with no frame, and a `refusal` kind would be indistinguishable
+    // from the grounding gate declining to answer.
     expect(refused).toHaveLength(1);
-    expect(refused[0]).toContain('"kind":"busy"');
-    expect(refused[0]).not.toContain('"kind":"refusal"');
+    expect(refused[0].text).toContain('"type":"RUN_STARTED"');
+    expect(refused[0].text).toContain('"type":"RUN_FINISHED"');
+    expect(results.filter((result) => result.kind === "refusal")).toHaveLength(
+      0
+    );
 
     // Exactly one turn streamed and it carried the server-authored terminal
     // frame, so the other body is the refusal rather than a second answer.
@@ -518,7 +544,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
 
     const res = await chat(user, groundedBody(session.id));
     expect(res.status).toEqual(200);
-    expect(await res.text()).toContain('{"error":"The AI chat stream failed"}');
+    expect(await res.text()).toContain('"type":"RUN_ERROR"');
 
     expect(await Redis.defaultClient.get(lockKey(user, session.id))).toEqual(
       null
