@@ -284,7 +284,9 @@ function fakeConnection(
           yield chunk("MESSAGES_SNAPSHOT", { messages: script.snapshot });
         }
 
-        if (script.reasoning) {
+        // `undefined` skips the frames entirely; an empty string still replays
+        // the part, which is the case a disclosure must not render for.
+        if (script.reasoning !== undefined) {
           yield chunk("REASONING_MESSAGE_START", {
             messageId: `r-${id}`,
             role: "reasoning",
@@ -661,6 +663,8 @@ describe("AIChatPanel", () => {
 
     const disclosure = query("ai-chat-reasoning");
     expect(disclosure).not.toBeNull();
+    // Collapsed while it streams: the thinking is available, not in the way.
+    expect((disclosure as HTMLDetailsElement).open).toBe(false);
     expect(disclosure?.textContent).toContain("Loading");
     expect(disclosure?.textContent).toContain("Let me search the KB");
 
@@ -670,14 +674,70 @@ describe("AIChatPanel", () => {
         ?.textContent;
     expect(answerSpan() ?? "").not.toContain("Let me search the KB");
 
+    // The live turn is render-only: nothing was written to the store while it
+    // streams.
+    expect(rootStore.aiChatMessages.orderedData).toHaveLength(0);
+
     release();
     await flush();
 
     expect(answerSpan()).toContain("The answer");
     // The disclosure is live-only: it is gone once the turn completes.
     expect(query("ai-chat-reasoning")).toBeNull();
+
+    // Thinking never lands in a stored row: the settled assistant row carries
+    // the answer alone, and the transcript read back from it still excludes the
+    // reasoning.
+    const assistantRows = rootStore.aiChatMessages.orderedData.filter(
+      (row) => row.role === "assistant"
+    );
+    expect(assistantRows).toHaveLength(1);
+    expect(assistantRows[0].content).toBe("The answer");
+    expect(assistantRows[0].content).not.toContain("Let me search the KB");
+    expect(
+      Array.from(
+        document.querySelectorAll('[data-testid="message-assistant"]')
+      )
+        .map((el) => el.textContent)
+        .join("")
+    ).not.toContain("Let me search the KB");
     cleanup();
   });
+
+  it.each([
+    ["empty", ""],
+    ["whitespace-only", "   "],
+  ])(
+    "renders no reasoning disclosure for %s thinking",
+    async (_label, reasoning) => {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+
+      fakeConnection({
+        reasoning,
+        deltas: ["The answer"],
+        gateBeforeText: gate,
+        question: "hi",
+      });
+
+      const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+      typeMessage("hi");
+      await submit();
+
+      // The turn is in flight, but there is no thinking text to disclose, so
+      // no empty disclosure is rendered.
+      expect(query("message-assistant")).not.toBeNull();
+      expect(query("ai-chat-reasoning")).toBeNull();
+
+      release();
+      await flush();
+
+      expect(query("ai-chat-reasoning")).toBeNull();
+      cleanup();
+    }
+  );
 
   it("renders a completed tool call with its name, input, and output", async () => {
     let release: () => void = () => undefined;

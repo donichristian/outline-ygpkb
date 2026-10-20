@@ -626,7 +626,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
                     aria-label={t("Loading")}
                   />
                 )}
-                {isStreamingAssistant && reasoning && (
+                {isStreamingAssistant && reasoning.trim() && (
                   <ReasoningDisclosure data-testid="ai-chat-reasoning">
                     <summary>{`${t("Loading")}…`}</summary>
                     <ReasoningBody>{reasoning}</ReasoningBody>
