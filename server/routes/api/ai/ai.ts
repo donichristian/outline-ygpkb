@@ -253,6 +253,17 @@ function refuseWithAgUiRun({
   ctx.body = body;
 }
 
+/**
+ * Streams an assistant answer as AG-UI over SSE, with optional turn storage.
+ *
+ * The response is an AG-UI wrap around the provider's stream, **not** a
+ * transparent proxy. TanStack re-frames the provider's chunks as `data:`
+ * AG-UI events and appends its own terminal `RUN_FINISHED`, so byte-identity
+ * with the provider's wire format is deliberately **RETIRED** as a guarantee:
+ * a wrapping transport cannot reproduce the provider's bytes, and no consumer
+ * may depend on them. A stateless request (`messages` with no `sessionId`)
+ * returns this same AG-UI stream and stores nothing.
+ */
 router.post(
   "ai.chat",
   auth({ type: [AuthenticationType.APP] }),
