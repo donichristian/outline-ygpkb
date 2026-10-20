@@ -245,6 +245,15 @@ describe("AIChatPanel — history, status markers, disclosure", () => {
   afterEach(() => {
     createAiChatConnection.mockReset();
     document.body.innerHTML = "";
+    // Drafts live in localStorage, which outlives a test; a leaked draft would
+    // be restored into the next test's composer. Wiped by index: the shared
+    // test localStorage stub has no `clear`.
+    for (let i = window.localStorage.length; i-- > 0; ) {
+      const key = window.localStorage.key(i);
+      if (key !== null) {
+        window.localStorage.removeItem(key);
+      }
+    }
   });
 
   async function mountWith(sessions: SessionSeed[]) {
@@ -432,13 +441,19 @@ describe("AIChatPanel — history, status markers, disclosure", () => {
     panel.cleanup();
   });
 
-  it("deleting the active session starts a new one", async () => {
+  it("deleting the active session starts a new one and clears its draft", async () => {
     const { rootStore, panel } = await mountWith([alphaSeed, betaSeed]);
     seedMessage(rootStore, "session-a", "Alpha question");
+    writeDraft("unsent in the active session", "session-a");
+    flushDrafts();
 
     await panel.click(panel.query("ai-chat-history-trigger"));
     await panel.click(panel.query("ai-chat-session-session-a"));
     expect(panel.query("message-user")?.textContent).toBe("Alpha question");
+    // Selecting a session restores its draft.
+    expect((panel.query("ai-chat-input") as HTMLInputElement).value).toBe(
+      "unsent in the active session"
+    );
 
     await panel.click(panel.query("ai-chat-history-trigger"));
     await panel.click(panel.query("ai-chat-delete-session-a"));
@@ -447,8 +462,83 @@ describe("AIChatPanel — history, status markers, disclosure", () => {
     expect(rootStore.aiChatSessions.get("session-a")).toBeUndefined();
     expect(panel.query("message-user")).toBeNull();
     expect(panel.query("ai-chat-input")).not.toBeNull();
+    // The deleted conversation's draft is garbage-collected and the composer
+    // falls back to the pending (no-session) draft, which is empty here.
+    expect(window.localStorage.getItem("aiChat.draft.session-a")).toBeNull();
+    expect((panel.query("ai-chat-input") as HTMLInputElement).value).toBe("");
 
     panel.cleanup();
+  });
+
+  it("keeps a draft typed during a stopped turn and re-reads it on the next mount", async () => {
+    await mockEndpoints([
+      alphaSeed,
+      betaSeed,
+      {
+        id: "session-new",
+        title: null,
+        createdAt: "2024-01-05T00:00:00.000Z",
+        updatedAt: "2024-01-05T00:00:00.000Z",
+      },
+    ]);
+    const rootStore = new RootStore();
+    seedSessions(rootStore);
+    const panel = renderPanel(rootStore);
+
+    // Streams the run start, then holds the connection open until the turn is
+    // aborted – the shape of a turn the user stops mid-answer.
+    createAiChatConnection.mockImplementation((() => ({
+      connect: (
+        _messages: unknown,
+        _data: unknown,
+        signal: AbortSignal,
+        context?: { threadId?: string }
+      ) =>
+        (async function* () {
+          yield {
+            type: "RUN_STARTED",
+            threadId: context?.threadId,
+            runId: "r",
+          };
+          await new Promise<never>((_resolve, reject) => {
+            const abort = () =>
+              reject(
+                new DOMException("The operation was aborted", "AbortError")
+              );
+            if (signal.aborted) {
+              abort();
+            } else {
+              signal.addEventListener("abort", abort, { once: true });
+            }
+          });
+        })(),
+    })) as never);
+
+    panel.typeMessage("first question");
+    await panel.submit();
+    // The turn is still in flight, so the composer keeps accepting input.
+    expect(panel.query("ai-chat-stop")).not.toBeNull();
+
+    panel.typeMessage("half-typed follow-up");
+    await panel.click(panel.query("ai-chat-stop"));
+    panel.cleanup();
+
+    // Stop aborts the turn but must not discard what was typed during it.
+    expect(window.localStorage.getItem("aiChat.draft.session-new")).toBe(
+      "half-typed follow-up"
+    );
+
+    // Next mount: the draft is read back from storage under the session key.
+    const reopenedStore = new RootStore();
+    const reopened = renderPanel(reopenedStore);
+    await reopened.click(reopened.query("ai-chat-history-trigger"));
+    await reopened.click(reopened.query("ai-chat-session-session-new"));
+
+    expect((reopened.query("ai-chat-input") as HTMLInputElement).value).toBe(
+      "half-typed follow-up"
+    );
+
+    reopened.cleanup();
   });
 
   it("New chat returns the panel to a fresh, unselected conversation", async () => {

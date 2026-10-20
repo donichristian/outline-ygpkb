@@ -31,6 +31,23 @@ import type {
 } from "~/utils/aiChat";
 import AIChatHistory from "./AIChatHistory";
 
+/*
+ * State ownership in this panel.
+ *
+ * React-local (dies with the panel):
+ * - `pending` – turns still streaming, before the store re-read
+ * - `isStreaming`, `error`, `reasoning` – the in-flight turn only
+ * - `input` – the composer's current text
+ *
+ * Store-backed (`aiChatSessions` / `aiChatMessages`, survives close/reopen):
+ * - committed transcript rows, session list and selected session
+ *
+ * `ChatClient` is a per-turn frame source only; it never owns committed
+ * history. Drafts live in `localStorage`, keyed per session
+ * (`aiChat.draft.<id>`) plus a pending key (`aiChat.draft.pending`) for text
+ * typed before a session exists — see `app/utils/aiChat.ts`.
+ */
+
 type Props = {
   /** Called when the user closes the panel. */
   onClose: () => void;

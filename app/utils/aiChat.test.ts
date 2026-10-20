@@ -51,6 +51,12 @@ describe("draft helpers", () => {
 
     expect(readDraft()).toBe("typed after a reload, no session yet");
     expect(readDraft(sessionA)).toBe("typed before the session existed");
+
+    // The pending draft is cleared by its own key: discarding text typed before
+    // a session existed must not touch a stored session's draft.
+    clearDraft();
+    expect(readDraft()).toBe("");
+    expect(readDraft(sessionA)).toBe("typed before the session existed");
   });
 
   test("should clear the draft on send", () => {
