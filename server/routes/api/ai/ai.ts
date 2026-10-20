@@ -307,7 +307,14 @@ router.post(
     const { user } = ctx.state.auth;
     assertAiChatEnabled(user);
 
-    const { messages, sessionId } = ctx.input.body;
+    const { messages } = ctx.input.body;
+    // A TanStack client addresses a continued conversation by its AG-UI
+    // `threadId`, a legacy RPC caller by `sessionId`. Both name the same stored
+    // session, so the alias is resolved exactly once here: every downstream
+    // read – the ownership lookup, the lock key, the persistence middleware and
+    // the `threadId` handed to `chat()` – then uses this one value. Absent both,
+    // the request is stateless and stores nothing.
+    const sessionId = ctx.input.body.sessionId ?? ctx.input.body.threadId;
     const requestId = ctx.get("x-request-id");
 
     // One generation run per call, stamped on both rows of the turn so a

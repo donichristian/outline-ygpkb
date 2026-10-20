@@ -52,8 +52,9 @@ export const AiChatSchema = BaseSchema.extend({
     .object({
       /**
        * The ordered conversation to send to the AI chat provider. Optional only
-       * when `sessionId` is given, because in that case the conversation is
-       * loaded from the stored session rather than supplied by the client.
+       * when a session identifier is given, because in that case the
+       * conversation is loaded from the stored session rather than supplied by
+       * the client.
        */
       messages: z
         .array(AiChatMessageSchema)
@@ -62,12 +63,20 @@ export const AiChatSchema = BaseSchema.extend({
         .optional(),
       /** The stored conversation to append this turn to. */
       sessionId: z.uuid().optional(),
+      /**
+       * The AG-UI thread id. An `@tanstack/ai-client` caller has no `sessionId`
+       * field on the wire – its only conversation identifier is this one – so
+       * it is accepted as an alias for the stored session. It is only ever used
+       * to look up a session the caller already owns, never to create one.
+       */
+      threadId: z.uuid().optional(),
     })
     .passthrough()
     .refine(
       (body) =>
         "messages" in body && body.messages !== undefined ||
-        "sessionId" in body && body.sessionId !== undefined,
+        "sessionId" in body && body.sessionId !== undefined ||
+        "threadId" in body && body.threadId !== undefined,
       {
         message: "messages is required when sessionId is not provided",
         // Relative to `body`: zod prepends the parent path, so "body" here

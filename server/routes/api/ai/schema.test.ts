@@ -67,6 +67,23 @@ describe("AiChatSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts an AG-UI threadId with no messages", () => {
+    const result = parseChat({ threadId: SessionId });
+    expect(result.success).toBe(true);
+  });
+
+  it("accepts an AG-UI threadId alongside messages", () => {
+    const result = parseChat({
+      threadId: SessionId,
+      messages: [{ role: "user", content: "What is our retention policy?" }],
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a non-uuid threadId", () => {
+    expectBadRequest(parseChat({ threadId: "not-a-uuid" }));
+  });
+
   it("rejects a body with neither messages nor sessionId", () => {
     const result = parseChat({});
     expectBadRequest(result);

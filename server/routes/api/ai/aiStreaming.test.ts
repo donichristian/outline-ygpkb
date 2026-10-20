@@ -389,6 +389,78 @@ describe("POST /api/ai.chat turn persistence", () => {
     );
   });
 
+  it("persists an AG-UI body addressed only by threadId", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(
+      user,
+      "The deployment runbook covers the payments service"
+    );
+    const session = await buildSession(user);
+
+    const { fetchMock } = providerContacted();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const question = "What is the payments deployment runbook?";
+    const res = await server.post("/api/ai.chat", user, {
+      body: {
+        // Exactly the AG-UI shape `@tanstack/ai-client` puts on the wire: no
+        // `sessionId`, the conversation identifier is `threadId`.
+        threadId: session.id,
+        runId: "client-run-id",
+        messages: [
+          {
+            id: "message-1",
+            role: "user",
+            parts: [{ type: "text", content: question }],
+          },
+        ],
+      },
+    });
+    const text = await res.text();
+
+    expect(res.status).toEqual(200);
+    expect(res.headers.get("x-ai-chat-kind")).toEqual(null);
+
+    const messages = await listMessages(user, session.id);
+    expect(messages).toHaveLength(2);
+    const [assistant, storedQuestion] = messages;
+    expect(storedQuestion).toMatchObject({
+      seq: 1,
+      role: AIChatMessageRole.User,
+      content: question,
+      status: AIChatMessageStatus.Completed,
+    });
+    expect(assistant).toMatchObject({
+      seq: 2,
+      role: AIChatMessageRole.Assistant,
+      content: "Hi there",
+      status: AIChatMessageStatus.Completed,
+    });
+
+    // The response is the AG-UI run for this very session: the frames carry the
+    // resolved session id as `threadId`, which is what a TanStack client keys
+    // its message store on. A mismatch would make the answer unrenderable.
+    const frames = text
+      .split("\n\n")
+      .filter((frame) => frame.startsWith("data: "))
+      .map((frame) => JSON.parse(frame.slice("data: ".length)) as {
+        type: string;
+        threadId?: string;
+      });
+    expect(frames[0]?.type).toEqual("RUN_STARTED");
+    expect(frames[0]?.threadId).toEqual(session.id);
+    expect(frames.at(-1)?.threadId).toEqual(session.id);
+
+    // The client-supplied `runId` never becomes the server's run id.
+    expect(storedQuestion.runId).toEqual(assistant.runId);
+    expect(storedQuestion.runId).not.toEqual("client-run-id");
+
+    expect(await Redis.defaultClient.get(lockKey(user, session.id))).toEqual(
+      null
+    );
+  });
+
   it("sends the newest client turn upstream exactly once", async () => {
     const user = await buildUser();
     await configureAiChat(user);
@@ -868,6 +940,47 @@ describe("POST /api/ai.chat turn persistence", () => {
     expect(res.status).toEqual(400);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await rowsForUser()).toEqual(rowsBefore);
+  });
+
+  it("rejects a foreign threadId without writing a row or taking a lock", async () => {
+    const owner = await buildUser();
+    await configureAiChat(owner);
+    const session = await buildSession(owner);
+
+    const stranger = await buildUser({ teamId: owner.teamId });
+    await configureAiChat(stranger);
+    await seedReadableDocument(
+      stranger,
+      "The deployment runbook covers the payments service"
+    );
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await server.post("/api/ai.chat", stranger, {
+      body: {
+        threadId: session.id,
+        messages: [
+          { role: "user", content: "What is the payments deployment runbook?" },
+        ],
+      },
+    });
+
+    expect(res.status).toEqual(404);
+    expect(res.headers.get("content-type")).not.toContain("text/event-stream");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    expect(
+      await AIChatMessage.findAll({ where: { sessionId: session.id } })
+    ).toHaveLength(0);
+    // The alias resolves to the same ownership check, so it can never acquire a
+    // lock keyed on a session the caller does not own.
+    expect(
+      await Redis.defaultClient.keys(`aiChat:inflight:${stranger.id}:*`)
+    ).toEqual([]);
+    expect(
+      await Redis.defaultClient.get(lockKey(stranger, session.id))
+    ).toEqual(null);
   });
 
   it("writes nothing and never contacts the provider for another user's session", async () => {
