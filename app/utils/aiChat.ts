@@ -94,6 +94,14 @@ export class AiChatError extends Error {
  */
 export type AiChatKind = "refusal" | "busy" | null;
 
+/**
+ * What the composer does with a message submitted while a turn is still
+ * streaming. Mirrors the chat client's `queue.whenBusy` option: `queue` waits
+ * for the turn to settle, `drop` ignores the message, and `interrupt` abandons
+ * the turn to send the new message straight away.
+ */
+export type AiChatWhenBusy = "queue" | "drop" | "interrupt";
+
 /** The `RUN_ERROR` code the server uses when upstream ended with no reason. */
 const incompleteStreamCode = "incomplete-stream";
 

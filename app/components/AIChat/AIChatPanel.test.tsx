@@ -118,6 +118,19 @@ async function flush() {
   });
 }
 
+/**
+ * Flushes until `predicate` holds, for a chain of turns (a queue drain) whose
+ * exact number of async hops is not worth pinning.
+ *
+ * @param predicate the observable state to wait for.
+ * @param attempts the maximum number of flushes before giving up.
+ */
+async function flushUntil(predicate: () => boolean, attempts = 20) {
+  for (let attempt = 0; attempt < attempts && !predicate(); attempt++) {
+    await flush();
+  }
+}
+
 // The default ApiClient mock answers every path with a benign auth envelope.
 // The two AI endpoints the panel reads need a proper shape instead, so the
 // helper answers them; the shared afterEach restores the default afterwards.
@@ -439,7 +452,10 @@ function seedMessage(
  * Renders the panel into a fresh container and returns helpers for driving and
  * inspecting it. The container and React root are torn down by `cleanup`.
  */
-function renderPanel(rootStore: RootStore) {
+function renderPanel(
+  rootStore: RootStore,
+  props: Partial<React.ComponentProps<typeof AIChatPanel>> = {}
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -451,7 +467,7 @@ function renderPanel(rootStore: RootStore) {
       <MobXProviderContext.Provider value={{ rootStore }}>
         <ThemeProvider theme={theme}>
           <MemoryRouter>
-            <AIChatPanel onClose={onClose} />
+            <AIChatPanel onClose={onClose} {...props} />
           </MemoryRouter>
         </ThemeProvider>
       </MobXProviderContext.Provider>
@@ -516,6 +532,18 @@ function renderPanel(rootStore: RootStore) {
 
   const inputValue = () => (query("ai-chat-input") as HTMLInputElement).value;
 
+  const queueItems = () =>
+    Array.from(
+      document.querySelectorAll('[data-testid="ai-chat-queue-item"]')
+    ).map((el) => el.querySelector("span")?.textContent ?? "");
+
+  const cancelButtons = () =>
+    Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="ai-chat-queue-cancel"]'
+      )
+    );
+
   return {
     query,
     click,
@@ -524,6 +552,8 @@ function renderPanel(rootStore: RootStore) {
     submit,
     transcripts,
     inputValue,
+    queueItems,
+    cancelButtons,
     onClose,
     cleanup,
   };
@@ -933,6 +963,231 @@ describe("AIChatPanel", () => {
     expect(query("ai-chat-spinner")).toBeNull();
     // The partial answer stays visible; the turn is simply over.
     expect(query("message-assistant")?.textContent).toContain("Hel");
+    cleanup();
+  });
+
+  it("queues a mid-stream send and sends it once the turn settles", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const runs = fakeConnection((run) => ({
+      deltas: ["The answer"],
+      gateBeforeText: gate,
+      question: messageText(run.messages[run.messages.length - 1]),
+    }));
+
+    const {
+      query,
+      inputValue,
+      typeMessage,
+      submit,
+      transcripts,
+      queueItems,
+      cleanup,
+    } = renderPanel(rootStore);
+
+    typeMessage("hi");
+    await submit();
+
+    typeMessage("follow-up");
+    await submit();
+
+    // Queued, not sent: the composer empties, the transcript is untouched, and
+    // nothing is persisted while the first turn still owns the session.
+    expect(queueItems()).toEqual(["follow-up"]);
+    expect(inputValue()).toBe("");
+    expect(transcripts().join("")).not.toContain("follow-up");
+    expect(rootStore.aiChatMessages.orderedData).toHaveLength(0);
+    expect(runs).toHaveLength(1);
+
+    release();
+    await flushUntil(
+      () => rootStore.aiChatMessages.orderedData.length === 4
+    );
+
+    expect(runs).toHaveLength(2);
+    expect(
+      messageText(runs[1].messages[runs[1].messages.length - 1])
+    ).toBe("follow-up");
+    expect(query("ai-chat-queue")).toBeNull();
+    // Every stored row belongs to a turn that was actually sent.
+    expect(rootStore.aiChatMessages.orderedData).toHaveLength(4);
+    expect(transcripts().join("")).toContain("follow-up");
+    cleanup();
+  });
+
+  it('ignores a mid-stream send when whenBusy is "drop"', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const runs = fakeConnection({
+      deltas: ["The answer"],
+      gateBeforeText: gate,
+      question: "hi",
+    });
+
+    const { query, inputValue, typeMessage, submit, cleanup } = renderPanel(
+      rootStore,
+      { whenBusy: "drop" }
+    );
+
+    typeMessage("hi");
+    await submit();
+
+    typeMessage("dropped");
+    await submit();
+
+    expect(query("ai-chat-queue")).toBeNull();
+    // Dropped, not cleared: the text stays in the composer so the user can
+    // send it once the turn is over.
+    expect(inputValue()).toBe("dropped");
+    expect(runs).toHaveLength(1);
+
+    release();
+    await flush();
+
+    expect(runs).toHaveLength(1);
+    expect(rootStore.aiChatMessages.orderedData).toHaveLength(2);
+    cleanup();
+  });
+
+  it('aborts the in-flight turn and sends at once when whenBusy is "interrupt"', async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const runs = fakeConnection((run) => {
+      // The abandoned frame source still has to settle, the way the real
+      // connection does once its signal aborts.
+      run.signal?.addEventListener("abort", () => release());
+      return {
+        deltas: ["The answer"],
+        gateBeforeText: gate,
+        question: messageText(run.messages[run.messages.length - 1]),
+      };
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore, {
+      whenBusy: "interrupt",
+    });
+
+    typeMessage("hi");
+    await submit();
+    expect(runs).toHaveLength(1);
+
+    typeMessage("urgent");
+    await submit();
+
+    expect(runs[0].signal?.aborted).toBe(true);
+    expect(runs).toHaveLength(2);
+    expect(query("ai-chat-queue")).toBeNull();
+
+    await flushUntil(
+      () => rootStore.aiChatMessages.orderedData.length === 2
+    );
+
+    // The interrupted turn wrote no row; the interrupting one did.
+    const stored = rootStore.aiChatMessages.orderedData;
+    expect(stored.map((row) => row.content).sort()).toEqual(
+      ["The answer", "urgent"].sort()
+    );
+    expect(messageText(runs[1].messages[runs[1].messages.length - 1])).toBe(
+      "urgent"
+    );
+    cleanup();
+  });
+
+  it("cancels one queued message before it drains", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const runs = fakeConnection((run) => ({
+      deltas: ["ok"],
+      gateBeforeText: gate,
+      question: messageText(run.messages[run.messages.length - 1]),
+    }));
+
+    const {
+      query,
+      click,
+      typeMessage,
+      submit,
+      queueItems,
+      cancelButtons,
+      cleanup,
+    } = renderPanel(rootStore);
+
+    typeMessage("hi");
+    await submit();
+
+    typeMessage("first");
+    await submit();
+    typeMessage("second");
+    await submit();
+
+    expect(queueItems()).toEqual(["first", "second"]);
+
+    await click(cancelButtons()[0]);
+
+    expect(queueItems()).toEqual(["second"]);
+    expect(query("ai-chat-queue")?.textContent).not.toContain("first");
+
+    release();
+    await flushUntil(() => runs.length === 2);
+
+    // The cancelled item never reaches the connection.
+    expect(
+      messageText(runs[1].messages[runs[1].messages.length - 1])
+    ).toBe("second");
+    cleanup();
+  });
+
+  it("discards queued messages when the in-flight turn is stopped", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const runs = fakeConnection((run) => {
+      run.signal?.addEventListener("abort", () => release());
+      return {
+        deltas: ["Hel", "lo"],
+        gateAfter: { index: 0, promise: gate },
+      };
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+
+    typeMessage("hi");
+    await submit();
+    typeMessage("later");
+    await submit();
+
+    expect(query("ai-chat-queue")).not.toBeNull();
+
+    const stop = query("ai-chat-stop") as HTMLButtonElement;
+    await act(async () => {
+      stop.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(query("ai-chat-queue")).toBeNull();
+    expect(runs).toHaveLength(1);
+
+    release();
+    await flush();
+
+    // Nothing drained and nothing was persisted: the abandoned turn took the
+    // queue with it.
+    expect(runs).toHaveLength(1);
+    expect(rootStore.aiChatMessages.orderedData).toHaveLength(0);
     cleanup();
   });
 
