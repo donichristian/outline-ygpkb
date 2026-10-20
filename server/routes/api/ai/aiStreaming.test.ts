@@ -9,6 +9,7 @@ import AIChatMessage, {
 } from "@server/models/AIChatMessage";
 import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
+import Redis from "@server/storage/redis";
 import { OutOfScopeRefusal } from "./scope";
 
 vi.mock("./tanstack", () => ({
@@ -235,6 +236,35 @@ async function buildSession(user: TestUser) {
 }
 
 /**
+ * The lock key the route derives for a turn, reconstructed here so a test can
+ * assert on the key's presence rather than re-importing route internals.
+ *
+ * @param user the requesting user.
+ * @param sessionId the session.
+ * @returns the Redis key.
+ */
+function lockKey(user: TestUser, sessionId: string) {
+  return `aiChat:inflight:${user.id}:${sessionId}`;
+}
+
+/**
+ * Waits for the in-flight lock to disappear. The release runs after the row is
+ * committed, so a test that only awaited the rows can still catch the key.
+ *
+ * @param user the requesting user.
+ * @param sessionId the session.
+ * @returns the remaining value, or null once released.
+ */
+async function waitForLockRelease(user: TestUser, sessionId: string) {
+  let held = await Redis.defaultClient.get(lockKey(user, sessionId));
+  for (let attempt = 0; attempt < 150 && held !== null; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    held = await Redis.defaultClient.get(lockKey(user, sessionId));
+  }
+  return held;
+}
+
+/**
  * Reads a session's messages back through the public RPC endpoint, which is how
  * a client reopening a conversation sees them.
  *
@@ -351,6 +381,12 @@ describe("POST /api/ai.chat turn persistence", () => {
     // F4: one run mints one id and both rows of the turn carry it.
     expect(typeof assistant.runId).toEqual("string");
     expect(question.runId).toEqual(assistant.runId);
+
+    // The clean exit persists before the stream ends, so the lock is already
+    // gone when the response completes.
+    expect(await Redis.defaultClient.get(lockKey(user, session.id))).toEqual(
+      null
+    );
   });
 
   it("sends the newest client turn upstream exactly once", async () => {
@@ -517,6 +553,8 @@ describe("POST /api/ai.chat turn persistence", () => {
       expect(answer.status).toEqual(AIChatMessageStatus.Aborted);
       expect(answer.content).toEqual("Half an ");
       expect(rows[0].role).toEqual(AIChatMessageRole.User);
+      expect(answer.runId).toEqual(rows[0].runId);
+      expect(await waitForLockRelease(user, session.id)).toEqual(null);
     } finally {
       provider.close();
     }
@@ -565,6 +603,9 @@ describe("POST /api/ai.chat turn persistence", () => {
         role: AIChatMessageRole.User,
         content: "What is the payments deployment runbook?",
       });
+      // No text was generated, so nothing is written – but the abort still
+      // frees the session.
+      expect(await waitForLockRelease(user, session.id)).toEqual(null);
     } finally {
       provider.close();
     }
@@ -601,6 +642,8 @@ describe("POST /api/ai.chat turn persistence", () => {
       status: AIChatMessageStatus.Error,
       content: "Half an ",
     });
+    expect(rows[1].runId).toEqual(rows[0].runId);
+    expect(await waitForLockRelease(user, session.id)).toEqual(null);
   });
 
   it.each([
@@ -646,6 +689,45 @@ describe("POST /api/ai.chat turn persistence", () => {
     const rows = await waitForRows(session.id, 2);
     expect(rows).toHaveLength(2);
     expect(rows[1].status).toEqual(status);
+    expect(rows[1].role).toEqual(AIChatMessageRole.Assistant);
+    expect(rows[1].runId).toEqual(rows[0].runId);
+    expect(await waitForLockRelease(user, session.id)).toEqual(null);
+  });
+
+  it("writes no assistant row and releases the lock when a clean run has no text", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(
+      user,
+      "The deployment runbook covers the payments service"
+    );
+    const session = await buildSession(user);
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        streamingResponse([
+          'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          "data: [DONE]\n\n",
+        ])
+      )
+    );
+
+    const res = await server.post("/api/ai.chat", user, {
+      body: {
+        sessionId: session.id,
+        messages: [
+          { role: "user", content: "What is the payments deployment runbook?" },
+        ],
+      },
+    });
+    expect(await res.text()).toContain('"type":"RUN_FINISHED"');
+
+    const rows = await waitForRows(session.id, 1);
+    // The question is stored; an empty assistant turn has nothing to store.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].role).toEqual(AIChatMessageRole.User);
+    expect(await waitForLockRelease(user, session.id)).toEqual(null);
   });
 
   it("terminates the stream on a malformed upstream frame", async () => {

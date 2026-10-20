@@ -5,7 +5,6 @@ import Router from "koa-router";
 import { v4 as uuidv4 } from "uuid";
 import { toError } from "@shared/utils/error";
 import { Minute } from "@shared/utils/time";
-import aiChatMessageCreator from "@server/commands/aiChatMessageCreator";
 import env from "@server/env";
 import { NotFoundError, ProviderUnavailableError } from "@server/errors";
 import Logger from "@server/logging/Logger";
@@ -21,9 +20,9 @@ import AIChatMessage, {
 import type { APIContext } from "@server/types";
 import { AuthenticationType } from "@server/types";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
-import { requestContext } from "@server/storage/requestContext";
 import Redis from "@server/storage/redis";
 import { assertAiChatEnabled } from "./enabled";
+import { appendTurn, createPersistenceMiddleware } from "./middleware";
 import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
 import { loadTanstack } from "./tanstack";
@@ -362,52 +361,13 @@ router.post(
       }
     };
 
-    /**
-     * Appends one row to the stored session, or does nothing for a stateless
-     * chat. Every write on this path goes through here, and every one of them
-     * opens and commits its own short-lived transaction: `aiChatMessageCreator`
-     * never reads or replaces `ctx.state.transaction`, and `ai.chat` carries no
-     * `transaction()` middleware, so there is none to hold open. That is
-     * deliberate and load-bearing — the assistant flush below runs after the
-     * stream has ended, long after this handler returned, so a transaction
-     * opened here would have to stay open across the entire SSE stream.
-     */
-    const appendTurn = async (
-      role: AIChatMessageRole,
-      content: string,
-      status: AIChatMessageStatus
-    ) => {
-      if (!ownedSession) {
-        return;
-      }
-
-      // Runs outside this request's async context. `database.ts` refuses reads
-      // whose originating socket is already destroyed, so a flush after a
-      // client disconnect fails its own `max(seq)` read and the turn is lost –
-      // which is precisely the case the abort path exists to record. That guard
-      // exists to stop spending database work on a response nobody will
-      // receive, and it is registered on `beforeFind`/`beforeCount` only, so
-      // writes were never gated by it: this write's deliverable is the row, not
-      // the response. Reads stay guarded everywhere else.
-      await requestContext.exit(() =>
-        aiChatMessageCreator({
-          user,
-          sessionId: ownedSession.id,
-          role,
-          content,
-          status,
-          runId,
-          ctx,
-        }).catch((err) =>
-          // A turn that cannot be stored is a lost answer, never a failed
-          // request: the bytes are already on the wire, so there is nothing left
-          // to report to the client and the stream must still terminate.
-          Logger.error("AI chat turn could not be persisted", toError(err), {
-            requestId,
-          })
-        )
-      );
-    };
+    // Every write on this path delegates to `appendTurn`, which opens and
+    // commits its own short-lived transaction: `aiChatMessageCreator` never
+    // reads or replaces `ctx.state.transaction`, and `ai.chat` carries no
+    // `transaction()` middleware, so there is none to hold open. That is
+    // deliberate and load-bearing — the assistant flush runs after the stream
+    // has ended, long after this handler returned, so a transaction opened here
+    // would have to stay open across the entire SSE stream.
 
     // The turn being started now, as supplied by the client. With a stored
     // session it is the newest client message; only a user turn is new
@@ -432,11 +392,16 @@ router.post(
           )
           .map((p) => p.content)
           .join("");
-      await appendTurn(
-        AIChatMessageRole.User,
-        pendingContent,
-        AIChatMessageStatus.Completed
-      );
+      await appendTurn({
+        user,
+        sessionId: ownedSession?.id,
+        role: AIChatMessageRole.User,
+        content: pendingContent,
+        status: AIChatMessageStatus.Completed,
+        runId,
+        ctx,
+        requestId,
+      });
     }
 
     // Resolved after the turn is committed, so the gate and the provider are
@@ -484,8 +449,8 @@ router.post(
       });
       // Inlined, not `OutOfScopeRefusal`: i18next-parser sees string literals
       // only. ai.test.ts fails if these two ever differ. The literal must stay
-      // contiguous in source — it is passed as a bare argument below, which is
-      // the one position the formatter does not break across lines.
+      // contiguous in source, so it is bound here rather than split across the
+      // call's named arguments.
       //
       // Stored before the frame is written, so a client that reacts to the
       // refusal by reloading history already finds the row. The string is
@@ -494,17 +459,22 @@ router.post(
       // later translation of a key. Storing the `OutOfScopeRefusal` constant
       // instead would let the row drift away from the wire on any future change
       // to either one.
-      await appendTurn(
-        AIChatMessageRole.Assistant,
-        t("This assistant only answers from this workspace’s knowledge base"),
-        AIChatMessageStatus.Completed
-      );
+      const refusal = t("This assistant only answers from this workspace’s knowledge base");
+
+      await appendTurn({
+        user,
+        sessionId: ownedSession?.id,
+        role: AIChatMessageRole.Assistant,
+        content: refusal,
+        status: AIChatMessageStatus.Completed,
+        runId,
+        ctx,
+        requestId,
+      });
 
       refuseWithAgUiRun({
         ctx,
-        message: t(
-          "This assistant only answers from this workspace’s knowledge base"
-        ),
+        message: refusal,
         kind: "refusal",
         runId,
         sessionId: ownedSession?.id,
@@ -552,70 +522,15 @@ router.post(
 
     // Terminal persistence and lock release ride TanStack's own terminal hooks:
     // each is awaited before the stream closes, so a row is written and the key
-    // freed on every exit (finish, abort, error). This replaces the hand-rolled
-    // `on("end"/"error")` exits the previous transport used.
-    const persistenceMiddleware = {
-      name: "ai-chat-persist",
-      async onFinish(
-        _hookCtx: { accumulatedContent: string },
-        info: { finishReason: string | null; content: string }
-      ) {
-        if (!ownedSession) {
-          return;
-        }
-        const status = info.finishReason
-          ? AIChatMessageStatus.Completed
-          : AIChatMessageStatus.Truncated;
-        await appendTurn(AIChatMessageRole.Assistant, info.content, status);
-        await releaseInFlightLock();
-      },
-      async onAbort(hookCtx: { accumulatedContent?: string }) {
-        if (!ownedSession) {
-          return;
-        }
-        if (hookCtx.accumulatedContent) {
-          await appendTurn(
-            AIChatMessageRole.Assistant,
-            hookCtx.accumulatedContent,
-            AIChatMessageStatus.Aborted
-          );
-        }
-        await releaseInFlightLock();
-      },
-      async onError(
-        hookCtx: { accumulatedContent?: string },
-        info: { error: unknown }
-      ) {
-        // The real cause stays server-side; the wire carries a generic message
-        // (see the sanitizing wrapper below) so a provider failure never leaks
-        // upstream detail to the client.
-        Logger.error("AI chat stream failed", toError(info.error), {
-          requestId,
-        });
-        if (!ownedSession) {
-          return;
-        }
-        // The adapter rejects a Chat Completions stream that ends without a
-        // `finish_reason`, which is the same signal the previous transport read
-        // as a truncated answer. Map it back so a cut-off turn is stored
-        // `truncated` rather than `error`.
-        const truncated =
-          typeof info.error === "object" &&
-          info.error !== null &&
-          (info.error as { code?: unknown }).code === "incomplete-stream";
-        const status = truncated
-          ? AIChatMessageStatus.Truncated
-          : AIChatMessageStatus.Error;
-        if (hookCtx.accumulatedContent) {
-          await appendTurn(
-            AIChatMessageRole.Assistant,
-            hookCtx.accumulatedContent,
-            status
-          );
-        }
-        await releaseInFlightLock();
-      },
-    } as unknown as Array<unknown>;
+    // freed on every exit (finish, abort, error).
+    const persistenceMiddleware = createPersistenceMiddleware({
+      user,
+      sessionId: ownedSession?.id,
+      runId,
+      ctx,
+      requestId,
+      releaseInFlightLock,
+    });
 
     let response: Response;
     try {
