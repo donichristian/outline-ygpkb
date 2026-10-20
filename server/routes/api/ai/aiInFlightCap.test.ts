@@ -1,8 +1,12 @@
 // @vitest-isolate true
+import { t } from "i18next";
 import { TeamPreference } from "@shared/types";
 import env from "@server/env";
 import { AIChatSession } from "@server/models";
-import AIChatMessage from "@server/models/AIChatMessage";
+import AIChatMessage, {
+  AIChatMessageRole,
+  AIChatMessageStatus,
+} from "@server/models/AIChatMessage";
 import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
 import Redis from "@server/storage/redis";
@@ -379,6 +383,91 @@ describe("POST /api/ai.chat in-flight cap", () => {
     // Settle the winner's assistant flush so its insert does not land during a
     // later test's message count on the shared database.
     await waitForRows(session.id, 2);
+  });
+
+  it("frames the busy refusal as a complete AG-UI run and leaves the first turn untouched", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user, groundedDocumentText);
+    const session = await buildSession(user);
+
+    const provider = stubStalledProvider();
+    const first = chat(user, groundedBody(session.id));
+    await provider.contacted;
+
+    // The question row is written before the first stream starts, so it is the
+    // whole of the session while that answer is still generating.
+    const beforeRows = await waitForRows(session.id, 1);
+    expect(beforeRows).toHaveLength(1);
+    expect(beforeRows[0].role).toEqual(AIChatMessageRole.User);
+    const questionContent = beforeRows[0].content;
+
+    const secondRes = await chat(user, groundedBody(session.id));
+    expect(secondRes.status).toEqual(200);
+    expect(secondRes.headers.get("content-type")).toContain(
+      "text/event-stream"
+    );
+    expect(secondRes.headers.get("x-ai-chat-kind")).toEqual("busy");
+
+    const busyText = await secondRes.text();
+    const types = [...busyText.matchAll(/"type":"(\w+)"/g)].map((m) => m[1]);
+    expect(types).toEqual([
+      "RUN_STARTED",
+      "TEXT_MESSAGE_START",
+      "TEXT_MESSAGE_CONTENT",
+      "TEXT_MESSAGE_END",
+      "RUN_FINISHED",
+    ]);
+    expect(busyText).toContain(
+      `"delta":"${t(
+        "Another answer for this conversation is still being generated"
+      )}"`
+    );
+    expect(busyText).not.toContain('"type":"CUSTOM"');
+    expect(busyText).not.toContain("event:");
+    expect(busyText).not.toContain("[DONE]");
+
+    // The busy turn wrote no row, and it must not have released the lock the
+    // first turn still holds — a bare release here would un-cap the session.
+    const duringRows = await AIChatMessage.findAll({
+      where: { sessionId: session.id },
+      order: [["seq", "ASC"]],
+    });
+    expect(
+      duringRows.map((row) => [row.role, row.content, row.status])
+    ).toEqual([
+      [AIChatMessageRole.User, questionContent, AIChatMessageStatus.Completed],
+    ]);
+    expect(
+      await Redis.defaultClient.get(lockKey(user, session.id))
+    ).not.toEqual(null);
+
+    provider.push(
+      'data: {"choices":[{"delta":{"content":"Payments."},"finish_reason":"stop"}]}\n\n'
+    );
+    provider.close();
+
+    const firstRes = await first;
+    expect(firstRes.status).toEqual(200);
+    expect(await firstRes.text()).toContain('"delta":"Payments."');
+
+    // The first run is untouched: its question row is byte-identical and its
+    // answer is the streamed text, not the busy message.
+    const afterRows = await waitForRows(session.id, 2);
+    expect(afterRows.map((row) => [row.role, row.content, row.status])).toEqual(
+      [
+        [
+          AIChatMessageRole.User,
+          questionContent,
+          AIChatMessageStatus.Completed,
+        ],
+        [
+          AIChatMessageRole.Assistant,
+          "Payments.",
+          AIChatMessageStatus.Completed,
+        ],
+      ]
+    );
   });
 
   it("does not block a different session or a different user", async () => {

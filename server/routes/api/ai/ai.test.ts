@@ -2,6 +2,12 @@
 import { readFileSync } from "node:fs";
 import { TeamPreference } from "@shared/types";
 import env from "@server/env";
+import { AIChatSession } from "@server/models";
+import AIChatMessage, {
+  AIChatMessageRole,
+  AIChatMessageStatus,
+} from "@server/models/AIChatMessage";
+import Redis from "@server/storage/redis";
 import {
   buildCollection,
   buildDocument,
@@ -390,6 +396,9 @@ describe("POST /api/ai.chat", () => {
       expect(text).toContain('"delta":"' + OutOfScopeRefusal + '"');
       expect(text).not.toContain("event:");
       expect(text).not.toContain("[DONE]");
+      // The header is the only out-of-band signal: a CUSTOM event would make the
+      // client depend on its library surfacing custom events, which it need not.
+      expect(text).not.toContain('"type":"CUSTOM"');
       // The whole point of the gate: the provider is never asked, so it cannot
       // leak a general-knowledge answer.
       expect(fetchMock).not.toHaveBeenCalled();
@@ -448,6 +457,71 @@ describe("POST /api/ai.chat", () => {
       await seedReadableDocument(user, "Office locations and their timezones");
 
       await expectRefused(user, "What is the capital of France?");
+    });
+
+    it("persists the refusal as a completed assistant row before the frames are written", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+      await seedReadableDocument(user, "Unrelated onboarding steps");
+      const session = await AIChatSession.create({
+        teamId: user.teamId,
+        userId: user.id,
+      });
+
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: {
+          sessionId: session.id,
+          messages: [
+            {
+              role: "user",
+              content: "How do I rotate the Kubernetes signing keys?",
+            },
+          ],
+        },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(res.headers.get("content-type")).toContain("text/event-stream");
+      expect(res.headers.get("x-ai-chat-kind")).toEqual("refusal");
+
+      const text = await res.text();
+      const types = [...text.matchAll(/"type":"(\w+)"/g)].map((m) => m[1]);
+      expect(types).toEqual([
+        "RUN_STARTED",
+        "TEXT_MESSAGE_START",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_END",
+        "RUN_FINISHED",
+      ]);
+      expect(text).toContain(`"delta":"${OutOfScopeRefusal}"`);
+      expect(text).not.toContain('"type":"CUSTOM"');
+      expect(text).not.toContain("event:");
+      expect(text).not.toContain("[DONE]");
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      // `appendTurn` is awaited before the synthetic `Readable` is built, so a
+      // row visible once the frames exist necessarily precedes them.
+      const rows = await AIChatMessage.findAll({
+        where: { sessionId: session.id },
+        order: [["seq", "ASC"]],
+      });
+      expect(rows.map((row) => row.role)).toEqual([
+        AIChatMessageRole.User,
+        AIChatMessageRole.Assistant,
+      ]);
+      expect(rows[1].content).toEqual(OutOfScopeRefusal);
+      expect(rows[1].status).toEqual(AIChatMessageStatus.Completed);
+
+      // A refusal returns before the stream exists, so it releases the lock
+      // itself rather than waiting for the TTL.
+      expect(
+        await Redis.defaultClient.get(
+          `aiChat:inflight:${user.id}:${session.id}`
+        )
+      ).toEqual(null);
     });
 
     it("passes the same probe through when grounding is disabled", async () => {
