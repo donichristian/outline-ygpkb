@@ -590,6 +590,22 @@ router.post(
         // Server tools receive the requesting user through this context, so
         // no tool closes over a request-scoped value.
         context: { user },
+        // REASONING: an operator decision (`AI_CHAT_REASONING`), never the
+        // request body. The installed `openaiCompatibleText` adapter never
+        // maps `chat({ reasoning })` onto the wire — its base
+        // `modelReasoning()` default is `undefined`, and the compatible
+        // adapter does not override it — so `reasoning_effort` is placed in
+        // the provider-native `modelOptions`, which the adapter spreads into
+        // the Chat Completions body verbatim. Unconfigured, the key is
+        // omitted entirely and the body carries no reasoning field, so a
+        // plain gateway is not sent an unsupported parameter.
+        ...(env.AI_CHAT_REASONING
+          ? {
+              modelOptions: {
+                reasoning_effort: env.AI_CHAT_REASONING,
+              },
+            }
+          : {}),
         abortController: ac,
         // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- TanStack's middleware generic defaults to `undefined`; a middleware array is accepted at runtime.
         middleware: [persistenceMiddleware] as unknown as Parameters<
