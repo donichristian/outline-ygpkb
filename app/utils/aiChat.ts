@@ -94,6 +94,127 @@ export class AiChatError extends Error {
  */
 export type AiChatKind = "refusal" | "busy" | null;
 
+/** The `RUN_ERROR` code the server uses when upstream ended with no reason. */
+const incompleteStreamCode = "incomplete-stream";
+
+/** Context that refines an outcome the transport cannot classify on its own. */
+export interface AiChatErrorContext {
+  /** The `X-AI-Chat-Kind` the response carried, when one did. */
+  kind?: AiChatKind;
+}
+
+/**
+ * Classifies every AG-UI/HTTP outcome into one {@link AiChatErrorKind}. This is
+ * the single place the panel's taxonomy is derived, so a refusal or a busy
+ * notice can never be inferred from message text, a run id, or empty content.
+ *
+ * A rejected response keeps the {@link AiChatError} the connection threw, so its
+ * status survives; the response header decides `refusal` and `busy`; a stream
+ * that ended without a reason is `truncated`; an aborted signal is `aborted`; a
+ * rejected fetch (including one the library wrapped as a `StreamReadError`) is
+ * `network`; an unparseable frame is `malformed`; anything else mid-stream is
+ * `stream`.
+ *
+ * @param error the value thrown or reported by the chat client, if any.
+ * @param context the observed `X-AI-Chat-Kind`, if the response carried one.
+ * @returns the classified error; never throws.
+ */
+export function toAiChatError(
+  error?: unknown,
+  context: AiChatErrorContext = {}
+): AiChatError {
+  try {
+    if (error instanceof AiChatError) {
+      return error;
+    }
+
+    // Refusal and busy are learned only from the response header: both arrive
+    // as ordinary, completed runs, so no frame or thrown error distinguishes
+    // them from a real answer.
+    if (context.kind === "refusal" || context.kind === "busy") {
+      return new AiChatError(
+        context.kind === "refusal"
+          ? "The AI chat request was declined"
+          : "Another AI chat response is still in progress",
+        context.kind
+      );
+    }
+
+    if (typeof error !== "object" || error === null) {
+      return new AiChatError(
+        "The AI chat request failed, try again?",
+        "network"
+      );
+    }
+
+    // Read structurally rather than via `instanceof Error`: a jsdom
+    // `DOMException` (an abort) and a library error from another realm need not
+    // share this realm's `Error` prototype.
+    const shaped = error as {
+      name?: unknown;
+      message?: unknown;
+      code?: unknown;
+    };
+    const name = typeof shaped.name === "string" ? shaped.name : "";
+    const message = typeof shaped.message === "string" ? shaped.message : "";
+    const cause = rootCause(error);
+    const causeError = cause instanceof Error ? cause : undefined;
+
+    if (name === "AbortError" || causeError?.name === "AbortError") {
+      return new AiChatError("The AI chat request was cancelled", "aborted");
+    }
+
+    if (error instanceof TypeError || causeError instanceof TypeError) {
+      return new AiChatError(message, "network");
+    }
+
+    // A stream ending without a terminal reason (`StreamTruncatedError`) and
+    // the server's own `incomplete-stream` RUN_ERROR mean the same thing: the
+    // answer was cut short.
+    if (
+      name === "StreamTruncatedError" ||
+      name === "DurableStreamIncompleteError" ||
+      shaped.code === incompleteStreamCode
+    ) {
+      return new AiChatError(message, "truncated");
+    }
+
+    if (error instanceof SyntaxError || causeError instanceof SyntaxError) {
+      return new AiChatError(message, "malformed");
+    }
+
+    return new AiChatError(message, "stream");
+  } catch {
+    // A hostile or exotic value must never escape the mapping as an unhandled
+    // rejection; a failure to classify is still a stream failure.
+    return new AiChatError("The AI chat request failed, try again?", "stream");
+  }
+}
+
+/**
+ * Walks an error's `cause` chain to the deepest wrapped error, so a network or
+ * parse failure the library wrapped in a `StreamReadError` is still recognized.
+ *
+ * @param error the outermost error.
+ * @returns the deepest cause, or the given error when it has none.
+ */
+function rootCause(error: unknown): unknown {
+  let current: unknown = error;
+
+  for (let depth = 0; depth < 3; depth++) {
+    const next =
+      typeof current === "object" && current !== null
+        ? (current as { cause?: unknown }).cause
+        : undefined;
+    if (next === undefined) {
+      break;
+    }
+    current = next;
+  }
+
+  return current;
+}
+
 /** Options accepted by {@link createAiChatConnection}. */
 export interface AiChatConnectionOptions {
   /** Overrides the global `fetch`, for tests and instrumentation. */

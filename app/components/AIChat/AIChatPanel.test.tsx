@@ -9,6 +9,7 @@ import { buildLightTheme } from "@shared/styles/theme";
 import type { UIMessage } from "@tanstack/ai-client";
 import RootStore from "~/stores/RootStore";
 import { AiChatError, clearDraft, flushDrafts } from "~/utils/aiChat";
+import type { AiChatKind } from "~/utils/aiChat";
 import AIChatPanel from "./AIChatPanel";
 import { client } from "~/utils/ApiClient";
 import type * as AiChatModule from "~/utils/aiChat";
@@ -207,6 +208,8 @@ type StreamScript = {
   question?: string;
   /** Thrown before any frame, the way a rejected request fails. */
   error?: Error;
+  /** The `X-AI-Chat-Kind` the response carries, as the server sends it. */
+  kind?: AiChatKind;
 };
 
 /**
@@ -222,7 +225,9 @@ function fakeConnection(
   const runs: FakeRun[] = [];
   let sequence = 0;
 
-  createAiChatConnection.mockImplementation((() => ({
+  createAiChatConnection.mockImplementation(((
+    options?: { onKind?: (kind: AiChatKind) => void }
+  ) => ({
     connect: (
       messages: UIMessage[],
       data: Record<string, unknown> | undefined,
@@ -245,6 +250,10 @@ function fakeConnection(
         if (script.error) {
           throw script.error;
         }
+
+        // The real connection observes the header before any frame, so the
+        // panel's mapping sees the kind even for an otherwise clean run.
+        options?.onKind?.(script.kind ?? null);
 
         const threadId = run.threadId ?? "thread";
         yield chunk("RUN_STARTED", { threadId, runId: `run-${id}` });
@@ -732,7 +741,7 @@ describe("AIChatPanel", () => {
   it("renders a grounding refusal inline as an assistant turn, not an error", async () => {
     const refusal =
       "This assistant only answers from this workspace’s knowledge base";
-    fakeConnection({ deltas: [refusal], question: "hi" });
+    fakeConnection({ deltas: [refusal], question: "hi", kind: "refusal" });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
@@ -746,6 +755,20 @@ describe("AIChatPanel", () => {
     // which is what made the boundary read as a failure.
     expect(query("message-status-error")).toBeNull();
     expect(query("message-status-completed")).toBeNull();
+    cleanup();
+  });
+
+  it("shows a retry-later notice for a busy response header", async () => {
+    fakeConnection({ deltas: [], kind: "busy" });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+    await flush();
+
+    expect(query("ai-chat-error")?.textContent).toContain(
+      "Another AI chat response is still in progress"
+    );
     cleanup();
   });
 

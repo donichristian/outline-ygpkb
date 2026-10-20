@@ -16,14 +16,19 @@ import Tooltip from "~/components/Tooltip";
 import useStores from "~/hooks/useStores";
 import SidebarLayout from "~/scenes/Document/components/SidebarLayout";
 import {
-  AiChatError,
   clearDraft,
   createAiChatConnection,
   flushDrafts,
   readDraft,
+  toAiChatError,
   writeDraft,
 } from "~/utils/aiChat";
-import type { AiChatMessage, AiChatTurnStatus } from "~/utils/aiChat";
+import type {
+  AiChatError,
+  AiChatKind,
+  AiChatMessage,
+  AiChatTurnStatus,
+} from "~/utils/aiChat";
 import AIChatHistory from "./AIChatHistory";
 
 type Props = {
@@ -80,26 +85,6 @@ function liveAssistant(messages: UIMessage[]): {
   }
 
   return { text: text.join(""), reasoning: reasoning.join("") };
-}
-
-/**
- * Parses a client failure into the transport error the panel renders. The
- * connection already throws `AiChatError` for a rejected request, so its status
- * and kind survive; anything else is a stream failure with no status.
- *
- * @param error the error thrown or reported by the chat client.
- * @returns the error to display.
- */
-function toAiChatError(error: unknown): AiChatError {
-  if (error instanceof AiChatError) {
-    return error;
-  }
-
-  if (error instanceof Error) {
-    return new AiChatError(error.message, "stream");
-  }
-
-  return new AiChatError("The AI chat request failed, try again?", "network");
 }
 
 /**
@@ -386,6 +371,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
     const turn = ++turnRef.current;
     stopRequestedRef.current = false;
     let client: ChatClient | undefined;
+    let observedKind: AiChatKind = null;
 
     try {
       // A conversation is only stored once it has an id: without one the server
@@ -404,7 +390,11 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
       // change it), so `useChat`'s option-bag recreations would not address the
       // very first send. The client is a frame source only — the committed
       // history stays in the store and is merged in for rendering.
-      const connection = createAiChatConnection();
+      const connection = createAiChatConnection({
+        onKind: (kind) => {
+          observedKind = kind;
+        },
+      });
       let failure: unknown;
 
       const chat = new ChatClient({
@@ -461,7 +451,14 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
       const error = failure ?? chat.getError();
 
       if (error) {
-        setError(toAiChatError(error));
+        setError(toAiChatError(error, { kind: observedKind }));
+        return;
+      }
+
+      // Busy is a complete synthetic run, so no error is thrown for it; the
+      // header is the only signal that this turn should be retried later.
+      if (observedKind === "busy") {
+        setError(toAiChatError(undefined, { kind: observedKind }));
         return;
       }
 
@@ -478,7 +475,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
       }
     } catch (err) {
       if (turnRef.current === turn) {
-        setError(toAiChatError(err));
+        setError(toAiChatError(err, { kind: observedKind }));
       }
     } finally {
       if (client && clientRef.current === client) {

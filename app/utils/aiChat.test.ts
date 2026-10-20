@@ -1,9 +1,11 @@
 import { client } from "~/utils/ApiClient";
 import {
+  AiChatError,
   clearDraft,
   createAiChatConnection,
   flushDrafts,
   readDraft,
+  toAiChatError,
   writeDraft,
   type AiChatKind,
   type AiChatMessage,
@@ -137,6 +139,81 @@ describe("draft helpers", () => {
         delete (window as { localStorage?: unknown }).localStorage;
       }
     }
+  });
+});
+
+describe("#toAiChatError", () => {
+  test("keeps a rejected response as http with its status", () => {
+    const rejected = new AiChatError("CSRF token invalid", "http", 403);
+
+    expect(toAiChatError(rejected)).toBe(rejected);
+    expect(toAiChatError(rejected).status).toBe(403);
+  });
+
+  test("derives refusal only from the response header", () => {
+    const refusalText = new Error(
+      "This assistant only answers from this workspace's knowledge base"
+    );
+
+    // Message text, an absent run, or empty content must never imply a refusal.
+    expect(toAiChatError(refusalText).kind).toBe("stream");
+    expect(toAiChatError(undefined, { kind: "refusal" }).kind).toBe("refusal");
+  });
+
+  test("derives busy only from the response header", () => {
+    expect(toAiChatError(undefined, { kind: "busy" }).kind).toBe("busy");
+    expect(
+      toAiChatError(
+        new Error("Another AI chat response is still in progress")
+      ).kind
+    ).toBe("stream");
+  });
+
+  test("maps an incomplete terminal RUN_ERROR to truncated", () => {
+    const incomplete = Object.assign(new Error("The run did not finish"), {
+      code: "incomplete-stream",
+    });
+
+    expect(toAiChatError(incomplete).kind).toBe("truncated");
+    expect(toAiChatError(new Error("Stream ended early")).kind).toBe("stream");
+  });
+
+  test("maps a user stop to aborted", () => {
+    expect(
+      toAiChatError(new DOMException("The operation was aborted", "AbortError"))
+        .kind
+    ).toBe("aborted");
+  });
+
+  test("maps a rejected fetch to network, even when the library wrapped it", () => {
+    expect(toAiChatError(new TypeError("fetch failed")).kind).toBe("network");
+
+    const wrapped = new Error("Stream response body read failed");
+    Object.assign(wrapped, { cause: new TypeError("fetch failed") });
+    expect(toAiChatError(wrapped).kind).toBe("network");
+  });
+
+  test("maps any other mid-stream failure to stream", () => {
+    expect(toAiChatError(new Error("provider exploded")).kind).toBe("stream");
+
+    const rejectedUpstream = Object.assign(new Error("rate limited"), {
+      code: "provider-error",
+    });
+    expect(toAiChatError(rejectedUpstream).kind).toBe("stream");
+  });
+
+  test("maps an unparseable frame to malformed without throwing", async () => {
+    let parseFailure: unknown;
+    try {
+      parseFailure = JSON.parse("{not json");
+    } catch (error) {
+      parseFailure = error;
+    }
+
+    expect(toAiChatError(parseFailure).kind).toBe("malformed");
+    await expect(
+      Promise.resolve().then(() => toAiChatError(parseFailure))
+    ).resolves.toMatchObject({ kind: "malformed" });
   });
 });
 
