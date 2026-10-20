@@ -194,16 +194,38 @@ function chunk(type: string, fields: Record<string, unknown> = {}): FakeChunk {
   return { type, timestamp: Date.now(), ...fields };
 }
 
+/** One tool call replayed by a fake turn. */
+type FakeToolCall = {
+  /** The id AG-UI routes every tool frame by. */
+  id: string;
+  /** The tool's name. */
+  name: string;
+  /** The parsed input, streamed as the arguments delta and repeated on END. */
+  input: unknown;
+  /** The tool's result. Omitted, the call stays pending. */
+  output?: unknown;
+  /** Await the given promise after END, before the result is emitted. */
+  gateBeforeResult?: Promise<void>;
+};
+
 /** What one fake turn replays. */
 type StreamScript = {
   /** Incremental assistant text, one frame per entry. */
   deltas: string[];
   /** Reasoning emitted before the answer, as one frame. */
   reasoning?: string;
+  /** A tool call emitted before the answer text. */
+  toolCall?: FakeToolCall;
+  /** A `MESSAGES_SNAPSHOT` carrying these messages, emitted first. */
+  snapshot?: Record<string, unknown>[];
+  /** Skip the text envelope, leaving only the snapshot as the transcript. */
+  skipText?: boolean;
   /** Await the given promise after yielding the delta at `index`. */
   gateAfter?: { index: number; promise: Promise<void> };
   /** Await the given promise after the reasoning, before the answer starts. */
   gateBeforeText?: Promise<void>;
+  /** Await the given promise after the answer, before the run finishes. */
+  gateBeforeFinish?: Promise<void>;
   /** The question to record alongside the answer when the stream completes. */
   question?: string;
   /** Thrown before any frame, the way a rejected request fails. */
@@ -258,6 +280,10 @@ function fakeConnection(
         const threadId = run.threadId ?? "thread";
         yield chunk("RUN_STARTED", { threadId, runId: `run-${id}` });
 
+        if (script.snapshot) {
+          yield chunk("MESSAGES_SNAPSHOT", { messages: script.snapshot });
+        }
+
         if (script.reasoning) {
           yield chunk("REASONING_MESSAGE_START", {
             messageId: `r-${id}`,
@@ -274,28 +300,58 @@ function fakeConnection(
           await script.gateBeforeText;
         }
 
-        yield chunk("TEXT_MESSAGE_START", { messageId, role: "assistant" });
+        if (!script.skipText) {
+          yield chunk("TEXT_MESSAGE_START", { messageId, role: "assistant" });
 
-        for (let index = 0; index < script.deltas.length; index++) {
-          yield chunk("TEXT_MESSAGE_CONTENT", {
-            messageId,
-            delta: script.deltas[index],
-          });
+          if (script.toolCall) {
+            const { id: toolCallId, name, input, output } = script.toolCall;
+            yield chunk("TOOL_CALL_START", { toolCallId, toolCallName: name });
+            yield chunk("TOOL_CALL_ARGS", {
+              toolCallId,
+              delta: JSON.stringify(input),
+            });
+            yield chunk("TOOL_CALL_END", { toolCallId, input });
 
-          if (script.gateAfter?.index === index) {
-            await script.gateAfter.promise;
-          }
+            if (script.toolCall.gateBeforeResult) {
+              await script.toolCall.gateBeforeResult;
+            }
 
-          if (signal?.aborted) {
-            return;
+            if (output !== undefined) {
+              yield chunk("TOOL_CALL_RESULT", {
+                toolCallId,
+                content: JSON.stringify(output),
+              });
+            }
           }
         }
 
-        if (script.question !== undefined) {
-          commitTurn(run.threadId, script.question, script.deltas.join(""));
+        if (script.gateBeforeFinish) {
+          await script.gateBeforeFinish;
         }
 
-        yield chunk("TEXT_MESSAGE_END", { messageId });
+        if (!script.skipText) {
+          for (let index = 0; index < script.deltas.length; index++) {
+            yield chunk("TEXT_MESSAGE_CONTENT", {
+              messageId,
+              delta: script.deltas[index],
+            });
+
+            if (script.gateAfter?.index === index) {
+              await script.gateAfter.promise;
+            }
+
+            if (signal?.aborted) {
+              return;
+            }
+          }
+
+          if (script.question !== undefined) {
+            commitTurn(run.threadId, script.question, script.deltas.join(""));
+          }
+
+          yield chunk("TEXT_MESSAGE_END", { messageId });
+        }
+
         yield chunk("RUN_FINISHED", { threadId, runId: `run-${id}` });
       })() as unknown as AsyncIterable<never>;
     },
@@ -620,6 +676,120 @@ describe("AIChatPanel", () => {
     expect(answerSpan()).toContain("The answer");
     // The disclosure is live-only: it is gone once the turn completes.
     expect(query("ai-chat-reasoning")).toBeNull();
+    cleanup();
+  });
+
+  it("renders a completed tool call with its name, input, and output", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    fakeConnection({
+      deltas: ["Found the refund policy"],
+      toolCall: {
+        id: "call-1",
+        name: "search_workspace",
+        input: { query: "refund policy" },
+        output: {
+          total: 1,
+          results: [
+            {
+              documentId: "doc-1",
+              title: "Refund policy",
+              url: "http://localhost:3050/doc/refund-policy-abc1234567",
+            },
+          ],
+        },
+      },
+      gateBeforeFinish: gate,
+      question: "what is our refund policy?",
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("what is our refund policy?");
+    await submit();
+
+    // While the stream is held open the tool call and the answer are both
+    // visible. The card shows the tool name, its input and its output.
+    expect(query("ai-chat-tool-call")).not.toBeNull();
+    expect(query("ai-chat-tool-name")?.textContent).toBe("search_workspace");
+    expect(query("ai-chat-tool-input")?.textContent).toContain("refund policy");
+    expect(query("ai-chat-tool-output")?.textContent).toContain("Refund policy");
+    expect(query("ai-chat-tool-pending")).toBeNull();
+
+    release();
+    await flush();
+    cleanup();
+  });
+
+  it("renders a pending tool call with a running state and no output", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    fakeConnection({
+      deltas: ["Here is the answer"],
+      toolCall: {
+        id: "call-2",
+        name: "search_workspace",
+        input: { query: "pricing" },
+        gateBeforeResult: gate,
+      },
+      question: "what are the prices?",
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("what are the prices?");
+    await submit();
+
+    // The tool call ran but the result has not arrived yet.
+    expect(query("ai-chat-tool-call")).not.toBeNull();
+    expect(query("ai-chat-tool-name")?.textContent).toBe("search_workspace");
+    expect(query("ai-chat-tool-input")?.textContent).toContain("pricing");
+    expect(query("ai-chat-tool-output")).toBeNull();
+    expect(query("ai-chat-tool-pending")?.textContent).toContain(
+      "Waiting for result"
+    );
+
+    release();
+    await flush();
+    cleanup();
+  });
+
+  it("ignores an unknown part type without crashing", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    fakeConnection({
+      deltas: [],
+      skipText: true,
+      snapshot: [
+        {
+          id: "snap-1",
+          role: "assistant",
+          parts: [
+            { type: "mystery-part", content: "SHOULD-NOT-RENDER" },
+            { type: "text", content: "Known answer" },
+          ],
+        },
+      ],
+      gateBeforeFinish: gate,
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("ignored");
+    await submit();
+
+    // The unknown part is silently dropped; only the text part renders.
+    expect(query("message-assistant")?.textContent).toContain("Known answer");
+    expect(document.body.textContent).not.toContain("SHOULD-NOT-RENDER");
+
+    release();
+    await flush();
     cleanup();
   });
 

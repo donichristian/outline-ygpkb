@@ -53,6 +53,18 @@ type Props = {
   onClose: () => void;
 };
 
+/** One tool call, in the shape the transcript renders it. */
+type ToolCallView = {
+  /** The tool call id, stable across streamed updates. */
+  id: string;
+  /** The name of the tool the model invoked. */
+  name: string;
+  /** The parsed call input, once the model finished streaming it. */
+  input?: unknown;
+  /** The tool's result, absent while the call is still running. */
+  output?: unknown;
+};
+
 /** A transcript entry: the turn sent to the provider, or one read back. */
 type TranscriptTurn = {
   /** The position of the turn within the session, when it has one. */
@@ -61,21 +73,24 @@ type TranscriptTurn = {
   role: AiChatMessage["role"];
   /** The turn body. */
   content: string;
+  /** The tool calls made while producing a live turn. */
+  toolCalls?: ToolCallView[];
   /** How the turn ended, for a turn read back from the server. */
   status?: AiChatTurnStatus;
 };
 
 /**
- * The text and reasoning carried by the client's trailing assistant message.
- * Only `text` and `thinking` parts contribute; tool and unknown parts are left
- * for the slices that render them (todos 14 and 16).
+ * The text, reasoning and tool calls carried by the client's trailing assistant
+ * message. Unknown part types contribute nothing, so a part this panel does not
+ * render yet cannot break the turn.
  *
  * @param messages the client's current messages.
- * @returns the joined answer text and the joined reasoning text.
+ * @returns the joined answer text, joined reasoning text and the tool calls.
  */
 function liveAssistant(messages: UIMessage[]): {
   text: string;
   reasoning: string;
+  toolCalls: ToolCallView[];
 } {
   let assistant: UIMessage | undefined;
   for (let index = messages.length - 1; index >= 0; index--) {
@@ -87,6 +102,7 @@ function liveAssistant(messages: UIMessage[]): {
 
   const text: string[] = [];
   const reasoning: string[] = [];
+  const toolCalls: ToolCallView[] = [];
 
   for (const part of assistant?.parts ?? []) {
     switch (part.type) {
@@ -96,12 +112,24 @@ function liveAssistant(messages: UIMessage[]): {
       case "thinking":
         reasoning.push(part.content);
         break;
+      case "tool-call":
+        toolCalls.push({
+          id: part.id,
+          name: part.name,
+          input: part.input,
+          output: part.output,
+        });
+        break;
       default:
         break;
     }
   }
 
-  return { text: text.join(""), reasoning: reasoning.join("") };
+  return {
+    text: text.join(""),
+    reasoning: reasoning.join(""),
+    toolCalls,
+  };
 }
 
 /**
@@ -441,6 +469,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
             updated[updated.length - 1] = {
               role: "assistant",
               content: live.text,
+              toolCalls: live.toolCalls,
             };
             return updated;
           });
@@ -575,6 +604,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
             if (
               turn.role === "assistant" &&
               !turn.content &&
+              !turn.toolCalls?.length &&
               !isStreamingAssistant
             ) {
               return null;
@@ -602,6 +632,9 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
                     <ReasoningBody>{reasoning}</ReasoningBody>
                   </ReasoningDisclosure>
                 )}
+                {turn.toolCalls?.map((toolCall) => (
+                  <ToolCallCard key={toolCall.id} toolCall={toolCall} />
+                ))}
                 {turn.role === "assistant" ? (
                   // Assistant output is an aria-live region so a refusal – which
                   // renders inline without the error banner's visual affordance –
@@ -710,6 +743,73 @@ function turnMarker(
   }
 }
 
+/** How much of a tool call's input or output is shown, in characters. */
+const ToolValueLimit = 400;
+
+/**
+ * Formats a tool call's input or output for the transcript, truncating long
+ * payloads so a large search result cannot swamp the conversation.
+ *
+ * @param value the call input or result.
+ * @returns the text to display.
+ */
+function toolValue(value: unknown): string {
+  const text =
+    typeof value === "string"
+      ? value
+      : (JSON.stringify(value, null, 2) ?? String(value));
+
+  return text.length > ToolValueLimit
+    ? `${text.slice(0, ToolValueLimit)}…`
+    : text;
+}
+
+/**
+ * Renders one tool call inside an assistant turn: the tool's name, its input
+ * and its output. A call without an output yet is still running, so it shows a
+ * pending state instead of an empty result. The card is display-only – approval
+ * affordances belong to the deferred interrupts slice.
+ *
+ * @param props the tool call to render.
+ * @returns the tool call card.
+ */
+function ToolCallCard({ toolCall }: { toolCall: ToolCallView }) {
+  const { t } = useTranslation();
+  const isComplete = toolCall.output !== undefined;
+
+  return (
+    <ToolCall data-testid="ai-chat-tool-call">
+      <ToolCallHeader>
+        <ToolCallName data-testid="ai-chat-tool-name">
+          {toolCall.name}
+        </ToolCallName>
+        <ToolCallState>{isComplete ? t("Done") : t("Running")}</ToolCallState>
+      </ToolCallHeader>
+      {toolCall.input !== undefined && (
+        <ToolCallField>
+          <ToolCallLabel>{t("Input")}</ToolCallLabel>
+          <ToolCallValue data-testid="ai-chat-tool-input">
+            {toolValue(toolCall.input)}
+          </ToolCallValue>
+        </ToolCallField>
+      )}
+      {isComplete ? (
+        <ToolCallField>
+          <ToolCallLabel>{t("Output")}</ToolCallLabel>
+          <ToolCallValue data-testid="ai-chat-tool-output">
+            {toolValue(toolCall.output)}
+          </ToolCallValue>
+        </ToolCallField>
+      ) : (
+        <ToolCallPending data-testid="ai-chat-tool-pending" role="status">
+          <Spinner aria-hidden />
+          {t("Waiting for result…")}
+        </ToolCallPending>
+      )}
+    </ToolCall>
+  );
+}
+
 const linkStyles = css`
   color: ${(props) => props.theme.link};
   text-decoration: underline;
@@ -816,6 +916,59 @@ const ReasoningBody = styled.div`
   background: ${s("sidebarBackground")};
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+`;
+
+const ToolCall = styled.div`
+  margin: 6px 0;
+  padding: 6px 8px;
+  border: 1px solid ${s("divider")};
+  border-radius: 6px;
+  background: ${s("sidebarBackground")};
+  font-size: 12px;
+  line-height: 1.4;
+`;
+
+const ToolCallHeader = styled.div`
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+`;
+
+const ToolCallName = styled.code`
+  font-family: ${(props) => props.theme.fontFamilyMono};
+  font-weight: 500;
+  overflow-wrap: anywhere;
+`;
+
+const ToolCallState = styled.span`
+  flex-shrink: 0;
+  color: ${s("textTertiary")};
+`;
+
+const ToolCallField = styled.div`
+  margin-top: 4px;
+`;
+
+const ToolCallLabel = styled.span`
+  display: block;
+  color: ${s("textTertiary")};
+  font-weight: 500;
+`;
+
+const ToolCallValue = styled.pre`
+  margin: 0;
+  font-family: ${(props) => props.theme.fontFamilyMono};
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+`;
+
+const ToolCallPending = styled.span`
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  color: ${s("textTertiary")};
 `;
 
 const Container = styled(Flex)`
