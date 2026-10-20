@@ -27,10 +27,10 @@ vi.mock("~/scenes/Document/components/SidebarLayout", () => ({
   ),
 }));
 
-const streamAiChat = vi.hoisted(() => vi.fn());
+const createAiChatConnection = vi.hoisted(() => vi.fn());
 vi.mock("~/utils/aiChat", async (importOriginal) => {
   const actual = await importOriginal<typeof AiChatModule>();
-  return { ...actual, streamAiChat };
+  return { ...actual, createAiChatConnection };
 });
 
 // Button and NudeButton both render through ActionButton, which needs the
@@ -243,7 +243,7 @@ function renderPanel(rootStore: RootStore) {
 
 describe("AIChatPanel — history, status markers, disclosure", () => {
   afterEach(() => {
-    streamAiChat.mockReset();
+    createAiChatConnection.mockReset();
     document.body.innerHTML = "";
   });
 
@@ -467,15 +467,34 @@ describe("AIChatPanel — history, status markers, disclosure", () => {
 
     // A message typed now creates a conversation and streams under it, so the
     // exchange is stored and survives closing the panel.
-    streamAiChat.mockImplementation(async function* () {
-      yield { type: "delta", text: "fresh" };
-    });
+    const threadIds: Array<string | undefined> = [];
+    createAiChatConnection.mockImplementation((() => ({
+      connect: (
+        _messages: unknown,
+        _data: unknown,
+        _signal: unknown,
+        context?: { threadId?: string }
+      ) => {
+        threadIds.push(context?.threadId);
+        return (async function* () {
+          yield { type: "RUN_STARTED", threadId: context?.threadId, runId: "r" };
+          yield { type: "TEXT_MESSAGE_START", messageId: "m", role: "assistant" };
+          yield {
+            type: "TEXT_MESSAGE_CONTENT",
+            messageId: "m",
+            delta: "fresh",
+          };
+          yield { type: "TEXT_MESSAGE_END", messageId: "m" };
+          yield { type: "RUN_FINISHED", threadId: context?.threadId, runId: "r" };
+        })();
+      },
+    })) as never);
+
     panel.typeMessage("a new question");
     await panel.submit();
 
-    const options = streamAiChat.mock.calls[0][1] as { sessionId?: string };
-    expect(options.sessionId).toBe("session-new");
-    expect(panel.query("message-user")?.textContent).toBe("a new question");
+    expect(threadIds).toEqual(["session-new"]);
+    expect((panel.query("ai-chat-input") as HTMLInputElement).value).toBe("");
 
     panel.cleanup();
   });

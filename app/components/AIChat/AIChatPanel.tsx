@@ -1,3 +1,5 @@
+import { ChatClient } from "@tanstack/ai-client";
+import type { UIMessage } from "@tanstack/ai-client";
 import { observer } from "mobx-react";
 import { GrowIcon, InfoIcon, ShrinkIcon } from "outline-icons";
 import * as React from "react";
@@ -16,9 +18,9 @@ import SidebarLayout from "~/scenes/Document/components/SidebarLayout";
 import {
   AiChatError,
   clearDraft,
+  createAiChatConnection,
   flushDrafts,
   readDraft,
-  streamAiChat,
   writeDraft,
 } from "~/utils/aiChat";
 import type { AiChatMessage, AiChatTurnStatus } from "~/utils/aiChat";
@@ -40,6 +42,109 @@ type TranscriptTurn = {
   /** How the turn ended, for a turn read back from the server. */
   status?: AiChatTurnStatus;
 };
+
+/**
+ * The text and reasoning carried by the client's trailing assistant message.
+ * Only `text` and `thinking` parts contribute; tool and unknown parts are left
+ * for the slices that render them (todos 14 and 16).
+ *
+ * @param messages the client's current messages.
+ * @returns the joined answer text and the joined reasoning text.
+ */
+function liveAssistant(messages: UIMessage[]): {
+  text: string;
+  reasoning: string;
+} {
+  let assistant: UIMessage | undefined;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].role === "assistant") {
+      assistant = messages[index];
+      break;
+    }
+  }
+
+  const text: string[] = [];
+  const reasoning: string[] = [];
+
+  for (const part of assistant?.parts ?? []) {
+    switch (part.type) {
+      case "text":
+        text.push(part.content);
+        break;
+      case "thinking":
+        reasoning.push(part.content);
+        break;
+      default:
+        break;
+    }
+  }
+
+  return { text: text.join(""), reasoning: reasoning.join("") };
+}
+
+/**
+ * Parses a client failure into the transport error the panel renders. The
+ * connection already throws `AiChatError` for a rejected request, so its status
+ * and kind survive; anything else is a stream failure with no status.
+ *
+ * @param error the error thrown or reported by the chat client.
+ * @returns the error to display.
+ */
+function toAiChatError(error: unknown): AiChatError {
+  if (error instanceof AiChatError) {
+    return error;
+  }
+
+  if (error instanceof Error) {
+    return new AiChatError(error.message, "stream");
+  }
+
+  return new AiChatError("The AI chat request failed, try again?", "network");
+}
+
+/**
+ * Merges the turn still held by the client over the committed rows. The store
+ * stays the source of truth: a local turn is dropped the moment the equivalent
+ * stored row is read back, so the same question or answer is never rendered
+ * twice around the settle boundary.
+ *
+ * @param stored the committed rows, oldest first.
+ * @param pending the local turn, when one is in flight.
+ * @returns the transcript to render.
+ */
+function mergeTurns(
+  stored: TranscriptTurn[],
+  pending: TranscriptTurn[]
+): TranscriptTurn[] {
+  let local = pending;
+  const lastStored = stored[stored.length - 1];
+  const firstLocal = local[0];
+
+  if (
+    lastStored &&
+    firstLocal &&
+    lastStored.role === "user" &&
+    firstLocal.role === "user" &&
+    lastStored.content === firstLocal.content
+  ) {
+    local = local.slice(1);
+  }
+
+  const storedAnswer = stored[stored.length - 1];
+  const localAnswer = local[local.length - 1];
+
+  if (
+    storedAnswer &&
+    localAnswer &&
+    storedAnswer.role === "assistant" &&
+    localAnswer.role === "assistant" &&
+    storedAnswer.content === localAnswer.content
+  ) {
+    local = local.slice(0, -1);
+  }
+
+  return [...stored, ...local];
+}
 
 /**
  * Renders the user-facing message for a failed chat request. The HTTP status
@@ -114,13 +219,31 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
   // reopened conversation shows the answer without the thinking behind it.
   const [reasoning, setReasoning] = React.useState("");
   const [isFullscreen, setIsFullscreen] = React.useState(false);
-  const abortRef = React.useRef<AbortController | null>(null);
+  // The client for the turn currently in flight. It is recreated per turn, so
+  // it never owns the committed transcript – the store does.
+  const clientRef = React.useRef<ChatClient | null>(null);
+  // Identifies the current turn. Bumping it orphans every callback and the
+  // `handleSubmit` continuation belonging to an aborted or superseded turn.
+  const turnRef = React.useRef(0);
+  const stopRequestedRef = React.useRef(false);
   const transcriptRef = React.useRef<HTMLDivElement>(null);
   const formRef = React.useRef<HTMLFormElement>(null);
 
-  const abort = React.useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
+  /**
+   * Abandons the in-flight turn: aborts the client and discards both the
+   * streaming frame source and its React callbacks. A deliberate Stop keeps the
+   * partial turn visible; callers that switch conversations also clear it.
+   */
+  const stopTurn = React.useCallback(() => {
+    turnRef.current += 1;
+    stopRequestedRef.current = true;
+
+    const client = clientRef.current;
+    clientRef.current = null;
+    client?.stop();
+    client?.dispose();
+
+    setIsStreaming(false);
   }, []);
 
   // Abort any in-flight stream when the panel unmounts, and commit whatever
@@ -128,10 +251,13 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
   // typed in the last moments before closing is lost to the debounce.
   React.useEffect(
     () => () => {
-      abort();
+      turnRef.current += 1;
+      const client = clientRef.current;
+      clientRef.current = null;
+      client?.dispose();
       flushDrafts();
     },
-    [abort]
+    []
   );
 
   // Load the session list once so the history dropdown has something to show
@@ -184,25 +310,23 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
         }))
     : [];
 
-  const turns: TranscriptTurn[] = [...storedTurns, ...pending];
+  const turns: TranscriptTurn[] = mergeTurns(storedTurns, pending);
 
   const handleNewChat = React.useCallback(() => {
-    abort();
-    setIsStreaming(false);
+    stopTurn();
     setError(null);
     aiChatSessions.setSelectedSessionId(null);
     setPending([]);
-  }, [abort, aiChatSessions]);
+  }, [stopTurn, aiChatSessions]);
 
   const handleSelectSession = React.useCallback(
     (id: string) => {
-      abort();
-      setIsStreaming(false);
+      stopTurn();
       setError(null);
       aiChatSessions.setSelectedSessionId(id);
       setPending([]);
     },
-    [abort, aiChatSessions]
+    [stopTurn, aiChatSessions]
   );
 
   // Keep the transcript pinned to the latest message as it grows. Keyed on the
@@ -217,10 +341,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
     }
   }, [turns.length, lastTurnText]);
 
-  const handleStop = React.useCallback(() => {
-    abort();
-    setIsStreaming(false);
-  }, [abort]);
+  const handleStop = stopTurn;
 
   const handleToggleFullscreen = React.useCallback(() => {
     setIsFullscreen((current) => !current);
@@ -250,19 +371,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
       return;
     }
 
-    // The outgoing turn is appended here, not just into `pending`, because
-    // the wire body is the whole conversation: on the first message of a new
-    // one `turns` is empty and `sessionId` is null, so a history built only
-    // from the transcript puts `{ messages: [] }` on the wire and the server
-    // rejects it. Do not "simplify" this away — the question being asked is
-    // part of the request, never a follow-up to it.
-    const history: AiChatMessage[] = [
-      ...turns.map(({ role, content: body }) => ({ role, content: body })),
-      { role: "user", content },
-    ];
-
-    setPending((current) => [
-      ...current,
+    setPending([
       { role: "user", content },
       { role: "assistant", content: "" },
     ]);
@@ -274,8 +383,9 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
     setReasoning("");
     setIsStreaming(true);
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+    const turn = ++turnRef.current;
+    stopRequestedRef.current = false;
+    let client: ChatClient | undefined;
 
     try {
       // A conversation is only stored once it has an id: without one the server
@@ -284,66 +394,97 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
       // "New chat" so a fresh conversation nobody sends in leaves no empty row.
       const targetSessionId = sessionId ?? (await createSession()).id;
 
-      for await (const event of streamAiChat(history, {
-        signal: controller.signal,
-        sessionId: targetSessionId,
-      })) {
-        // Reasoning is shown as a disclosure, never written into the answer.
-        if (event.type === "reasoning") {
-          setReasoning((current) => current + event.text);
-          continue;
-        }
+      if (turnRef.current !== turn || stopRequestedRef.current) {
+        return;
+      }
 
-        setPending((current) => {
-          const updated = current.slice();
-          const last = updated[updated.length - 1];
-          updated[updated.length - 1] = {
-            role: "assistant",
-            content: last.content + event.text,
-          };
-          return updated;
-        });
+      // A per-turn headless `ChatClient` rather than `useChat`: the persisted
+      // session id only exists after this turn's session is created, and the
+      // client's `threadId` is fixed at construction (`updateOptions` cannot
+      // change it), so `useChat`'s option-bag recreations would not address the
+      // very first send. The client is a frame source only — the committed
+      // history stays in the store and is merged in for rendering.
+      const connection = createAiChatConnection();
+      let failure: unknown;
+
+      const chat = new ChatClient({
+        connection: {
+          ...connection,
+          connect: async function* (messages, data, signal, runContext) {
+            try {
+              yield* connection.connect(messages, data, signal, runContext);
+            } catch (err) {
+              failure = err;
+              throw err;
+            }
+          },
+        },
+        threadId: targetSessionId,
+        onMessagesChange: (messages) => {
+          if (clientRef.current !== chat) {
+            return;
+          }
+
+          const live = liveAssistant(messages);
+          setPending((current) => {
+            if (current.length === 0) {
+              return current;
+            }
+            const updated = current.slice();
+            updated[updated.length - 1] = {
+              role: "assistant",
+              content: live.text,
+            };
+            return updated;
+          });
+          setReasoning(live.reasoning);
+        },
+        onLoadingChange: (loading) => {
+          if (clientRef.current !== chat) {
+            return;
+          }
+          setIsStreaming(loading);
+        },
+        onError: (err) => {
+          failure = failure ?? err;
+        },
+      });
+
+      client = chat;
+      clientRef.current = chat;
+      await chat.sendMessage(content);
+
+      if (turnRef.current !== turn) {
+        return;
+      }
+
+      const error = failure ?? chat.getError();
+
+      if (error) {
+        setError(toAiChatError(error));
+        return;
+      }
+
+      // The stream only closes after the server has committed the turn, so the
+      // re-read is guaranteed to include the assistant row; the local turn is
+      // dropped in the same pass.
+      await aiChatMessages.list({ sessionId: targetSessionId }).then(
+        () => undefined,
+        () => undefined
+      );
+
+      if (turnRef.current === turn) {
+        setPending([]);
       }
     } catch (err) {
-      if (err instanceof AiChatError && err.kind === "refusal") {
-        // A grounding refusal is the boundary answering, not a failure: write
-        // it into the trailing assistant turn so it reads as an ordinary
-        // transcript entry rather than a red error banner. The panel knows it
-        // is a refusal here at throw time, so no extra state is tracked.
-        //
-        // Must stay `completed`, not `error`: `turnMarker` renders `error`
-        // as a danger "Failed" badge, which is what this branch avoids. A
-        // session-backed refusal is persisted as Completed server-side, so
-        // this also keeps the client from disagreeing with the stored row.
-        setPending((current) => {
-          const updated = current.slice();
-          updated[updated.length - 1] = {
-            role: "assistant",
-            content: err.message,
-            status: "completed",
-          };
-          return updated;
-        });
-      } else if (
-        controller.signal.aborted ||
-        (err instanceof AiChatError && err.kind === "aborted")
-      ) {
-        // A user-initiated stop is not an error. Branching on the error kind
-        // as well as the signal matters because `errorText` would otherwise
-        // render the transport's raw cancel message instead of its generic
-        // copy once the abort escapes the signal check.
-      } else if (err instanceof AiChatError) {
-        setError(err);
-      } else {
-        setError(
-          new AiChatError("The AI chat request failed, try again?", "network")
-        );
+      if (turnRef.current === turn) {
+        setError(toAiChatError(err));
       }
     } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
+      if (client && clientRef.current === client) {
+        clientRef.current = null;
+        client.dispose();
       }
-      setIsStreaming(false);
     }
   };
 
@@ -402,7 +543,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
       }
     >
       <Container column>
-        <Transcript ref={transcriptRef}>
+        <Transcript ref={transcriptRef} data-testid="ai-chat-transcript">
           {turns.length === 0 && (
             <EmptyText type="secondary" size="small">
               {t("Ask anything about your workspace")}

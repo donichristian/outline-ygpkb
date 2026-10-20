@@ -6,6 +6,7 @@ import { MobXProviderContext } from "mobx-react";
 import { MemoryRouter } from "react-router-dom";
 import { ThemeProvider } from "styled-components";
 import { buildLightTheme } from "@shared/styles/theme";
+import type { UIMessage } from "@tanstack/ai-client";
 import RootStore from "~/stores/RootStore";
 import { AiChatError, clearDraft, flushDrafts } from "~/utils/aiChat";
 import AIChatPanel from "./AIChatPanel";
@@ -91,16 +92,30 @@ class ResizeObserverStub {
 (globalThis as { ResizeObserver?: unknown }).ResizeObserver =
   ResizeObserverStub;
 
-// The streaming transport is what the panel consumes; each test installs its
-// own generator so the incremental, abort and error paths can be driven
-// deterministically.
-const streamAiChat = vi.hoisted(() => vi.fn());
+// The panel consumes the connection factory through a per-turn ChatClient; each
+// test installs its own AG-UI frame source so the incremental, abort and error
+// paths can be driven deterministically.
+const createAiChatConnection = vi.hoisted(() => vi.fn());
 vi.mock("~/utils/aiChat", async (importOriginal) => {
   const actual = await importOriginal<typeof AiChatModule>();
-  return { ...actual, streamAiChat };
+  return { ...actual, createAiChatConnection };
 });
 
 const theme = buildLightTheme({});
+
+/**
+ * Lets the client's subscription loop, send loop and post-settle re-read run to
+ * quiescence inside `act`, including the macrotask the connection wrapper uses
+ * to wait for its subscriber.
+ */
+async function flush() {
+  await act(async () => {
+    for (let turn = 0; turn < 10; turn++) {
+      await Promise.resolve();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
 
 // The default ApiClient mock answers every path with a benign auth envelope.
 // The two AI endpoints the panel reads need a proper shape instead, so the
@@ -112,18 +127,206 @@ type SessionSeed = {
   updatedAt: string;
 };
 
+type FakeChunk = { type: string; [key: string]: unknown };
+
+/** The arguments the panel handed the connection for one turn. */
+type FakeRun = {
+  messages: UIMessage[];
+  data?: Record<string, unknown>;
+  signal?: AbortSignal;
+  threadId?: string;
+};
+
+/** Rows the fake server committed, keyed by session id. */
+const committed = new Map<string, Record<string, unknown>[]>();
+
+/**
+ * Records the turn a fake stream completed, so the panel's post-settle re-read
+ * returns the rows a real server writes before closing the stream.
+ *
+ * @param threadId the session the turn belongs to.
+ * @param question the user's turn.
+ * @param answer the assistant's reply.
+ */
+function commitTurn(
+  threadId: string | undefined,
+  question: string,
+  answer: string
+) {
+  if (!threadId) {
+    return;
+  }
+
+  const rows = committed.get(threadId) ?? [];
+  const seq = rows.length + 1;
+  const createdAt = "2024-01-02T00:00:00.000Z";
+
+  rows.push(
+    {
+      id: `q-${threadId}-${seq}`,
+      seq,
+      role: "user",
+      content: question,
+      status: "completed",
+      createdAt,
+    },
+    {
+      id: `a-${threadId}-${seq + 1}`,
+      seq: seq + 1,
+      role: "assistant",
+      content: answer,
+      status: "completed",
+      createdAt,
+    }
+  );
+  committed.set(threadId, rows);
+}
+
+/**
+ * Builds one AG-UI frame.
+ *
+ * @param type the frame type.
+ * @param fields every other field on the frame.
+ * @returns the frame.
+ */
+function chunk(type: string, fields: Record<string, unknown> = {}): FakeChunk {
+  return { type, timestamp: Date.now(), ...fields };
+}
+
+/** What one fake turn replays. */
+type StreamScript = {
+  /** Incremental assistant text, one frame per entry. */
+  deltas: string[];
+  /** Reasoning emitted before the answer, as one frame. */
+  reasoning?: string;
+  /** Await the given promise after yielding the delta at `index`. */
+  gateAfter?: { index: number; promise: Promise<void> };
+  /** Await the given promise after the reasoning, before the answer starts. */
+  gateBeforeText?: Promise<void>;
+  /** The question to record alongside the answer when the stream completes. */
+  question?: string;
+  /** Thrown before any frame, the way a rejected request fails. */
+  error?: Error;
+};
+
+/**
+ * Installs a fake connection that replays an AG-UI stream. The returned array
+ * collects each run's arguments for assertions.
+ *
+ * @param source the frames to replay, or a function producing them per run.
+ * @returns the runs the panel started.
+ */
+function fakeConnection(
+  source: StreamScript | ((run: FakeRun) => StreamScript)
+) {
+  const runs: FakeRun[] = [];
+  let sequence = 0;
+
+  createAiChatConnection.mockImplementation((() => ({
+    connect: (
+      messages: UIMessage[],
+      data: Record<string, unknown> | undefined,
+      signal: AbortSignal | undefined,
+      context?: { threadId?: string }
+    ) => {
+      const run: FakeRun = {
+        messages,
+        data,
+        signal,
+        threadId: context?.threadId,
+      };
+      runs.push(run);
+
+      const script = typeof source === "function" ? source(run) : source;
+      const id = ++sequence;
+      const messageId = `m-${id}`;
+
+      return (async function* () {
+        if (script.error) {
+          throw script.error;
+        }
+
+        const threadId = run.threadId ?? "thread";
+        yield chunk("RUN_STARTED", { threadId, runId: `run-${id}` });
+
+        if (script.reasoning) {
+          yield chunk("REASONING_MESSAGE_START", {
+            messageId: `r-${id}`,
+            role: "reasoning",
+          });
+          yield chunk("REASONING_MESSAGE_CONTENT", {
+            messageId: `r-${id}`,
+            delta: script.reasoning,
+          });
+          yield chunk("REASONING_MESSAGE_END", { messageId: `r-${id}` });
+        }
+
+        if (script.gateBeforeText) {
+          await script.gateBeforeText;
+        }
+
+        yield chunk("TEXT_MESSAGE_START", { messageId, role: "assistant" });
+
+        for (let index = 0; index < script.deltas.length; index++) {
+          yield chunk("TEXT_MESSAGE_CONTENT", {
+            messageId,
+            delta: script.deltas[index],
+          });
+
+          if (script.gateAfter?.index === index) {
+            await script.gateAfter.promise;
+          }
+
+          if (signal?.aborted) {
+            return;
+          }
+        }
+
+        if (script.question !== undefined) {
+          commitTurn(run.threadId, script.question, script.deltas.join(""));
+        }
+
+        yield chunk("TEXT_MESSAGE_END", { messageId });
+        yield chunk("RUN_FINISHED", { threadId, runId: `run-${id}` });
+      })() as unknown as AsyncIterable<never>;
+    },
+  })) as never);
+
+  return runs;
+}
+
+/**
+ * The text a client message carries, as the panel renders it.
+ *
+ * @param message the message to read.
+ * @returns the joined text parts.
+ */
+function messageText(message: UIMessage | undefined): string {
+  return (message?.parts ?? [])
+    .flatMap((part) => (part.type === "text" ? [part.content] : []))
+    .join("");
+}
+
 // The panel's mount effect re-reads the session list through
 // aiChatSessions.list(), which replaces the local set with the server's
 // answer. Without this the call wipes out every session added directly to
 // the store, so the mock must agree with what was seeded.
 function mockEndpoints(sessions: SessionSeed[]) {
   const post = vi.mocked(client.post);
-  post.mockImplementation((async (path: string) => {
+  post.mockImplementation((async (
+    path: string,
+    params?: { sessionId?: string }
+  ) => {
     if (path === "/ai.sessions.list") {
       return { data: { sessions } };
     }
     if (path === "/ai.messages.list") {
-      return { data: { messages: [], truncated: false } };
+      return {
+        data: {
+          messages: committed.get(params?.sessionId ?? "") ?? [],
+          truncated: false,
+        },
+      };
     }
     return defaultPost(path);
   }) as never);
@@ -163,41 +366,6 @@ function seedMessage(
     updatedAt: "2024-01-02T00:00:00.000Z",
     ...message,
   } as never);
-}
-
-// The wire body is what regressed, so the tests below drive the REAL transport
-// against a stubbed `fetch` instead of the module mock: what they assert is the
-// JSON the panel actually puts on the wire, not what it hands to a stub.
-async function useRealTransport() {
-  const actual = await vi.importActual<typeof AiChatModule>("~/utils/aiChat");
-  streamAiChat.mockImplementation(actual.streamAiChat);
-}
-
-/** A 200 response whose body is the given SSE frames, for running a turn to completion. */
-function sseResponse(frames: string) {
-  const encoder = new TextEncoder();
-  const body = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(encoder.encode(frames));
-      controller.close();
-    },
-  });
-
-  return { ok: true, status: 200, body } as unknown as Response;
-}
-
-/** The API's rejection envelope, which is what a 400 on `/api/ai.chat` returns. */
-function validationErrorResponse(message: string) {
-  return {
-    ok: false,
-    status: 400,
-    json: async () => ({
-      ok: false,
-      error: "validation_error",
-      status: 400,
-      message,
-    }),
-  } as unknown as Response;
 }
 
 /**
@@ -301,15 +469,32 @@ describe("AIChatPanel", () => {
   // build, so an undefined envelope is added to the store as a session with no
   // dates, which blows up the history list.
   beforeEach(() => {
-    vi.mocked(client.post).mockImplementation(((path: string) =>
-      Promise.resolve(defaultPost(path))) as never);
+    committed.clear();
+    createAiChatConnection.mockReset();
+    // The module-level store outlives each test; a selection or transcript left
+    // behind would change which conversation the next send addresses.
+    rootStore.clear();
+    rootStore.aiChatSessions.setSelectedSessionId(null);
+    vi.mocked(client.post).mockImplementation((async (
+      path: string,
+      params?: { sessionId?: string }
+    ) => {
+      if (path === "/ai.messages.list") {
+        return {
+          data: {
+            messages: committed.get(params?.sessionId ?? "") ?? [],
+            truncated: false,
+          },
+        };
+      }
+      return defaultPost(path);
+    }) as never);
   });
 
   afterEach(() => {
-    streamAiChat.mockReset();
+    createAiChatConnection.mockReset();
     document.body.innerHTML = "";
-    // The wire-body tests swap in a real transport and a stubbed `fetch`; the
-    // global is restored here so no test can see the previous one's stub.
+    // Every test installs its own connection; no global fetch stub survives.
     vi.unstubAllGlobals();
     document.body.innerHTML = "";
     // Drafts live in module-level state and `localStorage`, which survive both
@@ -324,31 +509,32 @@ describe("AIChatPanel", () => {
   });
 
   it("sends the message when Enter is pressed in the prompt", async () => {
-    streamAiChat.mockImplementation(async function* () {
-      yield { type: "delta", text: "ok" };
-    });
+    const runs = fakeConnection({ deltas: ["ok"], question: "hi" });
 
     const { query, typeMessage, pressEnter, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
     await pressEnter();
 
-    expect(streamAiChat).toHaveBeenCalledTimes(1);
+    expect(runs).toHaveLength(1);
+    expect(runs[0].messages).toHaveLength(1);
+    expect(runs[0].messages[0].role).toBe("user");
+    expect(messageText(runs[0].messages[0])).toBe("hi");
     expect(query("message-user")?.textContent).toBe("hi");
     cleanup();
   });
 
   it("appends assistant text incrementally as deltas arrive", async () => {
-    // A generator whose two frames are released between assertions, so the
-    // intermediate transcript state can be observed.
+    // The stream is released between assertions, so the intermediate
+    // transcript state is observable.
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
     });
 
-    streamAiChat.mockImplementation(async function* () {
-      yield { type: "delta", text: "Hel" };
-      await gate;
-      yield { type: "delta", text: "lo" };
+    fakeConnection({
+      deltas: ["Hel", "lo"],
+      gateAfter: { index: 0, promise: gate },
+      question: "hi",
     });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
@@ -359,21 +545,19 @@ describe("AIChatPanel", () => {
     expect(query("message-assistant")?.textContent).toContain("Hel");
     expect(query("message-assistant")?.textContent).not.toContain("Hello");
 
-    await act(async () => {
-      release();
-      await Promise.resolve();
-    });
+    release();
+    await flush();
 
     expect(query("message-assistant")?.textContent).toContain("Hello");
     cleanup();
   });
 
   it("renders assistant markdown as plain text with a clickable source link", async () => {
-    streamAiChat.mockImplementation(async function* () {
-      yield {
-        type: "delta",
-        text: "See **POS Akademik 01** at http://localhost:3050/doc/pos-akademik-01-Olc4Zkpd4D",
-      };
+    fakeConnection({
+      deltas: [
+        "See **POS Akademik 01** at http://localhost:3050/doc/pos-akademik-01-Olc4Zkpd4D",
+      ],
+      question: "hi",
     });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
@@ -399,10 +583,11 @@ describe("AIChatPanel", () => {
       release = resolve;
     });
 
-    streamAiChat.mockImplementation(async function* () {
-      yield { type: "reasoning", text: "Let me search the KB" };
-      await gate;
-      yield { type: "delta", text: "The answer" };
+    fakeConnection({
+      reasoning: "Let me search the KB",
+      deltas: ["The answer"],
+      gateBeforeText: gate,
+      question: "hi",
     });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
@@ -420,10 +605,8 @@ describe("AIChatPanel", () => {
         ?.textContent;
     expect(answerSpan() ?? "").not.toContain("Let me search the KB");
 
-    await act(async () => {
-      release();
-      await Promise.resolve();
-    });
+    release();
+    await flush();
 
     expect(answerSpan()).toContain("The answer");
     // The disclosure is live-only: it is gone once the turn completes.
@@ -452,10 +635,10 @@ describe("AIChatPanel", () => {
       release = resolve;
     });
 
-    streamAiChat.mockImplementation(async function* () {
-      yield { type: "delta", text: "" };
-      await gate;
-      yield { type: "delta", text: "done" };
+    fakeConnection({
+      deltas: ["", "done"],
+      gateAfter: { index: 0, promise: gate },
+      question: "hi",
     });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
@@ -476,53 +659,48 @@ describe("AIChatPanel", () => {
     cleanup();
   });
 
-  it("aborts the in-flight stream when Stop is pressed", async () => {
-    let capturedSignal: AbortSignal | undefined;
-    let resolveStarted: () => void = () => undefined;
-    const started = new Promise<void>((resolve) => {
-      resolveStarted = resolve;
+  it("aborts the in-flight stream when Stop is pressed and shows no error", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
     });
 
-    streamAiChat.mockImplementation(async function* (
-      _messages: unknown,
-      options: { signal?: AbortSignal } = {}
-    ) {
-      capturedSignal = options.signal;
-      resolveStarted();
-      yield { type: "delta", text: "" };
-      // Never yield content – the test asserts the abort propagates to the signal.
-      await new Promise<void>((_resolve, reject) => {
-        options.signal?.addEventListener("abort", () =>
-          reject(new Error("aborted"))
-        );
-      });
+    const runs = fakeConnection((run) => {
+      // Release the blocked frame as soon as the client aborts, so the fake
+      // connection settles the way a cancelled request does.
+      run.signal?.addEventListener("abort", () => release());
+      return {
+        deltas: ["Hel", "lo"],
+        gateAfter: { index: 0, promise: gate },
+      };
     });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
     await submit();
-    await act(async () => {
-      await started;
-    });
 
-    expect(capturedSignal).toBeDefined();
-    expect(capturedSignal?.aborted).toBe(false);
+    expect(runs[0].signal?.aborted).toBe(false);
+    expect(query("message-assistant")?.textContent).toContain("Hel");
 
     const stop = query("ai-chat-stop") as HTMLButtonElement;
     expect(stop).not.toBeNull();
     await act(async () => {
       stop.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
     });
 
-    expect(capturedSignal?.aborted).toBe(true);
+    expect(runs[0].signal?.aborted).toBe(true);
+    expect(query("ai-chat-error")).toBeNull();
+    expect(query("ai-chat-spinner")).toBeNull();
+    // The partial answer stays visible; the turn is simply over.
+    expect(query("message-assistant")?.textContent).toContain("Hel");
     cleanup();
   });
 
   it("renders a visible error notice when the stream throws AiChatError", async () => {
-    streamAiChat.mockImplementation(async function* () {
-      throw new AiChatError("Too many requests", "http", 429);
-      // eslint-disable-next-line no-unreachable
-      yield { type: "delta", text: "" };
+    fakeConnection({
+      deltas: [],
+      error: new AiChatError("Too many requests", "http", 429),
     });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
@@ -536,10 +714,9 @@ describe("AIChatPanel", () => {
   });
 
   it("shows the workspace-disabled message for a 404", async () => {
-    streamAiChat.mockImplementation(async function* () {
-      throw new AiChatError("Resource not found", "http", 404);
-      // eslint-disable-next-line no-unreachable
-      yield { type: "delta", text: "" };
+    fakeConnection({
+      deltas: [],
+      error: new AiChatError("Resource not found", "http", 404),
     });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
@@ -555,11 +732,7 @@ describe("AIChatPanel", () => {
   it("renders a grounding refusal inline as an assistant turn, not an error", async () => {
     const refusal =
       "This assistant only answers from this workspace’s knowledge base";
-    streamAiChat.mockImplementation(async function* () {
-      throw new AiChatError(refusal, "refusal");
-      // eslint-disable-next-line no-unreachable
-      yield { type: "delta", text: "" };
-    });
+    fakeConnection({ deltas: [refusal], question: "hi" });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
     typeMessage("hi");
@@ -577,10 +750,9 @@ describe("AIChatPanel", () => {
   });
 
   it("shows the session-expired message for a 403", async () => {
-    streamAiChat.mockImplementation(async function* () {
-      throw new AiChatError("CSRF token invalid", "http", 403);
-      // eslint-disable-next-line no-unreachable
-      yield { type: "delta", text: "" };
+    fakeConnection({
+      deltas: [],
+      error: new AiChatError("CSRF token invalid", "http", 403),
     });
 
     const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
@@ -832,109 +1004,11 @@ describe("AIChatPanel", () => {
     panel.cleanup();
   });
 
-  it("sends the typed question as the last message when the conversation is new", async () => {
-    await useRealTransport();
-
-    const bodies: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string, init: RequestInit) => {
-        // i18n loads its locale over `fetch` as well; only the chat request is
-        // under test.
-        if (String(url).includes("/api/ai.chat")) {
-          bodies.push(String(init.body));
-        }
-        return sseResponse(
-          'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
-        );
-      })
-    );
-
-    // No session is selected, so this is the very first turn of a brand-new
-    // conversation – the one that went out as `{ messages: [] }`.
-    const panel = renderPanel(new RootStore());
-    panel.typeMessage("what is our refund policy?");
-    await panel.submit();
-
-    expect(bodies).toHaveLength(1);
-    const body = JSON.parse(bodies[0]);
-    expect(Array.isArray(body.messages)).toBe(true);
-    expect(body.messages.length).toBeGreaterThan(0);
-    expect(body.messages.at(-1)).toEqual({
-      role: "user",
-      content: "what is our refund policy?",
+  it("creates a session before the first send and addresses it by thread id", async () => {
+    const runs = fakeConnection({
+      deltas: ["ok"],
+      question: "what is our refund policy?",
     });
-    panel.cleanup();
-  });
-
-  it("sends the new turn alongside the sessionId for a stored conversation", async () => {
-    await useRealTransport();
-
-    const bodies: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string, init: RequestInit) => {
-        // Only the chat request is under test; i18n loads its locale over
-        // `fetch` too, and would otherwise be recorded as a body.
-        if (String(url).includes("/api/ai.chat")) {
-          bodies.push(String(init.body));
-        }
-        // A session-backed turn is only whole once the server says so.
-        return sseResponse(
-          'event: complete\ndata: {"runId":"run-1","finishReason":"stop"}\n\n'
-        );
-      })
-    );
-
-    mockEndpoints([
-      {
-        id: "session-a",
-        title: "Alpha conversation",
-        createdAt: "2024-01-01T00:00:00.000Z",
-        updatedAt: "2024-01-02T00:00:00.000Z",
-      },
-    ]);
-    const rootStore = new RootStore();
-    rootStore.aiChatSessions.add({
-      id: "session-a",
-      title: "Alpha conversation",
-      createdAt: "2024-01-01T00:00:00.000Z",
-      updatedAt: "2024-01-02T00:00:00.000Z",
-    } as never);
-
-    const panel = renderPanel(rootStore);
-    await panel.click(panel.query("ai-chat-history-trigger"));
-    await panel.click(panel.query("ai-chat-session-session-a"));
-    panel.typeMessage("and the deadline?");
-    await panel.submit();
-
-    expect(bodies).toHaveLength(1);
-    // The server rebuilds the prompt window from committed rows but appends only
-    // the last message, so the new turn must travel with the session.
-    expect(JSON.parse(bodies[0])).toEqual({
-      messages: [{ role: "user", content: "and the deadline?" }],
-      sessionId: "session-a",
-    });
-    panel.cleanup();
-  });
-
-  it("creates a session on the first send and stores the turn under it", async () => {
-    await useRealTransport();
-
-    const bodies: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string, init: RequestInit) => {
-        // i18n loads its locale over `fetch` as well; only the chat request is
-        // under test.
-        if (String(url).includes("/api/ai.chat")) {
-          bodies.push(String(init.body));
-        }
-        return sseResponse(
-          'event: complete\ndata: {"runId":"run-1","finishReason":"stop"}\n\n'
-        );
-      })
-    );
 
     const panel = renderPanel(new RootStore());
     panel.typeMessage("what is our refund policy?");
@@ -947,22 +1021,70 @@ describe("AIChatPanel", () => {
       "/ai.sessions.create",
       {}
     );
-    expect(bodies).toHaveLength(1);
-    expect(JSON.parse(bodies[0]).sessionId).toBe("session-new");
+    expect(runs).toHaveLength(1);
+    // The created session is the AG-UI thread id, and the wire carries only the
+    // question – the server rebuilds the window from committed rows.
+    expect(runs[0].threadId).toBe("session-new");
+    expect(runs[0].messages).toHaveLength(1);
+    expect(runs[0].messages[0].role).toBe("user");
+    expect(messageText(runs[0].messages[0])).toBe(
+      "what is our refund policy?"
+    );
+    panel.cleanup();
+  });
+
+  it("addresses a stored conversation by its thread id without owning its history", async () => {
+    const session = {
+      id: "session-a",
+      title: "Alpha conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    };
+    mockEndpoints([session]);
+    const rootStore = new RootStore();
+    rootStore.aiChatSessions.add(session as never);
+    seedMessage(rootStore, "session-a", {
+      id: "m-a1",
+      seq: 1,
+      role: "user",
+      content: "question one",
+    });
+    seedMessage(rootStore, "session-a", {
+      id: "m-a2",
+      seq: 2,
+      role: "assistant",
+      content: "answer one",
+    });
+
+    const runs = fakeConnection({
+      deltas: ["ok"],
+      question: "and the deadline?",
+    });
+
+    const panel = renderPanel(rootStore);
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-session-session-a"));
+    panel.typeMessage("and the deadline?");
+    await panel.submit();
+
+    expect(runs).toHaveLength(1);
+    expect(runs[0].threadId).toBe("session-a");
+    // The client is a frame source only: it sends the new turn, never the
+    // committed transcript it does not own.
+    expect(runs[0].messages).toHaveLength(1);
+    expect(messageText(runs[0].messages[0])).toBe("and the deadline?");
     panel.cleanup();
   });
 
   it("surfaces the server's message when it rejects the request", async () => {
-    await useRealTransport();
-
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () =>
-        validationErrorResponse(
-          "messages: Too small: expected array to have >=1 items"
-        )
-      )
-    );
+    fakeConnection({
+      deltas: [],
+      error: new AiChatError(
+        "messages: Too small: expected array to have >=1 items",
+        "http",
+        400
+      ),
+    });
 
     const panel = renderPanel(new RootStore());
     panel.typeMessage("hi");
@@ -973,6 +1095,137 @@ describe("AIChatPanel", () => {
       "messages: Too small: expected array to have >=1 items"
     );
     expect(notice).not.toContain("The AI chat request failed, try again?");
+    panel.cleanup();
+  });
+
+  it("keeps the transcript pinned to the latest turn", async () => {
+    fakeConnection({ deltas: ["ok"], question: "hi" });
+
+    const panel = renderPanel(rootStore);
+    const transcript = panel.query("ai-chat-transcript") as HTMLElement;
+    Object.defineProperty(transcript, "scrollHeight", {
+      configurable: true,
+      value: 480,
+    });
+
+    panel.typeMessage("hi");
+    await panel.submit();
+
+    expect(transcript.scrollTop).toBe(480);
+    panel.cleanup();
+  });
+
+  it("aborts the in-flight stream when the panel unmounts", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const runs = fakeConnection((run) => {
+      run.signal?.addEventListener("abort", () => release());
+      return {
+        deltas: ["Hel", "lo"],
+        gateAfter: { index: 0, promise: gate },
+      };
+    });
+
+    const panel = renderPanel(rootStore);
+    panel.typeMessage("hi");
+    await panel.submit();
+
+    expect(runs[0].signal?.aborted).toBe(false);
+
+    panel.cleanup();
+
+    expect(runs[0].signal?.aborted).toBe(true);
+  });
+
+  it("clears the pending turn and aborts when New chat is chosen mid-stream", async () => {
+    const session = {
+      id: "session-a",
+      title: "Alpha conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    };
+    mockEndpoints([session]);
+    const rootStore = new RootStore();
+    rootStore.aiChatSessions.add(session as never);
+    rootStore.aiChatSessions.setSelectedSessionId("session-a");
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runs = fakeConnection((run) => {
+      run.signal?.addEventListener("abort", () => release());
+      return {
+        deltas: ["partial", " answer"],
+        gateAfter: { index: 0, promise: gate },
+      };
+    });
+
+    const panel = renderPanel(rootStore);
+    panel.typeMessage("hi");
+    await panel.submit();
+
+    expect(panel.transcripts()).toEqual(["hi", "partial"]);
+
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-new"));
+
+    expect(panel.transcripts()).toEqual([]);
+    expect(runs[0].signal?.aborted).toBe(true);
+    panel.cleanup();
+  });
+
+  it("clears the pending turn and aborts when another session is selected mid-stream", async () => {
+    const sessionA = {
+      id: "session-a",
+      title: "Alpha conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    };
+    const sessionB = {
+      id: "session-b",
+      title: "Beta conversation",
+      createdAt: "2024-01-03T00:00:00.000Z",
+      updatedAt: "2024-01-04T00:00:00.000Z",
+    };
+    mockEndpoints([sessionA, sessionB]);
+    const rootStore = new RootStore();
+    rootStore.aiChatSessions.add(sessionA as never);
+    rootStore.aiChatSessions.add(sessionB as never);
+    rootStore.aiChatSessions.setSelectedSessionId("session-a");
+    seedMessage(rootStore, "session-b", {
+      id: "m-b1",
+      seq: 1,
+      role: "user",
+      content: "Beta question",
+    });
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runs = fakeConnection((run) => {
+      run.signal?.addEventListener("abort", () => release());
+      return {
+        deltas: ["partial", " answer"],
+        gateAfter: { index: 0, promise: gate },
+      };
+    });
+
+    const panel = renderPanel(rootStore);
+    panel.typeMessage("hi");
+    await panel.submit();
+
+    expect(panel.transcripts()).toEqual(["hi", "partial"]);
+
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-session-session-b"));
+
+    expect(panel.transcripts()).toEqual(["Beta question"]);
+    expect(runs[0].signal?.aborted).toBe(true);
     panel.cleanup();
   });
 });
