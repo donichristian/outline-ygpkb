@@ -19,19 +19,29 @@ export const AiChatMaxMessageLength = 8000;
 export const AiChatMaxSessionTitleLength = 200;
 
 /**
- * A single message in the conversation. Only `user` and `assistant` roles are
- * accepted from the client – the `system` role is intentionally rejected so a
- * caller cannot override the server-side instructions.
- *
- * ponytail: todo 8 finalises the AG-UI schema contract. For now we accept the
- * legacy `{ role, content }` shape and the AG-UI `{ id, role, parts }` shape,
- * and keep `.passthrough()` on the body so `chatParamsFromRequestBody` can see
- * the extra AG-UI fields (`threadId`, `runId`, `state`, `tools`, etc.).
+ * One part of an AG-UI message. Only `type` is required: a text part carries its
+ * text in `content`, a `thinking` part carries the same field but is never read
+ * as answer text, and tool parts carry their own fields. Everything beyond
+ * `type` is therefore passed through untyped and narrowed where it is consumed.
+ */
+const AiChatMessagePartSchema = z
+  .object({
+    /** The part kind, for example `text`, `thinking` or `tool-call`. */
+    type: z.string().min(1),
+  })
+  .loose();
+
+/**
+ * A single message in the conversation, in either accepted shape: the legacy
+ * `{ role, content }` body and the AG-UI `{ id, role, parts }` one. Only `user`
+ * and `assistant` roles are accepted from the client – the `system` role is
+ * intentionally rejected in BOTH shapes so a caller cannot override the
+ * server-side instructions.
  */
 const AiChatMessageSchema = z.object({
   role: z.enum(["user", "assistant"]),
   content: z.string().min(1).max(AiChatMaxMessageLength).optional(),
-  parts: z.array(z.unknown()).optional(),
+  parts: z.array(AiChatMessagePartSchema).optional(),
   id: z.string().optional(),
 });
 

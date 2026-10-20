@@ -22,6 +22,8 @@ import { AuthenticationType } from "@server/types";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
 import Redis from "@server/storage/redis";
 import { assertAiChatEnabled } from "./enabled";
+import { messageText } from "./messages";
+import type { MessageLike } from "./messages";
 import { appendTurn, createPersistenceMiddleware } from "./middleware";
 import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
@@ -32,14 +34,14 @@ import { createAiChatAdapter } from "./adapter";
 type ChatContext = APIContext<T.AiChatSchemaReq>;
 
 /**
- * A stored message row, narrowed to the two columns that may leave the server.
- * `role` is widened to `string` so a value outside the allow-list is re-checked
- * at runtime rather than trusted from the model's type.
+ * A message as forwarded to the provider: storage columns and AG-UI parts are
+ * gone, and `content` is always text. This is the shape both the provider and
+ * the grounding gate consume.
  */
-type StoredMessage = {
+export type UpstreamMessage = {
   /** The authored role, re-asserted against {@link ForwardableRoles}. */
-  role: string;
-  /** The message text. */
+  role: T.AiChatMessageInput["role"];
+  /** The flattened message text. */
   content: string;
 };
 
@@ -78,32 +80,64 @@ function isForwardableRole(role: string): role is T.AiChatMessageInput["role"] {
 }
 
 /**
- * Reduces stored rows to the conversation forwarded upstream, optionally
- * followed by the turn being started now.
+ * Reduces one message to its forwardable form, dropping it when it has no text
+ * or when its role is outside the allow-list.
+ *
+ * The role is re-asserted **after** flattening, so a `system` role can neither
+ * ride in on a legacy `{ role, content }` body nor hide inside an AG-UI
+ * `{ role, parts }` one.
+ *
+ * @param message the message to reduce, in either accepted shape.
+ * @returns the `{ role, content }` row, or undefined when it may not be sent.
+ */
+function toUpstreamMessage(
+  message: MessageLike
+): UpstreamMessage | undefined {
+  const content = messageText(message);
+
+  if (!message.role || !isForwardableRole(message.role)) {
+    return undefined;
+  }
+
+  if (!content) {
+    return undefined;
+  }
+
+  return { role: message.role, content };
+}
+
+/**
+ * Reduces messages to the conversation forwarded upstream, optionally followed
+ * by the turn being started now.
  *
  * Only `role` and `content` survive – `seq`, `status`, `runId`, `sessionId`,
- * `teamId` and `userId` are storage concerns. The result is capped to the most
- * recent `AiChatMaxMessages` entries, dropping the oldest context rather than the
- * pending turn.
+ * `teamId`, `userId`, `id` and `parts` are storage or transport concerns. The
+ * result is capped to the most recent `AiChatMaxMessages` entries, dropping the
+ * oldest context rather than the pending turn.
  *
- * @param rows the committed rows, in `seq ASC` order.
+ * @param messages the committed messages (stored rows or the client array), in
+ *   conversation order.
  * @param pendingTurn the turn to append after the committed window, when it has
  *   not been persisted yet.
  * @returns the conversation to hand to the provider.
  */
 export function toUpstreamMessages(
-  rows: readonly StoredMessage[],
-  pendingTurn?: T.AiChatMessageInput
-): T.AiChatMessageInput[] {
-  const committed: T.AiChatMessageInput[] = [];
+  messages: readonly MessageLike[],
+  pendingTurn?: MessageLike
+): UpstreamMessage[] {
+  const committed: UpstreamMessage[] = [];
 
-  for (const row of rows) {
-    if (isForwardableRole(row.role)) {
-      committed.push({ role: row.role, content: row.content });
+  for (const message of messages) {
+    const forwarded = toUpstreamMessage(message);
+
+    if (forwarded) {
+      committed.push(forwarded);
     }
   }
 
-  return (pendingTurn ? [...committed, pendingTurn] : committed).slice(
+  const pending = pendingTurn ? toUpstreamMessage(pendingTurn) : undefined;
+
+  return (pending ? [...committed, pending] : committed).slice(
     -T.AiChatMaxMessages
   );
 }
@@ -135,9 +169,9 @@ export async function resolveUpstreamMessages({
   ctx,
   sessionId,
   pendingTurn,
-}: ResolveUpstreamProps): Promise<T.AiChatMessageInput[]> {
+}: ResolveUpstreamProps): Promise<UpstreamMessage[]> {
   if (!sessionId) {
-    return ctx.input.body.messages ?? [];
+    return toUpstreamMessages(ctx.input.body.messages ?? []);
   }
 
   const session = await AIChatSession.findOwned(ctx, sessionId, user);
@@ -392,17 +426,7 @@ router.post(
       // actually asked, not an orphan refusal with nothing above it. Persisting
       // after the gate would leave the refusal as the first row and lose the
       // turn that produced it.
-      const pendingContent =
-        pendingTurn.content ??
-        (pendingTurn.parts ?? [])
-          .filter((p): p is { type: "text"; content: string } =>
-            typeof p === "object" &&
-            p !== null &&
-            "content" in p &&
-            typeof p.content === "string"
-          )
-          .map((p) => p.content)
-          .join("");
+      const pendingContent = messageText(pendingTurn);
       await appendTurn({
         user,
         sessionId: ownedSession?.id,
@@ -447,11 +471,7 @@ router.post(
     // a retrieval agent enforces the boundary, and the local lexical probe would
     // only refuse prompts that corpus cannot lexically match.
     const ungroundedReason = env.AI_CHAT_GROUNDING
-      ? await findUngroundedReason(
-          user,
-          // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- resolvedMessages content may be undefined for parts-only AG-UI messages; the gate only operates on text.
-          resolvedMessages as unknown as Array<{ role: string; content: string }>
-        )
+      ? await findUngroundedReason(user, resolvedMessages)
       : undefined;
     if (ungroundedReason) {
       Logger.warn("AI chat prompt rejected as ungrounded", {
@@ -523,8 +543,7 @@ router.post(
 
     // ponytail: chatParamsFromRequestBody validates the AG-UI shape. For a
     // legacy `{ role, content }` body it throws; the zod schema already
-    // validated the body, so we proceed rather than reject. todo 8 finalises
-    // the AG-UI schema contract.
+    // validated the body, so we proceed rather than reject.
     try {
       await chatParamsFromRequestBody(ctx.request.body);
     } catch {
@@ -549,7 +568,7 @@ router.post(
       // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- AiChatAdapter is a structurally-compatible subtype of AnyTextAdapter; the adapter type is a union that TanStack's generic parameters reject at compile time but accept at runtime.
       const stream = chat({
         adapter: adapter as unknown as Parameters<typeof chat>[0]["adapter"],
-        // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- resolvedMessages is AiChatMessageInput[] which is a valid ModelMessage at runtime; TanStack's generic type parameter is too strict for the schema-inferred shape.
+        // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- UpstreamMessage is a valid ModelMessage at runtime; TanStack's generic type parameter is too strict for the schema-inferred shape.
         messages: resolvedMessages as unknown as Parameters<typeof chat>[0]["messages"],
         threadId: sessionId,
         runId,
