@@ -28,6 +28,7 @@ import { appendTurn, createPersistenceMiddleware } from "./middleware";
 import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
 import { loadTanstack } from "./tanstack";
+import { loadServerTools } from "./tools";
 import { createAiChatAdapter } from "./adapter";
 
 /** The validated context of a chat request. */
@@ -544,9 +545,13 @@ router.post(
     });
 
     // SECURITY: threadId from server-owned sessionId, runId server-minted.
+    // Tools are the server's own frozen allowlist – the request body is never
+    // read for tools and `forwardedProps` is never spread into `chat()`.
     // Client-supplied tools/forwardedProps/state/resume are ignored.
-    const { chat, chatParamsFromRequestBody, toServerSentEventsResponse } =
-      await loadTanstack();
+    const [
+      { chat, chatParamsFromRequestBody, toServerSentEventsResponse },
+      serverTools,
+    ] = await Promise.all([loadTanstack(), loadServerTools()]);
 
     // ponytail: chatParamsFromRequestBody validates the AG-UI shape. For a
     // legacy `{ role, content }` body it throws; the zod schema already
@@ -579,6 +584,12 @@ router.post(
         messages: resolvedMessages as unknown as Parameters<typeof chat>[0]["messages"],
         threadId: sessionId,
         runId,
+        // The allowlist is static and read-only. It is the only source of
+        // tools on this path; the request body contributes none.
+        tools: serverTools,
+        // Server tools receive the requesting user through this context, so
+        // no tool closes over a request-scoped value.
+        context: { user },
         abortController: ac,
         // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- TanStack's middleware generic defaults to `undefined`; a middleware array is accepted at runtime.
         middleware: [persistenceMiddleware] as unknown as Parameters<
