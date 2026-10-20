@@ -1,7 +1,14 @@
+import {
+  fetchServerSentEvents,
+  type ResumableConnectConnectionAdapter,
+} from "@tanstack/ai-client";
 import { debounce } from "es-toolkit/compat";
 import EDITOR_VERSION from "@shared/editor/version";
 import { CSRF } from "@shared/constants";
 import { getCSRFToken } from "./csrf";
+
+const aiChatUrl = "/api/ai.chat";
+const aiChatKindHeader = "X-AI-Chat-Kind";
 
 /**
  * A single message in an AI chat conversation. Mirrors the server schema in
@@ -140,6 +147,116 @@ export class AiChatError extends Error {
     this.kind = kind;
     this.status = status;
   }
+}
+
+/**
+ * The discriminator a refused turn may carry on the `X-AI-Chat-Kind` response
+ * header: `refusal` is the grounding gate declining, `busy` is transient
+ * contention with a turn already streaming, and `null` is an ordinary answer.
+ */
+export type AiChatKind = "refusal" | "busy" | null;
+
+/** Options accepted by {@link createAiChatConnection}. */
+export interface AiChatConnectionOptions {
+  /** Overrides the global `fetch`, for tests and instrumentation. */
+  fetchClient?: typeof globalThis.fetch;
+  /** Called with each response's `X-AI-Chat-Kind` value, `null` when absent. */
+  onKind?: (kind: AiChatKind) => void;
+}
+
+/**
+ * Creates the TanStack SSE connection for `POST /api/ai.chat`, carrying the
+ * CSRF and editor-version headers the API requires and reporting each
+ * response's `X-AI-Chat-Kind` discriminator through `onKind`.
+ *
+ * Headers are built per request so a rotated CSRF cookie is reflected without
+ * a reload, and an absent token omits the header rather than sending an empty
+ * one. No `tools` or `forwardedProps` are ever derived from client state: the
+ * library sends `tools: []` and `forwardedProps: {}` by default, which is what
+ * the server expects.
+ *
+ * @param options the fetch override and kind observer.
+ * @returns the connection adapter consumed by the chat client.
+ */
+export function createAiChatConnection(
+  options: AiChatConnectionOptions = {}
+): ResumableConnectConnectionAdapter {
+  const observeFetch: typeof globalThis.fetch = async (input, init) => {
+    const response = await (options.fetchClient ?? fetch)(input, init);
+    options.onKind?.(readKind(response));
+
+    if (!response.ok) {
+      throw await toHttpError(response);
+    }
+
+    return response;
+  };
+
+  const connection = fetchServerSentEvents(aiChatUrl, () => ({
+    credentials: "same-origin",
+    headers: aiChatHeaders(),
+    fetchClient: observeFetch,
+  }));
+
+  return {
+    ...connection,
+    connect: async function* (messages, data, abortSignal, runContext) {
+      try {
+        yield* connection.connect(messages, data, abortSignal, runContext);
+      } catch (error) {
+        // The library wraps anything `fetchClient` throws in a StreamReadError
+        // whose `cause` is the original, so a rejected request is unwrapped to
+        // its AiChatError here rather than surfacing as an opaque read failure.
+        throw unwrapHttpError(error) ?? error;
+      }
+    },
+  };
+}
+
+/**
+ * Builds the per-request headers for the chat endpoint. The CSRF token is read
+ * at call time, and omitted when no cookie is present.
+ *
+ * @returns the headers to send.
+ */
+function aiChatHeaders(): Record<string, string> {
+  const token = getCSRFToken();
+
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { [CSRF.headerName]: token } : {}),
+    "x-editor-version": EDITOR_VERSION,
+  };
+}
+
+/**
+ * Reads a response's `X-AI-Chat-Kind` discriminator, mapping anything other
+ * than the two known values to `null`.
+ *
+ * @param response the response to inspect.
+ * @returns the discriminator, or `null` for an ordinary answer.
+ */
+function readKind(response: Response): AiChatKind {
+  const kind = response.headers.get(aiChatKindHeader);
+
+  return kind === "refusal" || kind === "busy" ? kind : null;
+}
+
+/**
+ * Extracts an {@link AiChatError} wrapped as the `cause` of a library read
+ * error, so a rejected request keeps its HTTP status and `http` kind.
+ *
+ * @param error the error propagated by the connection.
+ * @returns the wrapped chat error, or undefined when there is none.
+ */
+function unwrapHttpError(error: unknown): AiChatError | undefined {
+  if (!(error instanceof Error) || !("cause" in error)) {
+    return undefined;
+  }
+
+  const cause = (error as Error & { cause?: unknown }).cause;
+
+  return cause instanceof AiChatError ? cause : undefined;
 }
 
 /**
@@ -397,6 +514,7 @@ function errorKind(raw: string): "refusal" | "busy" | "stream" {
   return "stream";
 }
 
+// ponytail: retired in todo 10 when the panel moves to useChat
 /**
  * Opens a streaming chat request against `POST /api/ai.chat` and yields the
  * incremental assistant output as it arrives. The request carries the CSRF and
@@ -429,7 +547,7 @@ export async function* streamAiChat(
   let res: Response;
 
   try {
-    res = await fetch("/api/ai.chat", {
+    res = await fetch(aiChatUrl, {
       method: "POST",
       credentials: "same-origin",
       headers: {
