@@ -2,6 +2,12 @@
 import { readFileSync } from "node:fs";
 import { TeamPreference } from "@shared/types";
 import env from "@server/env";
+import { AIChatSession } from "@server/models";
+import AIChatMessage, {
+  AIChatMessageRole,
+  AIChatMessageStatus,
+} from "@server/models/AIChatMessage";
+import Redis from "@server/storage/redis";
 import {
   buildCollection,
   buildDocument,
@@ -9,6 +15,21 @@ import {
 } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
 import { OutOfScopeRefusal } from "./scope";
+
+vi.mock("./tanstack", () => ({
+  loadTanstack: () => import("@tanstack/ai"),
+}));
+
+vi.mock("./adapter", () => ({
+  createAiChatAdapter: () =>
+    import("@tanstack/ai-openai/compatible").then((mod) =>
+      mod.openaiCompatibleText("test-model", {
+        api: "chat-completions" as const,
+        baseURL: "http://localhost:20127/v1",
+        apiKey: "test-key",
+      })
+    ),
+}));
 
 const server = getTestServer();
 
@@ -212,8 +233,7 @@ describe("POST /api/ai.chat", () => {
       .mockResolvedValue(
         streamingResponse([
           'data: {"choices":[{"delta":{"content":"He"}}]}\n\n',
-          'data: {"choices":[{"delta":{"content":"llo"}}]}\n\n',
-          "data: [DONE]\n\n",
+          'data: {"choices":[{"delta":{"content":"llo"},"finish_reason":"stop"}]}\n\n',
         ])
       );
     vi.stubGlobal("fetch", fetchMock);
@@ -234,8 +254,10 @@ describe("POST /api/ai.chat", () => {
     expect(res.headers.get("content-encoding")).toBeNull();
 
     const text = await res.text();
-    expect(text).toContain('data: {"choices":[{"delta":{"content":"He"}}]}');
-    expect(text).toContain("data: [DONE]");
+    expect(text).toContain('"type":"RUN_STARTED"');
+    expect(text).toContain('"delta":"He"');
+    expect(text).toContain('"delta":"llo"');
+    expect(text).toContain('"type":"RUN_FINISHED"');
 
     // The upstream was called with the stream flag and our message payload.
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -269,13 +291,14 @@ describe("POST /api/ai.chat", () => {
       },
     });
 
-    // The upstream status is preserved; the body is the sanitized JSON error
-    // envelope produced by the API error handler (no provider detail leaked).
-    expect(res.status).toEqual(500);
-    const body = await res.json();
-    expect(body.ok).toBe(false);
-    expect(typeof body.error).toEqual("string");
-    expect(body.error).not.toContain("upstream boom");
+    // The adapter reports a rejected upstream as an in-band RUN_ERROR, so the
+    // response is a well-formed 200 stream rather than a 5xx. The provider's
+    // own text is replaced with a generic message and never reaches the client.
+    expect(res.status).toEqual(200);
+    const text = await res.text();
+    expect(text).toContain('"type":"RUN_ERROR"');
+    expect(text).toContain("The AI chat stream failed");
+    expect(text).not.toContain("upstream boom");
   });
 
   it("reports the provider as unavailable when it cannot be reached", async () => {
@@ -283,8 +306,9 @@ describe("POST /api/ai.chat", () => {
     await configureAiChat(user.team);
     await seedReadableDocument(user, "Details of the Zanzibar onboarding flow");
 
-    // A connection-level failure (provider down) rejects with no HTTP status, so
-    // the route must not let it fall through to the generic "Internal error".
+    // A connection-level failure (provider down) surfaces as a RUN_ERROR event
+    // inside the SSE stream rather than a 502 status: the adapter owns the
+    // upstream call and reports the failure in-band.
     vi.stubGlobal(
       "fetch",
       vi.fn().mockRejectedValue(new TypeError("fetch failed"))
@@ -298,11 +322,10 @@ describe("POST /api/ai.chat", () => {
       },
     });
 
-    expect(res.status).toEqual(502);
-    const body = await res.json();
-    expect(body.ok).toBe(false);
-    expect(body.error).toEqual("provider_unavailable");
-    expect(body.message).toContain("provider is unavailable");
+    expect(res.status).toEqual(200);
+    const text = await res.text();
+    expect(text).toContain('"type":"RUN_ERROR"');
+    expect(text).not.toContain('"type":"RUN_FINISHED"');
   });
 
   it("terminates the stream with an in-band error frame when the upstream fails mid-flight", async () => {
@@ -326,14 +349,9 @@ describe("POST /api/ai.chat", () => {
     expect(res.status).toEqual(200);
     expect(res.headers.get("content-type")).toContain("text/event-stream");
 
-    // Resolving at all proves the request did not hang; the frame carries a
-    // generic message rather than the provider's own error text.
     const text = await res.text();
-    expect(text).toContain("event: error");
-    expect(text).toContain('{"error":"The AI chat stream failed"}');
-    // A mid-stream failure must never be tagged as a refusal – the two
-    // producers share `event: error` but must stay distinguishable by payload.
-    expect(text).not.toContain('"kind":"refusal"');
+    expect(text).toContain('"type":"RUN_ERROR"');
+    expect(res.headers.get("x-ai-chat-kind")).toBeNull();
     expect(text).not.toContain("upstream socket reset");
   });
 
@@ -358,17 +376,24 @@ describe("POST /api/ai.chat", () => {
 
       expect(res.status).toEqual(200);
       expect(res.headers.get("content-type")).toContain("text/event-stream");
+      expect(res.headers.get("x-ai-chat-kind")).toEqual("refusal");
 
       const text = await res.text();
-      expect(text).toContain("event: error");
-      // The payload carries the discriminator the panel branches on to render
-      // the refusal as a transcript turn. Asserting the exact frame locks the
-      // wire shape – a bare `{"error":…}` would also satisfy `toContain` above.
-      expect(text).toContain(
-        'data: {"error":"' + OutOfScopeRefusal + '","kind":"refusal"}'
-      );
-      expect(text).toContain('"kind":"refusal"');
-      expect(text).not.toContain('"kind":"stream"');
+      // The refusal is a complete synthetic AG-UI run, not an error frame. The
+      // header is the only discriminator; the body carries the ordinary answer
+      // shape so the client's stream reader needs no special case.
+      const types = [...text.matchAll(/"type":"(\w+)"/g)].map((m) => m[1]);
+      expect(types).toEqual([
+        "RUN_STARTED",
+        "TEXT_MESSAGE_START",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_END",
+        "RUN_FINISHED",
+      ]);
+      expect(text).toContain('"delta":"' + OutOfScopeRefusal + '"');
+      // The header is the only out-of-band signal: a CUSTOM event would make the
+      // client depend on its library surfacing custom events, which it need not.
+      expect(text).not.toContain('"type":"CUSTOM"');
       // The whole point of the gate: the provider is never asked, so it cannot
       // leak a general-knowledge answer.
       expect(fetchMock).not.toHaveBeenCalled();
@@ -386,8 +411,7 @@ describe("POST /api/ai.chat", () => {
         .fn()
         .mockResolvedValue(
           streamingResponse([
-            'data: {"choices":[{"delta":{"content":"See onboarding"}}]}\n\n',
-            "data: [DONE]\n\n",
+            'data: {"choices":[{"delta":{"content":"See onboarding"},"finish_reason":"stop"}]}\n\n',
           ])
         );
       vi.stubGlobal("fetch", fetchMock);
@@ -406,11 +430,9 @@ describe("POST /api/ai.chat", () => {
       expect(res.status).toEqual(200);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const text = await res.text();
-      expect(text).toContain(
-        '{"choices":[{"delta":{"content":"See onboarding"}}]}'
-      );
-      expect(text).toContain("data: [DONE]");
-      expect(text).not.toContain("event: error");
+      expect(text).toContain('"delta":"See onboarding"');
+      expect(text).toContain('"type":"RUN_FINISHED"');
+      expect(text).not.toContain('"type":"RUN_ERROR"');
     });
 
     it("refuses a prompt matching nothing in the knowledge base", async () => {
@@ -431,6 +453,69 @@ describe("POST /api/ai.chat", () => {
       await expectRefused(user, "What is the capital of France?");
     });
 
+    it("persists the refusal as a completed assistant row before the frames are written", async () => {
+      const user = await buildUser();
+      await configureAiChat(user.team);
+      await seedReadableDocument(user, "Unrelated onboarding steps");
+      const session = await AIChatSession.create({
+        teamId: user.teamId,
+        userId: user.id,
+      });
+
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const res = await server.post("/api/ai.chat", user, {
+        body: {
+          sessionId: session.id,
+          messages: [
+            {
+              role: "user",
+              content: "How do I rotate the Kubernetes signing keys?",
+            },
+          ],
+        },
+      });
+
+      expect(res.status).toEqual(200);
+      expect(res.headers.get("content-type")).toContain("text/event-stream");
+      expect(res.headers.get("x-ai-chat-kind")).toEqual("refusal");
+
+      const text = await res.text();
+      const types = [...text.matchAll(/"type":"(\w+)"/g)].map((m) => m[1]);
+      expect(types).toEqual([
+        "RUN_STARTED",
+        "TEXT_MESSAGE_START",
+        "TEXT_MESSAGE_CONTENT",
+        "TEXT_MESSAGE_END",
+        "RUN_FINISHED",
+      ]);
+      expect(text).toContain(`"delta":"${OutOfScopeRefusal}"`);
+      expect(text).not.toContain('"type":"CUSTOM"');
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      // `appendTurn` is awaited before the synthetic `Readable` is built, so a
+      // row visible once the frames exist necessarily precedes them.
+      const rows = await AIChatMessage.findAll({
+        where: { sessionId: session.id },
+        order: [["seq", "ASC"]],
+      });
+      expect(rows.map((row) => row.role)).toEqual([
+        AIChatMessageRole.User,
+        AIChatMessageRole.Assistant,
+      ]);
+      expect(rows[1].content).toEqual(OutOfScopeRefusal);
+      expect(rows[1].status).toEqual(AIChatMessageStatus.Completed);
+
+      // A refusal returns before the stream exists, so it releases the lock
+      // itself rather than waiting for the TTL.
+      expect(
+        await Redis.defaultClient.get(
+          `aiChat:inflight:${user.id}:${session.id}`
+        )
+      ).toEqual(null);
+    });
+
     it("passes the same probe through when grounding is disabled", async () => {
       const user = await buildUser();
       await configureAiChat(user.team);
@@ -443,8 +528,7 @@ describe("POST /api/ai.chat", () => {
         .fn()
         .mockResolvedValue(
           streamingResponse([
-            'data: {"choices":[{"delta":{"content":"Paris"}}]}\n\n',
-            "data: [DONE]\n\n",
+            'data: {"choices":[{"delta":{"content":"Paris"},"finish_reason":"stop"}]}\n\n',
           ])
         );
       vi.stubGlobal("fetch", fetchMock);
@@ -460,8 +544,9 @@ describe("POST /api/ai.chat", () => {
       expect(res.status).toEqual(200);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const text = await res.text();
-      expect(text).toContain('{"choices":[{"delta":{"content":"Paris"}}]}');
-      expect(text).not.toContain('"kind":"refusal"');
+      expect(text).toContain('"delta":"Paris"');
+      expect(res.headers.get("x-ai-chat-kind")).toBeNull();
+      expect(text).not.toContain(OutOfScopeRefusal);
     });
 
     it("refuses a prompt whose only match is a document the user cannot read", async () => {
@@ -501,8 +586,7 @@ describe("POST /api/ai.chat", () => {
         .fn()
         .mockResolvedValue(
           streamingResponse([
-            'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
-            "data: [DONE]\n\n",
+            'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":"stop"}]}\n\n',
           ])
         );
       vi.stubGlobal("fetch", fetchMock);
@@ -529,8 +613,7 @@ describe("POST /api/ai.chat", () => {
         .fn()
         .mockResolvedValue(
           streamingResponse([
-            'data: {"choices":[{"delta":{"content":"Halo"}}]}\n\n',
-            "data: [DONE]\n\n",
+            'data: {"choices":[{"delta":{"content":"Halo"},"finish_reason":"stop"}]}\n\n',
           ])
         );
       vi.stubGlobal("fetch", fetchMock);
@@ -589,7 +672,11 @@ describe("POST /api/ai.chat", () => {
 
       const fetchMock = vi
         .fn()
-        .mockResolvedValue(streamingResponse(["data: [DONE]\n\n"]));
+        .mockResolvedValue(
+          streamingResponse([
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          ])
+        );
       vi.stubGlobal("fetch", fetchMock);
 
       const res = await server.post("/api/ai.chat", user, {
@@ -606,7 +693,8 @@ describe("POST /api/ai.chat", () => {
 
       expect(res.status).toEqual(200);
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(await res.text()).not.toContain("event: error");
+      expect(res.headers.get("x-ai-chat-kind")).toBeNull();
+      expect(await res.text()).not.toContain(OutOfScopeRefusal);
     });
 
     it("does not ground a prompt on an assistant message", async () => {

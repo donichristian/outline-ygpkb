@@ -383,6 +383,20 @@ export class Environment {
   public AI_CHAT_MODEL = this.toOptionalString(environment.AI_CHAT_MODEL);
 
   /**
+   * The reasoning effort to request from the AI chat provider, sent as the
+   * Chat Completions `reasoning_effort` field. Optional and unset by default:
+   * an operator opts in, so a gateway whose model does not take reasoning is
+   * never sent an unsupported parameter. This is an operator decision only –
+   * the request body is never read for a reasoning level.
+   */
+  @IsOptional()
+  @CannotUseWithout("AI_CHAT_BASE_URL")
+  @IsIn(["minimal", "low", "medium", "high"])
+  public AI_CHAT_REASONING = this.toOptionalString(
+    environment.AI_CHAT_REASONING
+  );
+
+  /**
    * Whether the AI chat route runs the local grounding probe – the full-text
    * search over the requesting user's own Outline documents that refuses a
    * prompt before the provider is contacted. Defaults to true. Set to false when

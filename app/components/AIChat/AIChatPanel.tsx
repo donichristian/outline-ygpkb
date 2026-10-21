@@ -1,3 +1,5 @@
+import { ChatClient } from "@tanstack/ai-client";
+import type { UIMessage } from "@tanstack/ai-client";
 import { observer } from "mobx-react";
 import { GrowIcon, InfoIcon, ShrinkIcon } from "outline-icons";
 import * as React from "react";
@@ -14,19 +16,64 @@ import Tooltip from "~/components/Tooltip";
 import useStores from "~/hooks/useStores";
 import SidebarLayout from "~/scenes/Document/components/SidebarLayout";
 import {
-  AiChatError,
   clearDraft,
+  createAiChatConnection,
   flushDrafts,
   readDraft,
-  streamAiChat,
+  toAiChatError,
   writeDraft,
 } from "~/utils/aiChat";
-import type { AiChatMessage, AiChatTurnStatus } from "~/utils/aiChat";
+import type {
+  AiChatError,
+  AiChatKind,
+  AiChatMessage,
+  AiChatTurnStatus,
+  AiChatWhenBusy,
+} from "~/utils/aiChat";
 import AIChatHistory from "./AIChatHistory";
+
+/*
+ * State ownership in this panel.
+ *
+ * React-local (dies with the panel):
+ * - `pending` – turns still streaming, before the store re-read
+ * - `isStreaming`, `error`, `reasoning` – the in-flight turn only
+ * - `input` – the composer's current text
+ * - `queued` – messages waiting for the in-flight turn to settle; ephemeral,
+ *   never persisted and discarded when the panel closes
+ *
+ * Store-backed (`aiChatSessions` / `aiChatMessages`, survives close/reopen):
+ * - committed transcript rows, session list and selected session
+ *
+ * `ChatClient` is a per-turn frame source only; it never owns committed
+ * history. Drafts live in `localStorage`, keyed per session
+ * (`aiChat.draft.<id>`) plus a pending key (`aiChat.draft.pending`) for text
+ * typed before a session exists — see `app/utils/aiChat.ts`.
+ */
 
 type Props = {
   /** Called when the user closes the panel. */
   onClose: () => void;
+  /**
+   * What a send does while a turn is already streaming: `queue` (default) keeps
+   * it until the turn settles, `drop` ignores it, and `interrupt` abandons the
+   * turn to send it immediately. The queue lives here rather than on the
+   * `ChatClient` because the panel builds a fresh client per turn, so the
+   * library's own queue could never survive into the next one.
+   */
+  whenBusy?: AiChatWhenBusy;
+};
+
+/** One tool call, in the shape the transcript renders it. */
+type ToolCallView = {
+  /** The tool call id, stable across streamed updates. */
+  id: string;
+  /** The name of the tool the model invoked. */
+  name: string;
+  /** The parsed call input, once the model finished streaming it. */
+  input?: unknown;
+  /** The tool's result, absent while the call is still running. */
+  output?: unknown;
 };
 
 /** A transcript entry: the turn sent to the provider, or one read back. */
@@ -37,9 +84,119 @@ type TranscriptTurn = {
   role: AiChatMessage["role"];
   /** The turn body. */
   content: string;
+  /** The tool calls made while producing a live turn. */
+  toolCalls?: ToolCallView[];
   /** How the turn ended, for a turn read back from the server. */
   status?: AiChatTurnStatus;
 };
+
+/** A message waiting for the in-flight turn to settle. */
+type QueuedTurn = {
+  /** Identifies the item, so it can be cancelled on its own. */
+  id: number;
+  /** The message to send once the turn settles. */
+  content: string;
+};
+
+/** How a turn ended, which decides whether the queue drains or is discarded. */
+type TurnOutcome = "settled" | "superseded" | "failed";
+
+/**
+ * The text, reasoning and tool calls carried by the client's trailing assistant
+ * message. Unknown part types contribute nothing, so a part this panel does not
+ * render yet cannot break the turn.
+ *
+ * @param messages the client's current messages.
+ * @returns the joined answer text, joined reasoning text and the tool calls.
+ */
+function liveAssistant(messages: UIMessage[]): {
+  text: string;
+  reasoning: string;
+  toolCalls: ToolCallView[];
+} {
+  let assistant: UIMessage | undefined;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index].role === "assistant") {
+      assistant = messages[index];
+      break;
+    }
+  }
+
+  const text: string[] = [];
+  const reasoning: string[] = [];
+  const toolCalls: ToolCallView[] = [];
+
+  for (const part of assistant?.parts ?? []) {
+    switch (part.type) {
+      case "text":
+        text.push(part.content);
+        break;
+      case "thinking":
+        reasoning.push(part.content);
+        break;
+      case "tool-call":
+        toolCalls.push({
+          id: part.id,
+          name: part.name,
+          input: part.input,
+          output: part.output,
+        });
+        break;
+      default:
+        break;
+    }
+  }
+
+  return {
+    text: text.join(""),
+    reasoning: reasoning.join(""),
+    toolCalls,
+  };
+}
+
+/**
+ * Merges the turn still held by the client over the committed rows. The store
+ * stays the source of truth: a local turn is dropped the moment the equivalent
+ * stored row is read back, so the same question or answer is never rendered
+ * twice around the settle boundary.
+ *
+ * @param stored the committed rows, oldest first.
+ * @param pending the local turn, when one is in flight.
+ * @returns the transcript to render.
+ */
+function mergeTurns(
+  stored: TranscriptTurn[],
+  pending: TranscriptTurn[]
+): TranscriptTurn[] {
+  let local = pending;
+  const lastStored = stored[stored.length - 1];
+  const firstLocal = local[0];
+
+  if (
+    lastStored &&
+    firstLocal &&
+    lastStored.role === "user" &&
+    firstLocal.role === "user" &&
+    lastStored.content === firstLocal.content
+  ) {
+    local = local.slice(1);
+  }
+
+  const storedAnswer = stored[stored.length - 1];
+  const localAnswer = local[local.length - 1];
+
+  if (
+    storedAnswer &&
+    localAnswer &&
+    storedAnswer.role === "assistant" &&
+    localAnswer.role === "assistant" &&
+    storedAnswer.content === localAnswer.content
+  ) {
+    local = local.slice(0, -1);
+  }
+
+  return [...stored, ...local];
+}
 
 /**
  * Renders the user-facing message for a failed chat request. The HTTP status
@@ -99,7 +256,10 @@ function errorText(error: AiChatError, t: (key: string) => string): string {
  * Closing the panel (via `onClose`) clears the transcript and aborts any
  * in-flight stream; the same cleanup runs on unmount.
  */
-const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
+const AIChatPanel = observer(function AIChatPanel({
+  onClose,
+  whenBusy = "queue",
+}: Props) {
   const { t } = useTranslation();
   const { aiChatSessions, aiChatMessages } = useStores();
   const sessionId = aiChatSessions.selectedSessionId;
@@ -113,25 +273,75 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
   // it is never persisted (the server accumulates `content` alone), so a
   // reopened conversation shows the answer without the thinking behind it.
   const [reasoning, setReasoning] = React.useState("");
+  // Messages submitted while a turn streams, held in arrival order until each
+  // one is actually sent. The chat client's own queue cannot be used: a client
+  // is built per turn, so its queue dies with the turn it waited for. This list
+  // is ephemeral — nothing queued is ever written to the transcript or a
+  // stored row, and `stopTurn` discards it.
+  const [queued, setQueued] = React.useState<QueuedTurn[]>([]);
   const [isFullscreen, setIsFullscreen] = React.useState(false);
-  const abortRef = React.useRef<AbortController | null>(null);
+  // The client for the turn currently in flight. It is recreated per turn, so
+  // it never owns the committed transcript – the store does.
+  const clientRef = React.useRef<ChatClient | null>(null);
+  // The queue as the async drain reads it. The state above is only for
+  // rendering; this ref is authoritative after every `await`.
+  const queueRef = React.useRef<QueuedTurn[]>([]);
+  // The last id handed to a queued item, so cancellations stay unique across
+  // drains.
+  const queueIdRef = React.useRef(0);
+  // Identifies the current turn. Bumping it orphans every callback and the
+  // `handleSubmit` continuation belonging to an aborted or superseded turn.
+  const turnRef = React.useRef(0);
+  const stopRequestedRef = React.useRef(false);
   const transcriptRef = React.useRef<HTMLDivElement>(null);
   const formRef = React.useRef<HTMLFormElement>(null);
 
-  const abort = React.useCallback(() => {
-    abortRef.current?.abort();
-    abortRef.current = null;
+  /**
+   * Replaces the queue in both places it lives: the ref the drain loop reads
+   * and the state the queue region renders.
+   *
+   * @param next the new queue, oldest first.
+   */
+  const replaceQueue = React.useCallback((next: QueuedTurn[]) => {
+    queueRef.current = next;
+    setQueued(next);
   }, []);
+
+  /** Discards every waiting message; nothing queued is ever sent. */
+  const flushQueue = React.useCallback(() => replaceQueue([]), [replaceQueue]);
+
+  /**
+   * Abandons the in-flight turn: aborts the client and discards both the
+   * streaming frame source and its React callbacks. A deliberate Stop keeps the
+   * partial turn visible; callers that switch conversations also clear it. The
+   * waiting queue is discarded with the turn, so an abandoned turn can never
+   * fire a backlog at the server.
+   */
+  const stopTurn = React.useCallback(() => {
+    turnRef.current += 1;
+    stopRequestedRef.current = true;
+
+    const client = clientRef.current;
+    clientRef.current = null;
+    client?.stop();
+    client?.dispose();
+
+    flushQueue();
+    setIsStreaming(false);
+  }, [flushQueue]);
 
   // Abort any in-flight stream when the panel unmounts, and commit whatever
   // the composer has typed but not yet written. Without the flush, a draft
   // typed in the last moments before closing is lost to the debounce.
   React.useEffect(
     () => () => {
-      abort();
+      turnRef.current += 1;
+      const client = clientRef.current;
+      clientRef.current = null;
+      client?.dispose();
       flushDrafts();
     },
-    [abort]
+    []
   );
 
   // Load the session list once so the history dropdown has something to show
@@ -184,25 +394,23 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
         }))
     : [];
 
-  const turns: TranscriptTurn[] = [...storedTurns, ...pending];
+  const turns: TranscriptTurn[] = mergeTurns(storedTurns, pending);
 
   const handleNewChat = React.useCallback(() => {
-    abort();
-    setIsStreaming(false);
+    stopTurn();
     setError(null);
     aiChatSessions.setSelectedSessionId(null);
     setPending([]);
-  }, [abort, aiChatSessions]);
+  }, [stopTurn, aiChatSessions]);
 
   const handleSelectSession = React.useCallback(
     (id: string) => {
-      abort();
-      setIsStreaming(false);
+      stopTurn();
       setError(null);
       aiChatSessions.setSelectedSessionId(id);
       setPending([]);
     },
-    [abort, aiChatSessions]
+    [stopTurn, aiChatSessions]
   );
 
   // Keep the transcript pinned to the latest message as it grows. Keyed on the
@@ -217,10 +425,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
     }
   }, [turns.length, lastTurnText]);
 
-  const handleStop = React.useCallback(() => {
-    abort();
-    setIsStreaming(false);
-  }, [abort]);
+  const handleStop = stopTurn;
 
   const handleToggleFullscreen = React.useCallback(() => {
     setIsFullscreen((current) => !current);
@@ -240,112 +445,257 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
     return session;
   }, [aiChatSessions]);
 
-  // A plain function, not `useCallback`: it reads `turns`, which is rebuilt
-  // every render, so it could never be memoized on stable inputs anyway, and no
-  // memoized consumer depends on its identity.
-  const handleSubmit = async (ev: React.FormEvent<HTMLFormElement>) => {
-    ev.preventDefault();
-    const content = input.trim();
-    if (!content || isStreaming) {
-      return;
-    }
+  // Plain functions, not `useCallback`: they read `turns`, which is rebuilt
+  // every render, so they could never be memoized on stable inputs anyway, and
+  // no memoized consumer depends on their identity.
 
-    // The outgoing turn is appended here, not just into `pending`, because
-    // the wire body is the whole conversation: on the first message of a new
-    // one `turns` is empty and `sessionId` is null, so a history built only
-    // from the transcript puts `{ messages: [] }` on the wire and the server
-    // rejects it. Do not "simplify" this away — the question being asked is
-    // part of the request, never a follow-up to it.
-    const history: AiChatMessage[] = [
-      ...turns.map(({ role, content: body }) => ({ role, content: body })),
-      { role: "user", content },
-    ];
-
-    setPending((current) => [
-      ...current,
+  /**
+   * Sends one message and reports how its turn ended. `settled` means the
+   * server committed the turn and the store re-read ran; `superseded` means a
+   * Stop or an interrupt abandoned it; `failed` means it ended in the error
+   * path, which the queue treats as a stop.
+   *
+   * @param content the message to send.
+   * @param restoreOnBusy whether a busy refusal should put the text back in the
+   *   composer. True only for the turn the user submitted: a queued item that
+   *   reaches this later already owns its text, and restoring it would put the
+   *   same message both in the transcript flow and back in the composer.
+   * @returns the outcome, deciding whether the queue drains or is discarded.
+   */
+  const sendTurn = async (
+    content: string,
+    restoreOnBusy = false
+  ): Promise<TurnOutcome> => {
+    setPending([
       { role: "user", content },
       { role: "assistant", content: "" },
     ]);
-    setInput("");
-    // The question is now a transcript turn, so it must not also come back as
-    // a draft for this conversation.
-    clearDraft(sessionId ?? undefined);
     setError(null);
     setReasoning("");
     setIsStreaming(true);
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+    const turn = ++turnRef.current;
+    stopRequestedRef.current = false;
+    let client: ChatClient | undefined;
+    let observedKind: AiChatKind = null;
 
     try {
       // A conversation is only stored once it has an id: without one the server
       // treats the turn as stateless and persists nothing, which is how a
       // transcript was lost on close. Created on the first send rather than on
       // "New chat" so a fresh conversation nobody sends in leaves no empty row.
-      const targetSessionId = sessionId ?? (await createSession()).id;
+      // The selection is read from the store rather than the render closure: a
+      // queued turn drains after the render that queued it, and createSession
+      // has selected the new conversation by then.
+      const activeSessionId = aiChatSessions.selectedSessionId;
+      const targetSessionId = activeSessionId ?? (await createSession()).id;
 
-      for await (const event of streamAiChat(history, {
-        signal: controller.signal,
-        sessionId: targetSessionId,
-      })) {
-        // Reasoning is shown as a disclosure, never written into the answer.
-        if (event.type === "reasoning") {
-          setReasoning((current) => current + event.text);
-          continue;
+      if (turnRef.current !== turn || stopRequestedRef.current) {
+        return "superseded";
+      }
+
+      // A per-turn headless `ChatClient` rather than `useChat`: the persisted
+      // session id only exists after this turn's session is created, and the
+      // client's `threadId` is fixed at construction (`updateOptions` cannot
+      // change it), so `useChat`'s option-bag recreations would not address the
+      // very first send. The client is a frame source only — the committed
+      // history stays in the store and is merged in for rendering.
+      const connection = createAiChatConnection({
+        onKind: (kind) => {
+          observedKind = kind;
+        },
+      });
+      let failure: unknown;
+
+      const chat = new ChatClient({
+        connection: {
+          ...connection,
+          connect: async function* (messages, data, signal, runContext) {
+            try {
+              yield* connection.connect(messages, data, signal, runContext);
+            } catch (err) {
+              failure = err;
+              throw err;
+            }
+          },
+        },
+        threadId: targetSessionId,
+        onMessagesChange: (messages) => {
+          if (clientRef.current !== chat) {
+            return;
+          }
+
+          const live = liveAssistant(messages);
+          setPending((current) => {
+            if (current.length === 0) {
+              return current;
+            }
+            const updated = current.slice();
+            updated[updated.length - 1] = {
+              role: "assistant",
+              content: live.text,
+              toolCalls: live.toolCalls,
+            };
+            return updated;
+          });
+          setReasoning(live.reasoning);
+        },
+        onLoadingChange: (loading) => {
+          if (clientRef.current !== chat) {
+            return;
+          }
+          setIsStreaming(loading);
+        },
+        onError: (err) => {
+          failure = failure ?? err;
+        },
+      });
+
+      client = chat;
+      clientRef.current = chat;
+      await chat.sendMessage(content);
+
+      if (turnRef.current !== turn) {
+        return "superseded";
+      }
+
+      const error = failure ?? chat.getError();
+
+      if (error) {
+        setError(toAiChatError(error, { kind: observedKind }));
+        return "failed";
+      }
+
+      // Busy is a complete synthetic run, so no error is thrown for it; the
+      // header is the only signal that this turn should be retried later.
+      if (observedKind === "busy") {
+        if (restoreOnBusy) {
+          // Nothing was sent: the server refused before contacting the
+          // provider, so the text is still the user's to retry. Putting it back
+          // in the composer (and its draft) makes the retry-later notice
+          // actionable instead of leaving an empty box. It is not queued: the
+          // queue drains after a settled turn, and a refusal never settles.
+          setInput(content);
+          writeDraft(content, targetSessionId);
+          flushDrafts();
         }
 
-        setPending((current) => {
-          const updated = current.slice();
-          const last = updated[updated.length - 1];
-          updated[updated.length - 1] = {
-            role: "assistant",
-            content: last.content + event.text,
-          };
-          return updated;
-        });
+        // Aborts and every other failure keep the text out of the composer:
+        // those turns really were sent, so the server may already have stored
+        // them, and echoing the text back would invite a duplicate turn.
+        setError(toAiChatError(undefined, { kind: observedKind }));
+        return "failed";
       }
+
+      // The stream only closes after the server has committed the turn, so a
+      // successful re-read includes the assistant row and the local turn is
+      // dropped in the same pass. A failed re-read committed nothing to the
+      // store, so the local turn is kept: dropping it there loses the answer
+      // the user just watched stream in.
+      await aiChatMessages.list({ sessionId: targetSessionId }).then(
+        () => {
+          if (turnRef.current === turn) {
+            setPending([]);
+          }
+        },
+        () => undefined
+      );
+
+      return "settled";
     } catch (err) {
-      if (err instanceof AiChatError && err.kind === "refusal") {
-        // A grounding refusal is the boundary answering, not a failure: write
-        // it into the trailing assistant turn so it reads as an ordinary
-        // transcript entry rather than a red error banner. The panel knows it
-        // is a refusal here at throw time, so no extra state is tracked.
-        //
-        // Must stay `completed`, not `error`: `turnMarker` renders `error`
-        // as a danger "Failed" badge, which is what this branch avoids. A
-        // session-backed refusal is persisted as Completed server-side, so
-        // this also keeps the client from disagreeing with the stored row.
-        setPending((current) => {
-          const updated = current.slice();
-          updated[updated.length - 1] = {
-            role: "assistant",
-            content: err.message,
-            status: "completed",
-          };
-          return updated;
-        });
-      } else if (
-        controller.signal.aborted ||
-        (err instanceof AiChatError && err.kind === "aborted")
-      ) {
-        // A user-initiated stop is not an error. Branching on the error kind
-        // as well as the signal matters because `errorText` would otherwise
-        // render the transport's raw cancel message instead of its generic
-        // copy once the abort escapes the signal check.
-      } else if (err instanceof AiChatError) {
-        setError(err);
-      } else {
-        setError(
-          new AiChatError("The AI chat request failed, try again?", "network")
-        );
+      if (turnRef.current === turn) {
+        setError(toAiChatError(err, { kind: observedKind }));
       }
+
+      return turnRef.current === turn ? "failed" : "superseded";
     } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
+      if (client && clientRef.current === client) {
+        clientRef.current = null;
+        client.dispose();
       }
-      setIsStreaming(false);
     }
   };
+
+  /**
+   * Sends `first`, then every queued message oldest-first, one turn at a time.
+   * The queue only drains after a settled turn; a failed or superseded turn
+   * stops the drain so a broken request can never fire a backlog.
+   *
+   * @param first the message the user just submitted.
+   */
+  const runTurns = async (first: string) => {
+    let next: string | undefined = first;
+    let isSubmittedTurn = true;
+
+    while (next !== undefined) {
+      const outcome = await sendTurn(next, isSubmittedTurn);
+      isSubmittedTurn = false;
+      const following = queueRef.current[0];
+
+      if (outcome === "failed") {
+        flushQueue();
+        return;
+      }
+
+      // A superseded turn already flushed the queue when it was abandoned, so
+      // there is nothing left to drain.
+      if (outcome === "superseded" || !following) {
+        return;
+      }
+
+      replaceQueue(queueRef.current.slice(1));
+      next = following.content;
+    }
+  };
+
+  const handleSubmit = async (ev: React.FormEvent<HTMLFormElement>) => {
+    ev.preventDefault();
+    const content = input.trim();
+    if (!content) {
+      return;
+    }
+
+    if (isStreaming) {
+      if (whenBusy === "drop") {
+        return;
+      }
+
+      if (whenBusy === "queue") {
+        // Queuing is ephemeral: the message is kept in panel state, the
+        // composer is cleared, and nothing touches the transcript or a stored
+        // row until the item is actually sent.
+        replaceQueue([
+          ...queueRef.current,
+          { id: ++queueIdRef.current, content },
+        ]);
+        setInput("");
+        clearDraft(sessionId ?? undefined);
+        return;
+      }
+
+      // interrupt: abandon the in-flight turn and anything waiting behind it,
+      // so the new message is sent immediately.
+      stopTurn();
+    }
+
+    setInput("");
+    // The message is leaving the composer as a turn, so it must not also come
+    // back as a draft for this conversation.
+    clearDraft(sessionId ?? undefined);
+    await runTurns(content);
+  };
+
+  /**
+   * Removes one waiting message from the queue.
+   *
+   * @param id the queued item to remove.
+   */
+  const handleCancelQueued = React.useCallback(
+    (id: number) => {
+      replaceQueue(queueRef.current.filter((item) => item.id !== id));
+    },
+    [replaceQueue]
+  );
 
   const handleChange = React.useCallback(
     (ev: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -402,7 +752,7 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
       }
     >
       <Container column>
-        <Transcript ref={transcriptRef}>
+        <Transcript ref={transcriptRef} data-testid="ai-chat-transcript">
           {turns.length === 0 && (
             <EmptyText type="secondary" size="small">
               {t("Ask anything about your workspace")}
@@ -420,12 +770,13 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
             if (
               turn.role === "assistant" &&
               !turn.content &&
+              !turn.toolCalls?.length &&
               !isStreamingAssistant
             ) {
               return null;
             }
 
-            const marker = turnMarker(turn);
+            const marker = turnMarker(turn, t);
 
             return (
               <Message
@@ -441,12 +792,15 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
                     aria-label={t("Loading")}
                   />
                 )}
-                {isStreamingAssistant && reasoning && (
+                {isStreamingAssistant && reasoning.trim() && (
                   <ReasoningDisclosure data-testid="ai-chat-reasoning">
                     <summary>{`${t("Loading")}…`}</summary>
                     <ReasoningBody>{reasoning}</ReasoningBody>
                   </ReasoningDisclosure>
                 )}
+                {turn.toolCalls?.map((toolCall) => (
+                  <ToolCallCard key={toolCall.id} toolCall={toolCall} />
+                ))}
                 {turn.role === "assistant" ? (
                   // Assistant output is an aria-live region so a refusal – which
                   // renders inline without the error banner's visual affordance –
@@ -460,13 +814,40 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
                     data-testid={`message-status-${turn.status}`}
                     $tone={marker.tone}
                   >
-                    {t(marker.labelKey)}
+                    {marker.label}
                   </TurnMarker>
                 )}
               </Message>
             );
           })}
         </Transcript>
+
+        {queued.length > 0 && (
+          <QueuedList
+            role="list"
+            aria-label={t("Queued messages")}
+            data-testid="ai-chat-queue"
+          >
+            {queued.map((item) => (
+              <QueueItem
+                key={item.id}
+                role="listitem"
+                data-testid="ai-chat-queue-item"
+              >
+                <QueuedText dir="auto">{item.content}</QueuedText>
+                <Button
+                  type="button"
+                  neutral
+                  aria-label={`${t("Cancel queued message")}: ${item.content}`}
+                  onClick={() => handleCancelQueued(item.id)}
+                  data-testid="ai-chat-queue-cancel"
+                >
+                  {t("Cancel")}
+                </Button>
+              </QueueItem>
+            ))}
+          </QueuedList>
+        )}
 
         <TurnDisclosure type="secondary" size="xsmall">
           <InfoIcon size={14} />
@@ -530,29 +911,98 @@ const AIChatPanel = observer(function AIChatPanel({ onClose }: Props) {
  * non-`completed` status is what keeps a short answer from being read as a
  * whole one.
  *
- * The label is a translation key rather than text, so the copy is resolved by
- * the caller's `t` at render time.
+ * The copy is resolved here with the caller's `t` so every label stays a literal
+ * argument and the extractor can find it.
  *
  * @param turn the transcript entry to describe.
+ * @param t the translation function.
  * @returns the marker to render, or undefined when the turn needs none.
  */
 function turnMarker(
-  turn: TranscriptTurn
-): { labelKey: string; tone: "danger" | "warning" } | undefined {
+  turn: TranscriptTurn,
+  t: (key: string) => string
+): { label: string; tone: "danger" | "warning" } | undefined {
   if (turn.role !== "assistant") {
     return undefined;
   }
 
   switch (turn.status) {
     case "truncated":
-      return { labelKey: "Response cut short", tone: "warning" };
+      return { label: t("Response cut short"), tone: "warning" };
     case "aborted":
-      return { labelKey: "Stopped", tone: "warning" };
+      return { label: t("Stopped"), tone: "warning" };
     case "error":
-      return { labelKey: "Failed", tone: "danger" };
+      return { label: t("Failed"), tone: "danger" };
     default:
       return undefined;
   }
+}
+
+/** How much of a tool call's input or output is shown, in characters. */
+const ToolValueLimit = 400;
+
+/**
+ * Formats a tool call's input or output for the transcript, truncating long
+ * payloads so a large search result cannot swamp the conversation.
+ *
+ * @param value the call input or result.
+ * @returns the text to display.
+ */
+function toolValue(value: unknown): string {
+  const text =
+    typeof value === "string"
+      ? value
+      : (JSON.stringify(value, null, 2) ?? String(value));
+
+  return text.length > ToolValueLimit
+    ? `${text.slice(0, ToolValueLimit)}…`
+    : text;
+}
+
+/**
+ * Renders one tool call inside an assistant turn: the tool's name, its input
+ * and its output. A call without an output yet is still running, so it shows a
+ * pending state instead of an empty result. The card is display-only – approval
+ * affordances belong to the deferred interrupts slice.
+ *
+ * @param props the tool call to render.
+ * @returns the tool call card.
+ */
+function ToolCallCard({ toolCall }: { toolCall: ToolCallView }) {
+  const { t } = useTranslation();
+  const isComplete = toolCall.output !== undefined;
+
+  return (
+    <ToolCall data-testid="ai-chat-tool-call">
+      <ToolCallHeader>
+        <ToolCallName data-testid="ai-chat-tool-name">
+          {toolCall.name}
+        </ToolCallName>
+        <ToolCallState>{isComplete ? t("Done") : t("Running")}</ToolCallState>
+      </ToolCallHeader>
+      {toolCall.input !== undefined && (
+        <ToolCallField>
+          <ToolCallLabel>{t("Input")}</ToolCallLabel>
+          <ToolCallValue data-testid="ai-chat-tool-input">
+            {toolValue(toolCall.input)}
+          </ToolCallValue>
+        </ToolCallField>
+      )}
+      {isComplete ? (
+        <ToolCallField>
+          <ToolCallLabel>{t("Output")}</ToolCallLabel>
+          <ToolCallValue data-testid="ai-chat-tool-output">
+            {toolValue(toolCall.output)}
+          </ToolCallValue>
+        </ToolCallField>
+      ) : (
+        <ToolCallPending data-testid="ai-chat-tool-pending" role="status">
+          <Spinner aria-hidden />
+          {t("Waiting for result…")}
+        </ToolCallPending>
+      )}
+    </ToolCall>
+  );
 }
 
 const linkStyles = css`
@@ -661,6 +1111,82 @@ const ReasoningBody = styled.div`
   background: ${s("sidebarBackground")};
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+`;
+
+const QueuedList = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-top: 1px solid ${s("divider")};
+`;
+
+const QueueItem = styled.div`
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+`;
+
+const QueuedText = styled.span`
+  overflow: hidden;
+  font-size: 12px;
+  color: ${s("textTertiary")};
+  text-overflow: ellipsis;
+  white-space: nowrap;
+`;
+
+const ToolCall = styled.div`
+  margin: 6px 0;
+  padding: 6px 8px;
+  border: 1px solid ${s("divider")};
+  border-radius: 6px;
+  background: ${s("sidebarBackground")};
+  font-size: 12px;
+  line-height: 1.4;
+`;
+
+const ToolCallHeader = styled.div`
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+`;
+
+const ToolCallName = styled.code`
+  font-family: ${(props) => props.theme.fontFamilyMono};
+  font-weight: 500;
+  overflow-wrap: anywhere;
+`;
+
+const ToolCallState = styled.span`
+  flex-shrink: 0;
+  color: ${s("textTertiary")};
+`;
+
+const ToolCallField = styled.div`
+  margin-top: 4px;
+`;
+
+const ToolCallLabel = styled.span`
+  display: block;
+  color: ${s("textTertiary")};
+  font-weight: 500;
+`;
+
+const ToolCallValue = styled.pre`
+  margin: 0;
+  font-family: ${(props) => props.theme.fontFamilyMono};
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+`;
+
+const ToolCallPending = styled.span`
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  color: ${s("textTertiary")};
 `;
 
 const Container = styled(Flex)`

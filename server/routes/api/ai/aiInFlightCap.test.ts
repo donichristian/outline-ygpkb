@@ -1,11 +1,43 @@
 // @vitest-isolate true
+import { t } from "i18next";
 import { TeamPreference } from "@shared/types";
 import env from "@server/env";
 import { AIChatSession } from "@server/models";
-import AIChatMessage from "@server/models/AIChatMessage";
+import AIChatMessage, {
+  AIChatMessageRole,
+  AIChatMessageStatus,
+} from "@server/models/AIChatMessage";
 import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
 import Redis from "@server/storage/redis";
+
+/**
+ * Controls the engine loader so a test can force the pre-stream
+ * `Promise.all([loadTanstack(), loadServerTools()])` to reject after the lock
+ * has been taken.
+ */
+const engineLoad = vi.hoisted(() => ({ rejectOnce: false }));
+
+vi.mock("./tanstack", () => ({
+  loadTanstack: () => {
+    if (engineLoad.rejectOnce) {
+      engineLoad.rejectOnce = false;
+      return Promise.reject(new Error("tanstack module failed to load"));
+    }
+    return import("@tanstack/ai");
+  },
+}));
+
+vi.mock("./adapter", () => ({
+  createAiChatAdapter: () =>
+    import("@tanstack/ai-openai/compatible").then((mod) =>
+      mod.openaiCompatibleText("test-model", {
+        api: "chat-completions" as const,
+        baseURL: "http://localhost:20127/v1",
+        apiKey: "test-key",
+      })
+    ),
+}));
 
 const server = getTestServer();
 
@@ -43,7 +75,6 @@ function groundedAnswerResponse(): Response {
   return streamingResponse([
     'data: {"choices":[{"delta":{"content":"Payments."}}]}\n\n',
     'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
-    "data: [DONE]\n\n",
   ]);
 }
 
@@ -252,6 +283,19 @@ function lockKey(user: TestUser, sessionId: string) {
   return `aiChat:inflight:${user.id}:${sessionId}`;
 }
 
+/**
+ * Asserts that no in-flight lock key survives for the user. Scanning the user's
+ * whole key space, rather than just the one key a turn took, is what catches a
+ * release that deleted the wrong key or a second key acquired on the way out.
+ *
+ * @param user the requesting user.
+ */
+async function expectNoInFlightLock(user: TestUser) {
+  expect(
+    await Redis.defaultClient.keys(`aiChat:inflight:${user.id}:*`)
+  ).toEqual([]);
+}
+
 const groundedQuestion = "What is the payments deployment runbook?";
 const groundedDocumentText =
   "The deployment runbook covers the payments service";
@@ -266,6 +310,7 @@ const originalModel = env.AI_CHAT_MODEL;
 afterEach(() => {
   env.AI_CHAT_BASE_URL = originalBaseUrl;
   env.AI_CHAT_MODEL = originalModel;
+  engineLoad.rejectOnce = false;
   vi.unstubAllGlobals();
 });
 
@@ -299,6 +344,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
     expect(await Redis.defaultClient.get(lockKey(user, session.id))).toEqual(
       null
     );
+    await expectNoInFlightLock(user);
 
     // A second, sequential turn on the same session is admitted.
     stubGroundedProvider();
@@ -309,6 +355,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
     // Settle the two assistant flushes so neither insert lands during a later
     // test's message count on the shared database.
     await waitForRows(session.id, 4);
+    await expectNoInFlightLock(user);
   });
 
   it("refuses the second of two simultaneous turns and contacts the provider exactly once", async () => {
@@ -324,19 +371,30 @@ describe("POST /api/ai.chat in-flight cap", () => {
       chat(user, groundedBody(session.id)),
     ]);
 
-    const statuses = [first.status, second.status].sort();
+    const statuses = [first.status, second.status].sort((a, b) => a - b);
     expect(statuses).toEqual([200, 200]);
 
-    const bodies = [await first.text(), await second.text()];
-    const refused = bodies.filter((text) => text.includes('"kind":"busy"'));
-    const streamed = bodies.filter((text) => text.includes("event: complete"));
+    const results = await Promise.all(
+      [first, second].map(async (res) => ({
+        kind: res.headers.get("x-ai-chat-kind"),
+        text: await res.text(),
+      }))
+    );
+    const refused = results.filter((result) => result.kind === "busy");
+    const streamed = results.filter(
+      (result) =>
+        result.kind === null && result.text.includes('"type":"RUN_FINISHED"')
+    );
 
-    // The discriminator is the assertion that matters: a bare error status would
-    // leave the client with no frame, and a `refusal` kind would be
-    // indistinguishable from the grounding gate declining to answer.
+    // The header is the assertion that matters: a bare error status would leave
+    // the client with no frame, and a `refusal` kind would be indistinguishable
+    // from the grounding gate declining to answer.
     expect(refused).toHaveLength(1);
-    expect(refused[0]).toContain('"kind":"busy"');
-    expect(refused[0]).not.toContain('"kind":"refusal"');
+    expect(refused[0].text).toContain('"type":"RUN_STARTED"');
+    expect(refused[0].text).toContain('"type":"RUN_FINISHED"');
+    expect(results.filter((result) => result.kind === "refusal")).toHaveLength(
+      0
+    );
 
     // Exactly one turn streamed and it carried the server-authored terminal
     // frame, so the other body is the refusal rather than a second answer.
@@ -349,10 +407,95 @@ describe("POST /api/ai.chat in-flight cap", () => {
     expect(await Redis.defaultClient.get(lockKey(user, session.id))).toEqual(
       null
     );
+    await expectNoInFlightLock(user);
 
     // Settle the winner's assistant flush so its insert does not land during a
     // later test's message count on the shared database.
     await waitForRows(session.id, 2);
+  });
+
+  it("frames the busy refusal as a complete AG-UI run and leaves the first turn untouched", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user, groundedDocumentText);
+    const session = await buildSession(user);
+
+    const provider = stubStalledProvider();
+    const first = chat(user, groundedBody(session.id));
+    await provider.contacted;
+
+    // The question row is written before the first stream starts, so it is the
+    // whole of the session while that answer is still generating.
+    const beforeRows = await waitForRows(session.id, 1);
+    expect(beforeRows).toHaveLength(1);
+    expect(beforeRows[0].role).toEqual(AIChatMessageRole.User);
+    const questionContent = beforeRows[0].content;
+
+    const secondRes = await chat(user, groundedBody(session.id));
+    expect(secondRes.status).toEqual(200);
+    expect(secondRes.headers.get("content-type")).toContain(
+      "text/event-stream"
+    );
+    expect(secondRes.headers.get("x-ai-chat-kind")).toEqual("busy");
+
+    const busyText = await secondRes.text();
+    const types = [...busyText.matchAll(/"type":"(\w+)"/g)].map((m) => m[1]);
+    expect(types).toEqual([
+      "RUN_STARTED",
+      "TEXT_MESSAGE_START",
+      "TEXT_MESSAGE_CONTENT",
+      "TEXT_MESSAGE_END",
+      "RUN_FINISHED",
+    ]);
+    expect(busyText).toContain(
+      `"delta":"${t(
+        "Another answer for this conversation is still being generated"
+      )}"`
+    );
+    expect(busyText).not.toContain('"type":"CUSTOM"');
+    expect(busyText.split("\n\n").filter(Boolean)).toHaveLength(5);
+
+    // The busy turn wrote no row, and it must not have released the lock the
+    // first turn still holds — a bare release here would un-cap the session.
+    const duringRows = await AIChatMessage.findAll({
+      where: { sessionId: session.id },
+      order: [["seq", "ASC"]],
+    });
+    expect(
+      duringRows.map((row) => [row.role, row.content, row.status])
+    ).toEqual([
+      [AIChatMessageRole.User, questionContent, AIChatMessageStatus.Completed],
+    ]);
+    expect(
+      await Redis.defaultClient.get(lockKey(user, session.id))
+    ).not.toEqual(null);
+
+    provider.push(
+      'data: {"choices":[{"delta":{"content":"Payments."},"finish_reason":"stop"}]}\n\n'
+    );
+    provider.close();
+
+    const firstRes = await first;
+    expect(firstRes.status).toEqual(200);
+    expect(await firstRes.text()).toContain('"delta":"Payments."');
+
+    // The first run is untouched: its question row is byte-identical and its
+    // answer is the streamed text, not the busy message.
+    const afterRows = await waitForRows(session.id, 2);
+    expect(afterRows.map((row) => [row.role, row.content, row.status])).toEqual(
+      [
+        [
+          AIChatMessageRole.User,
+          questionContent,
+          AIChatMessageStatus.Completed,
+        ],
+        [
+          AIChatMessageRole.Assistant,
+          "Payments.",
+          AIChatMessageStatus.Completed,
+        ],
+      ]
+    );
   });
 
   it("does not block a different session or a different user", async () => {
@@ -456,6 +599,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
         }
       }
       expect(held).toEqual(null);
+      await expectNoInFlightLock(user);
     } finally {
       provider.close();
     }
@@ -518,11 +662,12 @@ describe("POST /api/ai.chat in-flight cap", () => {
 
     const res = await chat(user, groundedBody(session.id));
     expect(res.status).toEqual(200);
-    expect(await res.text()).toContain('{"error":"The AI chat stream failed"}');
+    expect(await res.text()).toContain('"type":"RUN_ERROR"');
 
     expect(await Redis.defaultClient.get(lockKey(user, session.id))).toEqual(
       null
     );
+    await expectNoInFlightLock(user);
 
     stubGroundedProvider();
     const nextRes = await chat(user, groundedBody(session.id));
@@ -530,6 +675,98 @@ describe("POST /api/ai.chat in-flight cap", () => {
     await nextRes.text();
 
     // Settle both flushes: the errored partial answer and the clean answer.
+    await waitForRows(session.id, 4);
+  });
+
+  it("releases the lock when reading the committed window throws before the stream exists", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user, groundedDocumentText);
+    const session = await buildSession(user);
+
+    const realFindAll = AIChatMessage.findAll.bind(AIChatMessage);
+    const findAll = vi
+      .spyOn(AIChatMessage, "findAll")
+      .mockImplementation(((...args: Parameters<typeof AIChatMessage.findAll>) => {
+        const attributes = (
+          args[0] as { attributes?: readonly string[] } | undefined
+        )?.attributes;
+        if (attributes?.includes("role")) {
+          return Promise.reject(new Error("database unavailable"));
+        }
+        return realFindAll(...args);
+      }) as typeof AIChatMessage.findAll);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const res = await chat(user, groundedBody(session.id));
+
+      // A JSON error, never a half-open stream: the failure happens before the
+      // SSE response exists.
+      expect(res.status).toEqual(500);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(fetchMock).not.toHaveBeenCalled();
+      await expectNoInFlightLock(user);
+    } finally {
+      findAll.mockRestore();
+    }
+  });
+
+  it("releases the lock when the engine loader rejects before the stream exists", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user, groundedDocumentText);
+    const session = await buildSession(user);
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    engineLoad.rejectOnce = true;
+
+    const res = await chat(user, groundedBody(session.id));
+
+    expect(res.status).toEqual(500);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(fetchMock).not.toHaveBeenCalled();
+    // Without the outer release this key would refuse every later turn on the
+    // session for the full 900s TTL.
+    await expectNoInFlightLock(user);
+  });
+
+  it("releases the lock when the grounding gate refuses the turn", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user, "Unrelated onboarding steps");
+    const session = await buildSession(user);
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await chat(user, {
+      sessionId: session.id,
+      messages: [
+        {
+          role: "user",
+          content: "How do I rotate the Kubernetes signing keys?",
+        },
+      ],
+    });
+
+    expect(res.status).toEqual(200);
+    expect(res.headers.get("x-ai-chat-kind")).toEqual("refusal");
+    await res.text();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // The refusal returns before a stream exists, so no terminal hook runs for
+    // it; the route releases in-line, and no key may survive that.
+    await expectNoInFlightLock(user);
+
+    // The release is observable: the same session admits a normal turn at once.
+    stubGroundedProvider();
+    const nextRes = await chat(user, groundedBody(session.id));
+    expect(nextRes.status).toEqual(200);
+    await nextRes.text();
+
     await waitForRows(session.id, 4);
   });
 
