@@ -654,6 +654,52 @@ describe("AIChatPanel", () => {
     cleanup();
   });
 
+  it("keeps the streamed turn when the history re-read fails", async () => {
+    fakeConnection({ deltas: ["The answer"], question: "hi" });
+
+    // Every message read fails, including the post-settle one. The row the
+    // server committed before closing the stream therefore never reaches the
+    // store.
+    const post = vi.mocked(client.post);
+    post.mockImplementation((async (path: string) => {
+      if (path === "/ai.messages.list") {
+        throw new Error("read failed");
+      }
+      if (path === "/ai.sessions.list") {
+        return { data: { sessions: [] } };
+      }
+      return defaultPost(path);
+    }) as never);
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+    await flush();
+
+    expect(rootStore.aiChatMessages.orderedData).toHaveLength(0);
+    // The store never got the row, so the local turn must stay on screen –
+    // dropping it here is the transcript losing the answer it just streamed.
+    expect(query("message-assistant")?.textContent).toContain("The answer");
+    cleanup();
+  });
+
+  it("clears the local turn once the history re-read succeeds", async () => {
+    fakeConnection({ deltas: ["The answer"], question: "hi" });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+    await flush();
+
+    // The re-read landed the committed rows, so the local turn is redundant.
+    expect(rootStore.aiChatMessages.orderedData).toHaveLength(2);
+    expect(
+      document.querySelectorAll('[data-testid="message-assistant"]')
+    ).toHaveLength(1);
+    expect(query("message-assistant")?.textContent).toContain("The answer");
+    cleanup();
+  });
+
   it("renders assistant markdown as plain text with a clickable source link", async () => {
     fakeConnection({
       deltas: [

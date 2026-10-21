@@ -587,17 +587,19 @@ const AIChatPanel = observer(function AIChatPanel({
         return "failed";
       }
 
-      // The stream only closes after the server has committed the turn, so the
-      // re-read is guaranteed to include the assistant row; the local turn is
-      // dropped in the same pass.
+      // The stream only closes after the server has committed the turn, so a
+      // successful re-read includes the assistant row and the local turn is
+      // dropped in the same pass. A failed re-read committed nothing to the
+      // store, so the local turn is kept: dropping it there loses the answer
+      // the user just watched stream in.
       await aiChatMessages.list({ sessionId: targetSessionId }).then(
-        () => undefined,
+        () => {
+          if (turnRef.current === turn) {
+            setPending([]);
+          }
+        },
         () => undefined
       );
-
-      if (turnRef.current === turn) {
-        setPending([]);
-      }
 
       return "settled";
     } catch (err) {
