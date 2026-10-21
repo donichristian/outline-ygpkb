@@ -326,6 +326,35 @@ describe("#createAiChatConnection", () => {
     expect(kinds).toEqual([null]);
   });
 
+  test("should send the AG-UI wire body and never the legacy session body", async () => {
+    document.cookie = "csrfToken=t; path=/";
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(sseResponse());
+    const connection = createAiChatConnection({ fetchClient: fetchMock });
+
+    await collect(
+      connection.connect(messages, undefined, undefined, runContext)
+    );
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(url).toBe("/api/ai.chat");
+    expect(init.method).toBe("POST");
+    expect(init.credentials).toBe("same-origin");
+    expect(body.threadId).toBe(threadId);
+    expect(typeof body.threadId).toBe("string");
+    expect(typeof body.runId).toBe("string");
+    // New AG-UI body: addressed by threadId, never the legacy flat session body.
+    expect(body.sessionId).toBeUndefined();
+    expect(body.messages).toEqual([
+      expect.objectContaining({ role: "user", content: "hi" }),
+    ]);
+    for (const message of body.messages as Array<Record<string, unknown>>) {
+      expect(typeof message.id).toBe("string");
+    }
+    expect(body.tools).toEqual([]);
+    expect(body.forwardedProps).toEqual({});
+  });
+
   test("should omit the CSRF header and surface a 403 as an http error", async () => {
     clearCsrfCookie();
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
