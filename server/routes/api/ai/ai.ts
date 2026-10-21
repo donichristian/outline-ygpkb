@@ -208,16 +208,22 @@ function setSseHeaders(ctx: APIContext) {
  * Seconds a held per-session in-flight lock survives without being released,
  * which only happens when the process dies mid-stream and no exit ever runs.
  *
- * The trade-off is asymmetric, so the value sits at the slow end of plausible.
- * A lock that expires while a legitimately slow completion is still streaming
- * silently defeats the cap — a second turn is admitted for the same session and
- * both race to allocate `seq` — whereas a lock that outlives a crash costs the
- * session one refusal per TTL, and every ordinary exit releases explicitly. A
- * completion over a full 50-message window routinely runs for a minute or two,
- * so five minutes is well above a slow stream and well below the point where a
- * stranded key would be noticed by a user.
+ * The unit is one **tool loop**, not one model call: the adapter streams a
+ * model round, the engine executes `search_workspace`, then streams the model
+ * again, for as many rounds as the answer needs. A single model round over the
+ * full 50-message window routinely takes up to two minutes, and a tool round
+ * adds a few seconds for the search itself, so the worst case is roughly
+ *
+ *   5 rounds × (120s model + 5s tool) ≈ 625s
+ *
+ * A 15-minute TTL (900s) covers that with room for one more round plus the
+ * terminal flush, while a crash still strands the session for a bounded time.
+ * The trade-off is asymmetric: a lock that expires mid-stream silently defeats
+ * the cap — a second turn is admitted and both race to allocate `seq` — whereas
+ * a crashed lock costs one refusal per TTL, and every ordinary exit releases
+ * explicitly. The cost is therefore shifted to the crash case deliberately.
  */
-const AiChatInFlightLockTtlSeconds = 5 * Minute.seconds;
+const AiChatInFlightLockTtlSeconds = 15 * Minute.seconds;
 
 /**
  * The `kind` discriminators a refused turn may carry, surfaced to the client as

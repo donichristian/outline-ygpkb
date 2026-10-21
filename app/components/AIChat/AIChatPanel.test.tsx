@@ -8,7 +8,12 @@ import { ThemeProvider } from "styled-components";
 import { buildLightTheme } from "@shared/styles/theme";
 import type { UIMessage } from "@tanstack/ai-client";
 import RootStore from "~/stores/RootStore";
-import { AiChatError, clearDraft, flushDrafts } from "~/utils/aiChat";
+import {
+  AiChatError,
+  clearDraft,
+  flushDrafts,
+  readDraft,
+} from "~/utils/aiChat";
 import type { AiChatKind } from "~/utils/aiChat";
 import AIChatPanel from "./AIChatPanel";
 import { client } from "~/utils/ApiClient";
@@ -1243,10 +1248,17 @@ describe("AIChatPanel", () => {
     cleanup();
   });
 
-  it("shows a retry-later notice for a busy response header", async () => {
-    fakeConnection({ deltas: [], kind: "busy" });
+  it("shows a retry-later notice for a busy response header and restores the text", async () => {
+    const runs = fakeConnection({ deltas: [], kind: "busy" });
 
-    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    const {
+      query,
+      inputValue,
+      typeMessage,
+      submit,
+      queueItems,
+      cleanup,
+    } = renderPanel(rootStore);
     typeMessage("hi");
     await submit();
     await flush();
@@ -1254,6 +1266,56 @@ describe("AIChatPanel", () => {
     expect(query("ai-chat-error")?.textContent).toContain(
       "Another AI chat response is still in progress"
     );
+
+    // Nothing was sent, so the question is still the user's: it comes back to
+    // the composer and its draft, ready to retry, without being queued.
+    expect(inputValue()).toBe("hi");
+    expect(readDraft("session-new")).toBe("hi");
+    expect(queueItems()).toEqual([]);
+    expect(query("ai-chat-queue")).toBeNull();
+
+    // The refused turn reached the wire but wrote nothing.
+    expect(runs).toHaveLength(1);
+    expect(rootStore.aiChatMessages.orderedData).toHaveLength(0);
+    cleanup();
+  });
+
+  it("does not restore a queued message alongside a refused submitted turn", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const runs = fakeConnection({
+      deltas: [],
+      kind: "busy",
+      gateBeforeFinish: gate,
+    });
+
+    const {
+      inputValue,
+      typeMessage,
+      submit,
+      queueItems,
+      cleanup,
+    } = renderPanel(rootStore);
+
+    typeMessage("hi");
+    await submit();
+
+    // A message arriving while the refused turn is still open.
+    typeMessage("later");
+    await submit();
+    expect(queueItems()).toEqual(["later"]);
+
+    release();
+    await flushUntil(() => inputValue() === "hi");
+
+    // Only the turn the user submitted comes back. The queued item is
+    // discarded with the failed drain, never copied into the composer as well.
+    expect(inputValue()).toBe("hi");
+    expect(queueItems()).toEqual([]);
+    expect(runs).toHaveLength(1);
     cleanup();
   });
 

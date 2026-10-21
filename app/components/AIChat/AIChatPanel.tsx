@@ -456,9 +456,16 @@ const AIChatPanel = observer(function AIChatPanel({
    * path, which the queue treats as a stop.
    *
    * @param content the message to send.
+   * @param restoreOnBusy whether a busy refusal should put the text back in the
+   *   composer. True only for the turn the user submitted: a queued item that
+   *   reaches this later already owns its text, and restoring it would put the
+   *   same message both in the transcript flow and back in the composer.
    * @returns the outcome, deciding whether the queue drains or is discarded.
    */
-  const sendTurn = async (content: string): Promise<TurnOutcome> => {
+  const sendTurn = async (
+    content: string,
+    restoreOnBusy = false
+  ): Promise<TurnOutcome> => {
     setPending([
       { role: "user", content },
       { role: "assistant", content: "" },
@@ -562,6 +569,20 @@ const AIChatPanel = observer(function AIChatPanel({
       // Busy is a complete synthetic run, so no error is thrown for it; the
       // header is the only signal that this turn should be retried later.
       if (observedKind === "busy") {
+        if (restoreOnBusy) {
+          // Nothing was sent: the server refused before contacting the
+          // provider, so the text is still the user's to retry. Putting it back
+          // in the composer (and its draft) makes the retry-later notice
+          // actionable instead of leaving an empty box. It is not queued: the
+          // queue drains after a settled turn, and a refusal never settles.
+          setInput(content);
+          writeDraft(content, targetSessionId);
+          flushDrafts();
+        }
+
+        // Aborts and every other failure keep the text out of the composer:
+        // those turns really were sent, so the server may already have stored
+        // them, and echoing the text back would invite a duplicate turn.
         setError(toAiChatError(undefined, { kind: observedKind }));
         return "failed";
       }
@@ -602,9 +623,11 @@ const AIChatPanel = observer(function AIChatPanel({
    */
   const runTurns = async (first: string) => {
     let next: string | undefined = first;
+    let isSubmittedTurn = true;
 
     while (next !== undefined) {
-      const outcome = await sendTurn(next);
+      const outcome = await sendTurn(next, isSubmittedTurn);
+      isSubmittedTurn = false;
       const following = queueRef.current[0];
 
       if (outcome === "failed") {

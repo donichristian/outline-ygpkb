@@ -271,6 +271,19 @@ function lockKey(user: TestUser, sessionId: string) {
   return `aiChat:inflight:${user.id}:${sessionId}`;
 }
 
+/**
+ * Asserts that no in-flight lock key survives for the user. Scanning the user's
+ * whole key space, rather than just the one key a turn took, is what catches a
+ * release that deleted the wrong key or a second key acquired on the way out.
+ *
+ * @param user the requesting user.
+ */
+async function expectNoInFlightLock(user: TestUser) {
+  expect(
+    await Redis.defaultClient.keys(`aiChat:inflight:${user.id}:*`)
+  ).toEqual([]);
+}
+
 const groundedQuestion = "What is the payments deployment runbook?";
 const groundedDocumentText =
   "The deployment runbook covers the payments service";
@@ -318,6 +331,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
     expect(await Redis.defaultClient.get(lockKey(user, session.id))).toEqual(
       null
     );
+    await expectNoInFlightLock(user);
 
     // A second, sequential turn on the same session is admitted.
     stubGroundedProvider();
@@ -328,6 +342,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
     // Settle the two assistant flushes so neither insert lands during a later
     // test's message count on the shared database.
     await waitForRows(session.id, 4);
+    await expectNoInFlightLock(user);
   });
 
   it("refuses the second of two simultaneous turns and contacts the provider exactly once", async () => {
@@ -379,6 +394,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
     expect(await Redis.defaultClient.get(lockKey(user, session.id))).toEqual(
       null
     );
+    await expectNoInFlightLock(user);
 
     // Settle the winner's assistant flush so its insert does not land during a
     // later test's message count on the shared database.
@@ -571,6 +587,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
         }
       }
       expect(held).toEqual(null);
+      await expectNoInFlightLock(user);
     } finally {
       provider.close();
     }
@@ -638,6 +655,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
     expect(await Redis.defaultClient.get(lockKey(user, session.id))).toEqual(
       null
     );
+    await expectNoInFlightLock(user);
 
     stubGroundedProvider();
     const nextRes = await chat(user, groundedBody(session.id));
@@ -645,6 +663,43 @@ describe("POST /api/ai.chat in-flight cap", () => {
     await nextRes.text();
 
     // Settle both flushes: the errored partial answer and the clean answer.
+    await waitForRows(session.id, 4);
+  });
+
+  it("releases the lock when the grounding gate refuses the turn", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user, "Unrelated onboarding steps");
+    const session = await buildSession(user);
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await chat(user, {
+      sessionId: session.id,
+      messages: [
+        {
+          role: "user",
+          content: "How do I rotate the Kubernetes signing keys?",
+        },
+      ],
+    });
+
+    expect(res.status).toEqual(200);
+    expect(res.headers.get("x-ai-chat-kind")).toEqual("refusal");
+    await res.text();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    // The refusal returns before a stream exists, so no terminal hook runs for
+    // it; the route releases in-line, and no key may survive that.
+    await expectNoInFlightLock(user);
+
+    // The release is observable: the same session admits a normal turn at once.
+    stubGroundedProvider();
+    const nextRes = await chat(user, groundedBody(session.id));
+    expect(nextRes.status).toEqual(200);
+    await nextRes.text();
+
     await waitForRows(session.id, 4);
   });
 
