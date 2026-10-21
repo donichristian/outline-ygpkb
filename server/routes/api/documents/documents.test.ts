@@ -10,6 +10,7 @@ import {
   FileOperationFormat,
   HeadingPrefixStyle,
   StatusFilter,
+  TeamPreference,
   UserRole,
 } from "@shared/types";
 import { TextHelper } from "@shared/utils/TextHelper";
@@ -18,6 +19,7 @@ import { createContext } from "@server/context";
 import { parser } from "@server/editor";
 import type { Group, User } from "@server/models";
 import {
+  Collection,
   Document,
   View,
   Revision,
@@ -27,6 +29,7 @@ import {
   FileOperation,
   GroupMembership,
   Relationship,
+  Share,
 } from "@server/models";
 import { RelationshipType } from "@server/models/Relationship";
 import { DocumentHelper } from "@server/models/helpers/DocumentHelper";
@@ -5084,6 +5087,41 @@ describe("#documents.viewed", () => {
     expect(body.data.length).toEqual(0);
   });
 
+  it("should not return viewed drafts created by other collection members", async () => {
+    const owner = await buildUser();
+    const user = await buildUser({ teamId: owner.teamId });
+    const document = await buildDocument({
+      userId: owner.id,
+      teamId: owner.teamId,
+    });
+    await View.incrementOrCreate(createContext({ user }), {
+      documentId: document.id,
+      userId: user.id,
+    });
+    await document.update({ publishedAt: null });
+    const res = await server.post("/api/documents.viewed", user);
+    const body = await res.json();
+    expect(res.status).toEqual(200);
+    expect(body.data.length).toEqual(0);
+  });
+
+  it("should return viewed drafts created by the user", async () => {
+    const user = await buildUser();
+    const document = await buildDraftDocument({
+      userId: user.id,
+      teamId: user.teamId,
+    });
+    await View.incrementOrCreate(createContext({ user }), {
+      documentId: document.id,
+      userId: user.id,
+    });
+    const res = await server.post("/api/documents.viewed", user);
+    const body = await res.json();
+    expect(res.status).toEqual(200);
+    expect(body.data.length).toEqual(1);
+    expect(body.data[0].id).toEqual(document.id);
+  });
+
   it("should return viewed documents shared directly with the user", async () => {
     const owner = await buildUser();
     const user = await buildUser({ teamId: owner.teamId });
@@ -5129,6 +5167,34 @@ describe("#documents.viewed", () => {
     const document = await buildDocument({
       userId: owner.id,
       collectionId: collection.id,
+      teamId: owner.teamId,
+    });
+    await GroupMembership.create({
+      groupId: group.id,
+      documentId: document.id,
+      permission: DocumentPermission.Read,
+      createdById: owner.id,
+    });
+    await View.incrementOrCreate(createContext({ user }), {
+      documentId: document.id,
+      userId: user.id,
+    });
+    const res = await server.post("/api/documents.viewed", user);
+    const body = await res.json();
+    expect(res.status).toEqual(200);
+    expect(body.data.length).toEqual(1);
+    expect(body.data[0].id).toEqual(document.id);
+  });
+
+  it("should return viewed drafts shared with a group of the user", async () => {
+    const owner = await buildUser();
+    const user = await buildUser({ teamId: owner.teamId });
+    const group = await buildGroup({ teamId: owner.teamId });
+    await group.$add("user", user, {
+      through: { createdById: owner.id },
+    });
+    const document = await buildDraftDocument({
+      userId: owner.id,
       teamId: owner.teamId,
     });
     await GroupMembership.create({
@@ -5350,7 +5416,6 @@ describe("#documents.move", () => {
 
   it("should move the document", async () => {
     const user = await buildUser();
-    // const admin = await buildAdmin({ teamId: user.teamId });
     const document = await buildDocument({
       userId: user.id,
       teamId: user.teamId,
@@ -6179,6 +6244,45 @@ describe("#documents.import", () => {
 });
 
 describe("#documents.create", () => {
+  it("should create the personal collection for the personal collectionId", async () => {
+    const team = await buildTeam();
+    team.setPreference(TeamPreference.PersonalDocs, true);
+    await team.save();
+    const user = await buildUser({ teamId: team.id });
+
+    const res = await server.post("/api/documents.create", user, {
+      body: { collectionId: "personal", title: "First", publish: true },
+    });
+    const body = await res.json();
+    expect(res.status).toEqual(200);
+
+    const collection = await Collection.findOne({
+      where: { teamId: team.id, ownerId: user.id },
+      rejectOnEmpty: true,
+    });
+    expect(body.data.collectionId).toEqual(collection.id);
+    expect(body.data.ownerId).toEqual(user.id);
+
+    const res2 = await server.post("/api/documents.create", user, {
+      body: { collectionId: "personal", title: "Second", publish: true },
+    });
+    const body2 = await res2.json();
+    expect(res2.status).toEqual(200);
+    expect(body2.data.collectionId).toEqual(collection.id);
+  });
+
+  it("should not create the personal collection when turned off", async () => {
+    const team = await buildTeam();
+    team.setPreference(TeamPreference.PersonalDocs, false);
+    await team.save();
+    const user = await buildUser({ teamId: team.id });
+    const res = await server.post("/api/documents.create", user, {
+      body: { collectionId: "personal", title: "First", publish: true },
+    });
+    expect(res.status).toEqual(403);
+    expect(await Collection.count({ where: { ownerId: user.id } })).toEqual(0);
+  });
+
   it("should replace template variables when a doc is created from a template", async () => {
     const user = await buildUser();
     const text = `This document was created by {author} on {date}`;
@@ -6881,6 +6985,128 @@ describe("#documents.update", () => {
       },
     });
     expect(res.status).toEqual(403);
+  });
+
+  it("should not allow publishing a child draft into an inaccessible collection", async () => {
+    const team = await buildTeam();
+    const admin = await buildAdmin({ teamId: team.id });
+    const user = await buildUser({ teamId: team.id });
+    const collection = await buildCollection({
+      userId: user.id,
+      teamId: team.id,
+    });
+    const privateCollection = await buildCollection({
+      userId: admin.id,
+      teamId: team.id,
+      permission: null,
+    });
+    const parentDocument = await buildDocument({
+      userId: user.id,
+      teamId: team.id,
+      collectionId: collection.id,
+    });
+    const document = await buildDraftDocument({
+      userId: user.id,
+      teamId: team.id,
+      collectionId: null,
+      parentDocumentId: parentDocument.id,
+    });
+    const res = await server.post("/api/documents.update", user, {
+      body: {
+        id: document.id,
+        collectionId: privateCollection.id,
+        publish: true,
+      },
+    });
+    expect(res.status).toEqual(403);
+
+    const reloaded = await Document.unscoped().findByPk(document.id);
+    expect(reloaded?.publishedAt).toBeNull();
+    expect(reloaded?.collectionId).toBeNull();
+  });
+
+  it("should allow publishing a child draft into the parent collection", async () => {
+    const team = await buildTeam();
+    const user = await buildUser({ teamId: team.id });
+    const collection = await buildCollection({
+      userId: user.id,
+      teamId: team.id,
+    });
+    const parentDocument = await buildDocument({
+      userId: user.id,
+      teamId: team.id,
+      collectionId: collection.id,
+    });
+    const document = await buildDraftDocument({
+      userId: user.id,
+      teamId: team.id,
+      collectionId: null,
+      parentDocumentId: parentDocument.id,
+    });
+    const res = await server.post("/api/documents.update", user, {
+      body: {
+        id: document.id,
+        collectionId: collection.id,
+        publish: true,
+      },
+    });
+    const body = await res.json();
+    expect(res.status).toEqual(200);
+    expect(body.data.collectionId).toBe(collection.id);
+    expect(body.data.parentDocumentId).toBe(parentDocument.id);
+  });
+
+  it("should publish a child draft at the root of another collection", async () => {
+    const team = await buildTeam();
+    const user = await buildUser({ teamId: team.id });
+    const member = await buildUser({ teamId: team.id });
+    const collection = await buildCollection({
+      userId: user.id,
+      teamId: team.id,
+    });
+    const otherCollection = await buildCollection({
+      userId: user.id,
+      teamId: team.id,
+    });
+    const parentDocument = await buildDocument({
+      userId: user.id,
+      teamId: team.id,
+      collectionId: collection.id,
+    });
+    await UserMembership.create({
+      userId: member.id,
+      documentId: parentDocument.id,
+      permission: DocumentPermission.Read,
+      createdById: user.id,
+    });
+    const document = await buildDraftDocument({
+      userId: user.id,
+      teamId: team.id,
+      collectionId: null,
+      parentDocumentId: parentDocument.id,
+    });
+    const res = await server.post("/api/documents.update", user, {
+      body: {
+        id: document.id,
+        collectionId: otherCollection.id,
+        publish: true,
+      },
+    });
+    expect(res.status).toEqual(200);
+
+    await document.reload();
+    expect(document.collectionId).toBe(otherCollection.id);
+    expect(document.parentDocumentId).toBeNull();
+
+    await otherCollection.reload();
+    expect(otherCollection.documentStructure?.map((node) => node.id)).toContain(
+      document.id
+    );
+
+    const membership = await UserMembership.findOne({
+      where: { userId: member.id, documentId: document.id },
+    });
+    expect(membership).toBeNull();
   });
 
   it("should fail to update an invalid icon value", async () => {
@@ -7610,6 +7836,61 @@ describe("#documents.unpublish", () => {
 
     const reloaded = await Document.unscoped().findByPk(document.id);
     expect(reloaded!.createdById).toEqual(user.id);
+  });
+
+  it("should remove the collection and parent when detaching", async () => {
+    const user = await buildUser();
+    const parentDocument = await buildDocument({
+      userId: user.id,
+      teamId: user.teamId,
+    });
+    const document = await buildDocument({
+      userId: user.id,
+      teamId: user.teamId,
+      collectionId: parentDocument.collectionId,
+      parentDocumentId: parentDocument.id,
+    });
+    const res = await server.post("/api/documents.unpublish", user, {
+      body: {
+        id: document.id,
+        detach: true,
+      },
+    });
+    expect(res.status).toEqual(200);
+
+    const reloaded = await Document.unscoped().findByPk(document.id);
+    expect(reloaded?.publishedAt).toBeNull();
+    expect(reloaded?.collectionId).toBeNull();
+    expect(reloaded?.parentDocumentId).toBeNull();
+  });
+
+  it("should disable public shares when unpublishing a document", async () => {
+    const user = await buildUser();
+    const document = await buildDocument({
+      userId: user.id,
+      teamId: user.teamId,
+    });
+    const share = await buildShare({
+      documentId: document.id,
+      teamId: user.teamId,
+      userId: user.id,
+    });
+    const res = await server.post("/api/documents.unpublish", user, {
+      body: {
+        id: document.id,
+      },
+    });
+    expect(res.status).toEqual(200);
+
+    const reloaded = await Share.unscoped().findByPk(share.id);
+    expect(reloaded!.published).toEqual(false);
+
+    const infoRes = await server.post("/api/shares.info", {
+      body: {
+        id: share.id,
+      },
+    });
+    expect(infoRes.status).toEqual(404);
   });
 
   it("should unpublish a document with archived children", async () => {

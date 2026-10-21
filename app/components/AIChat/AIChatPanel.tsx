@@ -738,7 +738,7 @@ const AIChatPanel = observer(function AIChatPanel({
             onSelect={handleSelectSession}
             onNewChat={handleNewChat}
           />
-          <Tooltip content={t("Toggle fullscreen")} placement="bottom">
+          <Tooltip content={t("Toggle fullscreen")} side="bottom">
             <Button
               icon={isFullscreen ? <ShrinkIcon /> : <GrowIcon />}
               onClick={handleToggleFullscreen}

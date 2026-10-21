@@ -3,7 +3,7 @@ import { EditIcon } from "outline-icons";
 import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import styled from "styled-components";
-import breakpoint from "styled-components-breakpoint";
+import { breakpoint } from "@shared/styles/breakpoint";
 import { IconTitleWrapper } from "@shared/components/Icon";
 import useShare from "@shared/hooks/useShare";
 import type CollectionModel from "~/models/Collection";
@@ -35,7 +35,7 @@ function SharedCollection({ collection }: Props) {
 
   const editAction = (
     <Action>
-      <Tooltip content={t("Edit collection")} shortcut="e" placement="bottom">
+      <Tooltip content={t("Edit collection")} shortcut="e" side="bottom">
         <Button
           as={Link}
           icon={<EditIcon />}
@@ -54,12 +54,12 @@ function SharedCollection({ collection }: Props) {
   return (
     <Scene
       centered={false}
-      textTitle={collection.name}
+      textTitle={collection.displayName}
       left={<div />}
       title={
         <>
           <CollectionIcon collection={collection} expanded />
-          &nbsp;{collection.name}
+          &nbsp;{collection.displayName}
         </>
       }
       actions={
@@ -75,7 +75,7 @@ function SharedCollection({ collection }: Props) {
             <IconTitleWrapper>
               <CollectionIcon collection={collection} size={40} expanded />
             </IconTitleWrapper>
-            {collection.name}
+            {collection.displayName}
           </CollectionHeading>
           {!!shareId && showLastUpdated && !!collection.updatedAt ? (
             <SharedMeta type="tertiary">

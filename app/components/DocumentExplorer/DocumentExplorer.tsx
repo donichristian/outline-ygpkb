@@ -15,7 +15,7 @@ import { useTranslation } from "react-i18next";
 import AutoSizer from "react-virtualized-auto-sizer";
 import { FixedSizeList as List } from "react-window";
 import styled, { useTheme } from "styled-components";
-import breakpoint from "styled-components-breakpoint";
+import { breakpoint } from "@shared/styles/breakpoint";
 import Icon from "@shared/components/Icon";
 import type { NavigationNode } from "@shared/types";
 import { isModKey } from "@shared/utils/keyboard";
@@ -163,7 +163,7 @@ function DocumentExplorer({
         setTimeout(() => listRef.current?.scrollToItem(index, "center"), 50);
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultValue]);
   const baseDepth = nodes.reduce(
     (min, node) => (node.depth ? Math.min(min, node.depth) : min),

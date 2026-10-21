@@ -111,7 +111,7 @@ const AIChatHistory = observer(function AIChatHistory({
           data-testid="ai-chat-history-trigger"
           type="button"
         >
-          <Tooltip content={t("Chat history")} placement="bottom">
+          <Tooltip content={t("Chat history")} side="bottom">
             <HistoryIcon size={18} />
           </Tooltip>
         </NudeButton>
@@ -209,7 +209,7 @@ const AIChatHistory = observer(function AIChatHistory({
                         aria-label={t("Delete chat")}
                         data-testid={`ai-chat-delete-${session.id}`}
                       >
-                        <Tooltip content={t("Delete chat")} placement="bottom">
+                        <Tooltip content={t("Delete chat")} side="bottom">
                           <TrashIcon size={15} />
                         </Tooltip>
                       </DeleteButton>

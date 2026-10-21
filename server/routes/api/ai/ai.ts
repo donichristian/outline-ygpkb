@@ -1,7 +1,7 @@
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { t } from "i18next";
-import Router from "koa-router";
+import Router from "@koa/router";
 import { v4 as uuidv4 } from "uuid";
 import { toError } from "@shared/utils/error";
 import { Minute } from "@shared/utils/time";

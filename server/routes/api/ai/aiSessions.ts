@@ -1,4 +1,4 @@
-import Router from "koa-router";
+import Router from "@koa/router";
 import { Op } from "sequelize";
 import aiChatSessionCreator from "@server/commands/aiChatSessionCreator";
 import aiChatSessionDestroyer from "@server/commands/aiChatSessionDestroyer";

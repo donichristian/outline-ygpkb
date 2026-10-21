@@ -1,17 +1,19 @@
+import type { Location } from "history";
 import { observer } from "mobx-react";
 import { AllSelection } from "prosemirror-state";
 import { useRef, useCallback } from "react";
 import * as React from "react";
 import { useTranslation } from "react-i18next";
-import { Prompt, useHistory, useLocation } from "react-router-dom";
+import { Prompt, matchPath, useHistory, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import styled from "styled-components";
-import breakpoint from "styled-components-breakpoint";
+import { breakpoint } from "@shared/styles/breakpoint";
 import { EditorStyleHelper } from "@shared/editor/styles/EditorStyleHelper";
 import { s } from "@shared/styles";
 import type { NavigationNode } from "@shared/types";
 import { IconType, TOCPosition, TeamPreference } from "@shared/types";
 import { determineIconType } from "@shared/utils/icon";
+import parseDocumentSlug from "@shared/utils/parseDocumentSlug";
 import type Document from "~/models/Document";
 import type Revision from "~/models/Revision";
 import { useDocumentContext } from "~/components/DocumentContext";
@@ -22,7 +24,6 @@ import LoadingIndicator from "~/components/LoadingIndicator";
 import PageTitle from "~/components/PageTitle";
 import PlaceholderDocument from "~/components/PlaceholderDocument";
 import RegisterKeyDown from "~/components/RegisterKeyDown";
-import { MeasuredContainer } from "~/components/MeasuredContainer";
 import type { Editor as TEditor } from "~/editor";
 import type { Properties } from "~/types";
 import useEventListener from "~/hooks/useEventListener";
@@ -30,9 +31,14 @@ import { useLocationSidebarContext } from "~/hooks/useLocationSidebarContext";
 import useMobile from "~/hooks/useMobile";
 import useStores from "~/hooks/useStores";
 import isTextInput from "~/utils/isTextInput";
+import Logger from "~/utils/Logger";
 import { client } from "~/utils/ApiClient";
 import { emojiToUrl } from "~/utils/emoji";
-import { documentHistoryPath, documentEditPath } from "~/utils/routeHelpers";
+import {
+  documentHistoryPath,
+  documentEditPath,
+  matchDocumentHistory,
+} from "~/utils/routeHelpers";
 import { useDocumentSave } from "../hooks/useDocumentSave";
 import Container from "./Container";
 import Contents from "./Contents";
@@ -324,28 +330,39 @@ function DocumentScene({
 
   const hasUnsyncedChanges = !readOnly && documentContext.hasUnsyncedChanges;
 
-  const handleBlockNavigation = () => {
-    if (hasUnsyncedChanges) {
-      return documentContext.hasLocalPersistence
-        ? t(
-            `Your changes haven’t synced yet, they are saved on this device.\nAre you sure you want to leave?`
-          )
-        : t(
-            `Your changes haven’t synced yet and will be lost.\nAre you sure you want to leave?`
-          );
+  const warnUnsyncedChanges = () => {
+    Logger.warn("Leaving document with unsynced changes", {
+      documentId: document.id,
+      hasLocalPersistence: documentContext.hasLocalPersistence,
+    });
+  };
+
+  const handleBlockNavigation = (nextLocation: Location) => {
+    // Moving between views of this document, such as edit mode or a heading
+    // anchor, keeps the editor mounted, but a revision view replaces it.
+    const isLeaving =
+      !parseDocumentSlug(nextLocation.pathname)?.endsWith(document.urlId) ||
+      !!matchPath<{ revisionId?: string }>(
+        nextLocation.pathname,
+        matchDocumentHistory
+      )?.params.revisionId;
+    if (!isLeaving) {
+      return true;
     }
     if (isUploading && !isEditorDirty) {
       return t(
         `Images are still uploading.\nAre you sure you want to discard them?`
       );
     }
+    if (hasUnsyncedChanges) {
+      warnUnsyncedChanges();
+    }
     return true;
   };
 
-  const handleUnload = (event: BeforeUnloadEvent) => {
+  const handleUnload = () => {
     if (hasUnsyncedChanges) {
-      event.preventDefault();
-      event.returnValue = "";
+      warnUnsyncedChanges();
     }
   };
 
@@ -353,8 +370,8 @@ function DocumentScene({
 
   const hasEmojiInTitle = determineIconType(document.icon) === IconType.Emoji;
   const pageTitle = hasEmojiInTitle
-    ? document.titleWithDefault.replace(document.icon!, "")
-    : document.titleWithDefault;
+    ? document.displayTitle.replace(document.icon!, "")
+    : document.displayTitle;
   const favicon = hasEmojiInTitle ? emojiToUrl(document.icon!) : undefined;
 
   const fullWidthTransformOffsetStyle = {
@@ -377,9 +394,7 @@ function DocumentScene({
         }}
         handler={onPublish}
       />
-      <MeasuredContainer
-        as={Background}
-        name="container"
+      <Background
         column
         auto
         onDragOver={handleDragOver}
@@ -429,9 +444,7 @@ function DocumentScene({
                 </EditorContainer>
               }
             >
-              <MeasuredContainer
-                name="document"
-                as={EditorContainer}
+              <EditorContainer
                 docFullWidth={document.fullWidth}
                 showContents={showContents}
                 tocPosition={tocPos}
@@ -482,7 +495,7 @@ function DocumentScene({
                     </Editor>
                   </>
                 )}
-              </MeasuredContainer>
+              </EditorContainer>
               {showContents && (
                 <ContentsContainer
                   docFullWidth={document.fullWidth}
@@ -495,7 +508,7 @@ function DocumentScene({
           </Main>
           {children}
         </Container>
-      </MeasuredContainer>
+      </Background>
     </ErrorBoundary>
   );
 }
@@ -578,7 +591,7 @@ const EditorContainer = styled.div<EditorContainerProps>`
 
   // A notice above the editor already provides the space from the header
   &:has(> ${DocumentNotice}) {
-    --document-title-margin-top: 0;
+    --document-title-margin-top: 0px;
   }
 
   ${breakpoint("tablet")`
@@ -604,6 +617,10 @@ const EditorContainer = styled.div<EditorContainerProps>`
 const Background = styled(Container)`
   position: relative;
   background: ${s("background")};
+
+  // A container unit, unlike a measured value, does not restyle the document on resize.
+  container-type: inline-size;
+  --container-width: 100cqi;
 `;
 
 const ReferencesWrapper = styled.div`

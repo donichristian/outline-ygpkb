@@ -8,7 +8,7 @@ import {
   ChangesetHelper,
   type ExtendedChange,
 } from "@shared/editor/lib/ChangesetHelper";
-import headingToSlug from "@shared/editor/lib/headingToSlug";
+import { HeadingSlugger } from "@shared/editor/lib/headingToSlug";
 import textBetween from "@shared/editor/lib/textBetween";
 import { EditorStyleHelper } from "@shared/editor/styles/EditorStyleHelper";
 import type { NavigationNode, ProsemirrorData } from "@shared/types";
@@ -57,7 +57,7 @@ type HTMLOptions = {
   includeTitle?: boolean;
   /** Whether to include style tags in the generated HTML (defaults to true) */
   includeStyles?: boolean;
-  /** Whether to include the Mermaid script in the generated HTML (defaults to false) */
+  /** Whether to include the Mermaid diagram renderer in the generated HTML (defaults to false) */
   includeMermaid?: boolean;
   /** Whether to include the doctype,head, etc in the generated HTML (defaults to false) */
   includeHead?: boolean;
@@ -267,40 +267,34 @@ export class DocumentHelper {
 
     const node = DocumentHelper.toProsemirror(document);
 
-    // Headings are always top-level nodes, so iterating the document's direct
-    // children is sufficient to locate the section.
     const children: Node[] = [];
     node.content.forEach((child) => children.push(child));
 
-    const previouslySeen: Record<string, number> = {};
+    // Nested headings (eg. in tables) affect the numbering of duplicates, so
+    // every heading is visited, but a section can only start at a top-level one.
+    const slugger = new HeadingSlugger();
     let startIndex = -1;
-    let level = 0;
-
-    for (let i = 0; i < children.length; i++) {
-      const child = children[i];
-      if (child.type.name !== "heading") {
-        continue;
+    node.forEach((child, _offset, index) => {
+      if (startIndex !== -1) {
+        return;
       }
-
-      // Calculate the heading id using the same de-duplication logic as the
-      // editor so that anchors to repeated headings resolve correctly.
-      const slug = headingToSlug(child);
-      const headingId =
-        previouslySeen[slug] > 0
-          ? headingToSlug(child, previouslySeen[slug])
-          : slug;
-      previouslySeen[slug] =
-        previouslySeen[slug] !== undefined ? previouslySeen[slug] + 1 : 1;
-
-      if (startIndex === -1 && headingId === id) {
-        startIndex = i;
-        level = child.attrs.level;
+      if (child.type.name === "heading") {
+        if (slugger.slug(child) === id) {
+          startIndex = index;
+        }
+        return;
       }
-    }
+      child.descendants((nested) => {
+        if (nested.type.name === "heading") {
+          slugger.slug(nested);
+        }
+      });
+    });
 
     if (startIndex === -1) {
       return undefined;
     }
+    const level = children[startIndex].attrs.level;
 
     const sectionNodes: Node[] = [children[startIndex]];
     for (let i = startIndex + 1; i < children.length; i++) {
@@ -1315,12 +1309,50 @@ export class DocumentHelper {
       return undefined;
     }
 
-    // Parse the replacement markdown and extract inline content only when it
-    // resolves to a single textblock. Multi-block or non-textblock content
-    // should fall back to block-level replacement rather than being silently
-    // truncated during inline patching. Markdown parsing can trim whitespace,
-    // so when the parsed result is plain text we use the raw replacement
-    // string to preserve exact whitespace.
+    const replacementContent = DocumentHelper.inlineReplacementContent(
+      blockNode,
+      replacementText
+    );
+
+    if (!replacementContent) {
+      return undefined;
+    }
+
+    // Splice: keep inline content before match + replacement + after match.
+    const inlineBefore = blockNode.content.cut(0, pmInlineFrom);
+    const inlineAfter = blockNode.content.cut(pmInlineTo);
+    const content = inlineBefore.append(replacementContent).append(inlineAfter);
+
+    if (!blockNode.type.validContent(content)) {
+      return undefined;
+    }
+
+    return blockNode.copy(content);
+  }
+
+  /**
+   * Build the inline content that replaces a match inside a textblock. Code
+   * blocks take the replacement verbatim. Other textblocks parse it as
+   * markdown, and use the raw string when the result is plain text so that
+   * whitespace is kept.
+   *
+   * @param blockNode The textblock node containing the match.
+   * @param replacementText The replacement text.
+   * @returns The inline content, or undefined if the replacement is not a
+   *   single textblock.
+   */
+  private static inlineReplacementContent(
+    blockNode: Node,
+    replacementText: string
+  ): Fragment | undefined {
+    if (blockNode.type.spec.code) {
+      return replacementText
+        ? Fragment.from(schema.text(replacementText))
+        : Fragment.empty;
+    }
+
+    // Multi-block or non-textblock content falls back to block-level
+    // replacement rather than being silently truncated.
     const parsed = parser.parse(replacementText);
     const firstBlock = parsed.firstChild;
 
@@ -1328,25 +1360,15 @@ export class DocumentHelper {
       return undefined;
     }
 
-    let replacementContent: Fragment;
-
     if (
       firstBlock.content.childCount === 1 &&
       firstBlock.firstChild?.isText &&
       !firstBlock.firstChild.marks.length
     ) {
-      // Plain text replacement — use the raw string to avoid whitespace trimming
-      replacementContent = Fragment.from(schema.text(replacementText));
-    } else {
-      replacementContent = firstBlock.content;
+      return Fragment.from(schema.text(replacementText));
     }
 
-    // Splice: keep inline content before match + replacement + after match.
-    const inlineBefore = blockNode.content.cut(0, pmInlineFrom);
-    const inlineAfter = blockNode.content.cut(pmInlineTo);
-    return blockNode.copy(
-      inlineBefore.append(replacementContent).append(inlineAfter)
-    );
+    return firstBlock.content;
   }
 
   /**

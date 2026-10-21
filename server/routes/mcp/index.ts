@@ -1,6 +1,6 @@
 import Koa from "koa";
 import bodyParser from "koa-body";
-import Router from "koa-router";
+import Router from "@koa/router";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
 import { ErrorCode } from "@modelcontextprotocol/sdk/types.js";
@@ -83,6 +83,10 @@ router.post(
     // which the transport already answers with an HTTP error — warn keeps
     // visibility without reporting client mistakes to Sentry.
     transport.onerror = (error) => {
+      // Newer clients probe with their latest version and fall back on this 400.
+      if (error.message.includes("Unsupported protocol version")) {
+        return;
+      }
       Logger.warn("MCP transport error", error);
     };
 
@@ -144,7 +148,7 @@ router.delete("/", async (ctx) => {
 
 // Clients probing for a transport we do not implement, such as the legacy
 // HTTP+SSE endpoints, must not fall through to the application shell
-router.all("*", async (ctx) => {
+router.all("{/*path}", async (ctx) => {
   ctx.status = 404;
   ctx.body = { error: "Not found. MCP requests must be sent to /mcp." };
 });
