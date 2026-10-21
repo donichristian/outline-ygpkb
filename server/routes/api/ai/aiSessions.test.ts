@@ -551,7 +551,8 @@ describe("ai.chat after the router is composed", () => {
     // The grounding gate refuses before the provider is contacted, which is
     // enough to prove the route resolved rather than 404ing as unregistered.
     expect(res.status).toEqual(200);
-    expect(await res.text()).toContain("event: error");
+    expect(res.headers.get("x-ai-chat-kind")).toEqual("refusal");
+    expect(await res.text()).toContain('"type":"RUN_FINISHED"');
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

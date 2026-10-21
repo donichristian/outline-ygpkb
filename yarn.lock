@@ -5,6 +5,18 @@ __metadata:
   version: 10
   cacheKey: 10c0
 
+"@ag-ui/core@npm:1.0.0":
+  version: 1.0.0
+  resolution: "@ag-ui/core@npm:1.0.0"
+  peerDependencies:
+    zod: ^3.25.18 || ^4.0.0
+  peerDependenciesMeta:
+    zod:
+      optional: true
+  checksum: 10c0/5fc740a448f99e644b7903be77fe5239ef7a64557e75c058f8f69d6043b1b54ddfd9e5182480e49ac48f1125df91b369cdd7501bfd9e34ce38837b278d488481
+  languageName: node
+  linkType: hard
+
 "@antfu/install-pkg@npm:^1.1.0":
   version: 1.1.0
   resolution: "@antfu/install-pkg@npm:1.1.0"
@@ -6034,6 +6046,122 @@ __metadata:
   languageName: node
   linkType: hard
 
+"@tanstack/ai-client@npm:0.39.3, @tanstack/ai-client@npm:^0.39.3":
+  version: 0.39.3
+  resolution: "@tanstack/ai-client@npm:0.39.3"
+  dependencies:
+    "@tanstack/ai": "npm:^0.69.0"
+    "@tanstack/ai-event-client": "npm:^0.13.1"
+    "@tanstack/ai-utils": "npm:^0.4.2"
+  checksum: 10c0/557f15ee238158593970b835854f3c24c8116b1d270e8d61211ede1e69584ab89d80d8496a2c806ac0fb9580edb49cb21f210e09a6e71f7f4c33a25001ac0d03
+  languageName: node
+  linkType: hard
+
+"@tanstack/ai-event-client@npm:^0.13.1":
+  version: 0.13.1
+  resolution: "@tanstack/ai-event-client@npm:0.13.1"
+  dependencies:
+    "@tanstack/devtools-event-client": "npm:^0.4.1"
+  checksum: 10c0/d3318062b6602d10bfb822ad9279cf8364eb1aea2e4cb0f56fcab67c1f546d8cb36063aa46e01644fbaef6405a8a7efbc747e0a78abba2e7b06da4868f28a076
+  languageName: node
+  linkType: hard
+
+"@tanstack/ai-openai@npm:0.30.0":
+  version: 0.30.0
+  resolution: "@tanstack/ai-openai@npm:0.30.0"
+  dependencies:
+    "@tanstack/ai-utils": "npm:^0.4.2"
+    "@tanstack/openai-base": "npm:^0.14.0"
+    openai: "npm:^7.30.0"
+  peerDependencies:
+    "@tanstack/ai": ^0.69.0
+  checksum: 10c0/ef3d94c1c42edba2733e4c4de9ee98b336d14db7e21e76464f77a20f84f0d113b3ed64c1f51f03594976ab6d763c17da7096f775afc449faec7b3aaa3e06e446
+  languageName: node
+  linkType: hard
+
+"@tanstack/ai-react@npm:0.30.4":
+  version: 0.30.4
+  resolution: "@tanstack/ai-react@npm:0.30.4"
+  dependencies:
+    "@tanstack/ai-client": "npm:^0.39.3"
+    "@tanstack/markdown": "npm:^0.0.13"
+  peerDependencies:
+    "@mcp-ui/client": ^7
+    "@tanstack/ai": ^0.69.0
+    "@types/react": ">=18.0.0"
+    react: ">=18.0.0"
+    react-dom: ">=18.0.0"
+  peerDependenciesMeta:
+    "@mcp-ui/client":
+      optional: true
+    react-dom:
+      optional: true
+  checksum: 10c0/5bc0bade757bdf6643a24f8cfd87768af074f696da36be93488c07ee941d56539df4f4aa4fe571a18056384d8995d765e09f72d99d6d25a726244a4d5e22ceea
+  languageName: node
+  linkType: hard
+
+"@tanstack/ai-utils@npm:^0.4.2":
+  version: 0.4.2
+  resolution: "@tanstack/ai-utils@npm:0.4.2"
+  checksum: 10c0/a9a6e351f5ef96b6eaec83fedaaeb20858f05a45c1b2c5c68189ca3c9cf07027ef7aa1807cd5c081b8cd4346d872f37ad0884621dc2dfd984733ba3246a0600d
+  languageName: node
+  linkType: hard
+
+"@tanstack/ai@npm:0.69.0, @tanstack/ai@npm:^0.69.0":
+  version: 0.69.0
+  resolution: "@tanstack/ai@npm:0.69.0"
+  dependencies:
+    "@ag-ui/core": "npm:1.0.0"
+    "@standard-schema/spec": "npm:^1.1.0"
+    "@tanstack/ai-event-client": "npm:^0.13.1"
+    "@tanstack/ai-utils": "npm:^0.4.2"
+    fast-json-patch: "npm:^3.1.1"
+    partial-json: "npm:^0.1.7"
+  peerDependencies:
+    "@opentelemetry/api": ">=1.9.0"
+  peerDependenciesMeta:
+    "@opentelemetry/api":
+      optional: true
+  checksum: 10c0/3ed2bf5de56934ac97dede9d240ba815abc3c71c5de1478309f2cf646218440dc7c79ad6f835116980a06603737dd9fc327c906611634b50bc9e17144ee5cdbd
+  languageName: node
+  linkType: hard
+
+"@tanstack/devtools-event-client@npm:^0.4.1":
+  version: 0.4.4
+  resolution: "@tanstack/devtools-event-client@npm:0.4.4"
+  bin:
+    intent: ./bin/intent.js
+  checksum: 10c0/81884dc159fb30f896a804f2c0da2c3de75da1a7686850d3d59dedce4d583ea533a0396f9d27fb72f04134116a6193d9e52396674c29adb8be31fb331224e746
+  languageName: node
+  linkType: hard
+
+"@tanstack/markdown@npm:^0.0.13":
+  version: 0.0.13
+  resolution: "@tanstack/markdown@npm:0.0.13"
+  peerDependencies:
+    octane: ">=0.1.12"
+    react: ">=18"
+  peerDependenciesMeta:
+    octane:
+      optional: true
+    react:
+      optional: true
+  checksum: 10c0/56a9bc68abc35e9b78f28e43fef270ca15cef636292ccb755d431d2649b731fa2ab667c4ab3ce4e74c3bd3333bc18d7b5e75dec6963129ad4d24807fdc537a61
+  languageName: node
+  linkType: hard
+
+"@tanstack/openai-base@npm:^0.14.0":
+  version: 0.14.0
+  resolution: "@tanstack/openai-base@npm:0.14.0"
+  dependencies:
+    "@tanstack/ai-utils": "npm:^0.4.2"
+    openai: "npm:^7.30.0"
+  peerDependencies:
+    "@tanstack/ai": ^0.69.0
+  checksum: 10c0/1e9557918e84a50265d7965e2fdcb2bc7b4a9e6ec5f14e617b85d038175f515edf08d6edc924b96f420d629f558befe6a326f07d571a1e65e058eb8987404ab1
+  languageName: node
+  linkType: hard
+
 "@tanstack/react-table@npm:^8.21.3":
   version: 8.21.3
   resolution: "@tanstack/react-table@npm:8.21.3"
@@ -11176,6 +11304,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"fast-json-patch@npm:^3.1.1":
+  version: 3.1.1
+  resolution: "fast-json-patch@npm:3.1.1"
+  checksum: 10c0/8a0438b4818bb53153275fe5b38033610e8c9d9eb11869e6a7dc05eb92fa70f3caa57015e344eb3ae1e71c7a75ad4cc6bc2dc9e0ff281d6ed8ecd44505210ca8
+  languageName: node
+  linkType: hard
+
 "fast-json-stable-stringify@npm:^2.1.0":
   version: 2.1.0
   resolution: "fast-json-stable-stringify@npm:2.1.0"
@@ -15422,6 +15557,33 @@ __metadata:
   languageName: node
   linkType: hard
 
+"openai@npm:^7.30.0":
+  version: 7.34.0
+  resolution: "openai@npm:7.34.0"
+  peerDependencies:
+    "@aws-sdk/credential-provider-node": ">=3.972.0 <4"
+    "@smithy/hash-node": ">=4.3.0 <5"
+    "@smithy/signature-v4": ">=5.4.0 <6"
+    undici: ">=5 <9"
+    ws: ^8.21.0
+    zod: ^3.25 || ^4.0
+  peerDependenciesMeta:
+    "@aws-sdk/credential-provider-node":
+      optional: true
+    "@smithy/hash-node":
+      optional: true
+    "@smithy/signature-v4":
+      optional: true
+    undici:
+      optional: true
+    ws:
+      optional: true
+    zod:
+      optional: true
+  checksum: 10c0/3ed2dd9fdd94bf1ffe8495b18c14354a21b18461a9fc5ef4558c0c3d5121d98062dd2b8721c5f894fa1411a5e4c1322ee2ae16a89003afb22011ad6697c07bc4
+  languageName: node
+  linkType: hard
+
 "opentracing@npm:>=0.14.7":
   version: 0.14.7
   resolution: "opentracing@npm:0.14.7"
@@ -15517,6 +15679,10 @@ __metadata:
     "@simplewebauthn/server": "npm:^13.3.3"
     "@swc/cli": "npm:^0.8.1"
     "@swc/core": "npm:^1.15.32"
+    "@tanstack/ai": "npm:0.69.0"
+    "@tanstack/ai-client": "npm:0.39.3"
+    "@tanstack/ai-openai": "npm:0.30.0"
+    "@tanstack/ai-react": "npm:0.30.4"
     "@tanstack/react-table": "npm:^8.21.3"
     "@tanstack/react-virtual": "npm:^3.14.9"
     "@types/addressparser": "npm:^1.0.3"
@@ -16230,6 +16396,13 @@ __metadata:
   version: 1.3.3
   resolution: "parseurl@npm:1.3.3"
   checksum: 10c0/90dd4760d6f6174adb9f20cf0965ae12e23879b5f5464f38e92fce8073354341e4b3b76fa3d878351efe7d01e617121955284cfd002ab087fba1a0726ec0b4f5
+  languageName: node
+  linkType: hard
+
+"partial-json@npm:^0.1.7":
+  version: 0.1.7
+  resolution: "partial-json@npm:0.1.7"
+  checksum: 10c0/cd5f994c3a5ca903918c028a6947ebc1d46459234c1c57c7ab98e234d8dca49cb46b05a71889ee422b39d1f66b95c59a5ce3a6ae06966aca95a8960ad20c12d2
   languageName: node
   linkType: hard
 

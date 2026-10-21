@@ -1,11 +1,14 @@
 # AI chat
 
-A workspace-gated streaming AI chat for the Outline fork: a hand-rolled Koa
-Server-Sent Events (SSE) route that proxies an OpenAI-compatible gateway to a
-React panel in the right sidebar, and — when a `sessionId` is supplied — persists
-the conversation server-side behind four RPC endpoints. The transport adds **no
-new npm dependencies**. TanStack AI is layered on this proven transport in slice 2
-(see [Slice 2 (deferred)](#slice-2-deferred)).
+A workspace-gated streaming AI chat for the Outline fork: a TanStack AI
+transport (`chat()` + `toServerSentEventsResponse`) over a Koa Server-Sent Events
+(SSE) route, rendered in a React panel in the right sidebar. The provider is an
+OpenAI-compatible gateway; when a session is supplied (`sessionId`, or the AG-UI
+`threadId` an `@tanstack/ai-client` caller sends), the conversation is persisted
+server-side behind four RPC endpoints. The response is an **AG-UI event stream**,
+not a provider passthrough: every frame is `data: {json}` with no `event:` field
+and no provider sentinel, and the run terminates with `RUN_FINISHED` or
+`RUN_ERROR`. See [Slice 2 (implemented)](#slice-2-implemented).
 
 > This is the **operational/usage** document: env vars, the settings toggle, and
 > curl recipes. The architecture — request path, the KB-scope grounding gate, the
@@ -16,30 +19,34 @@ new npm dependencies**. TanStack AI is layered on this proven transport in slice
 > This document describes what the code actually does. It is grounded in
 > `server/routes/api/ai/ai.ts`, `server/routes/api/ai/aiSessions.ts`,
 > `server/routes/api/ai/scope.ts`, `server/routes/api/ai/schema.ts`,
-> `app/utils/aiChat.ts`, `app/components/AIChat/`, `app/stores/AIChat*Store.ts`,
-> `server/env.ts`, `server/queues/tasks/CleanupDeletedUsersTask.ts`, and
+> `server/routes/api/ai/adapter.ts`, `server/routes/api/ai/middleware.ts`,
+> `server/routes/api/ai/messages.ts`, `server/routes/api/ai/tanstack.ts`,
+> `server/routes/api/ai/tools.ts`, `app/utils/aiChat.ts`,
+> `app/components/AIChat/`, `app/stores/AIChat*Store.ts`, `server/env.ts`,
+> `server/queues/tasks/CleanupDeletedUsersTask.ts`, and
 > `app/scenes/Settings/Features.tsx`.
 
 ## What it is
 
 - **Server**: `POST /api/ai.chat` (`server/routes/api/ai/ai.ts`) first checks
   whether the requesting user's own documents can *ground* the prompt (the
-  **scope gate**, `server/routes/api/ai/scope.ts`, see below), then proxies an
-  OpenAI-compatible gateway at `${AI_CHAT_BASE_URL}/chat/completions` with
-  `stream: true`, flushing the upstream response to the browser as SSE
-  (`Content-Type: text/event-stream`).
-- **Client**: `app/utils/aiChat.ts` opens the streaming request with `fetch`
-  (bypassing `ApiClient`) and yields incremental text deltas; a right-sidebar
-  panel (`app/components/AIChat/`) renders them, opened from a floating trigger
-  or the command bar.
+  **scope gate**, `server/routes/api/ai/scope.ts`, see below), then runs a
+  TanStack AI `chat()` against an OpenAI-compatible Chat Completions adapter
+  (`server/routes/api/ai/adapter.ts`). The run is framed as AG-UI over SSE by
+  `toServerSentEventsResponse` and bridged to Koa as a Node `Readable`.
+- **Client**: `app/utils/aiChat.ts` builds the TanStack SSE connection with
+  `fetchServerSentEvents` (bypassing `ApiClient`) and attaches the CSRF and
+  editor-version headers per request. `AIChatPanel` constructs a per-turn
+  headless `ChatClient`, maps AG-UI frames into `UIMessage.parts` (`text`,
+  `thinking`, `tool-call`) and renders them in the right sidebar.
 - **Persisted, server-authoritative sessions**: when a request carries a
-  `sessionId`, the conversation is stored in `ai_chat_sessions` and
+  `sessionId` or `threadId`, the conversation is stored in `ai_chat_sessions` and
   `ai_chat_messages` and the provider's prompt window is rebuilt from those rows.
-  The panel creates a session on the first send of a new chat and sends the new
-  turn alongside it, so a conversation always persists and survives closing the
-  panel. At the API level a request with neither `sessionId` nor `messages`
-  stores nothing. Four RPC endpoints expose the model — see
-  [The session API](#the-session-api).
+  The server mints the `runId`; the client cannot supply one. The panel creates a
+  session on the first send of a new chat and sends the new turn alongside it, so
+  a conversation always persists and survives closing the panel. At the API level
+  a request with neither `sessionId` nor `threadId` stores nothing. Four RPC
+  endpoints expose the model — see [The session API](#the-session-api).
 
 **Read-only with respect to your documents.** The route never writes a
 document, never modifies a collection, and never injects document content into
@@ -85,9 +92,10 @@ This is not prompt-level guidance: the boundary is enforced by retrieval, so an
 off-topic question cannot be answered from the model's parametric memory. It
 **fails closed** (a search failure refuses rather than passes through), and
 because authorization is the search provider's own, a prompt cannot be used to
-probe for documents the user cannot read. The refusal arrives as a normal SSE
-stream containing one `event: error` frame, so the panel renders it as ordinary
-text.
+probe for documents the user cannot read. The refusal arrives as a **synthetic
+AG-UI run** carrying the refusal text as ordinary assistant content, marked by
+the `X-AI-Chat-Kind: refusal` response header, so the panel renders it as
+ordinary transcript text rather than an error.
 
 > **The probe can be turned off with `AI_CHAT_GROUNDING=false`.** The local probe
 > is a lexical search over the caller's *Outline* documents. When the provider is
@@ -114,7 +122,7 @@ text.
 
 ## Environment variables
 
-All three are **optional**: the process boots without any of them and the
+All of these are **optional**: the process boots without any of them and the
 feature is a safe no-op. `AI_CHAT_MODEL` is, however, required to *enable* chat
 once a provider is configured.
 
@@ -122,7 +130,8 @@ once a provider is configured.
 |----------|----------|---------|
 | `AI_CHAT_BASE_URL` | no | Base URL of an OpenAI-compatible provider, e.g. a URL ending in `/v1`. The route appends `/chat/completions`. When unset, the feature is disabled. |
 | `AI_CHAT_API_KEY` | no | **SECRET.** Sent as `Authorization: Bearer <key>` to the provider. **Server-side only — never sent to the browser.** |
-| `AI_CHAT_MODEL` | **when `AI_CHAT_BASE_URL` is set** | Model id forwarded as `model` in the upstream request body. With a base URL configured but no model, the route returns **404** and no upstream request is made. |
+| `AI_CHAT_MODEL` | **when `AI_CHAT_BASE_URL` is set** | Model id handed to the TanStack adapter (`openaiCompatibleText`) and forwarded as `model` in the upstream request body. With a base URL configured but no model, the route returns **404** and no upstream request is made. |
+| `AI_CHAT_REASONING` | no | Reasoning effort requested from the provider: `minimal`, `low`, `medium` or `high`. Unset means the upstream body carries no reasoning field. Sent as the Chat Completions `reasoning_effort` through `modelOptions` (see [Panel behaviour](#panel-behaviour)); never read from the request body. |
 | `AI_CHAT_GROUNDING` | no | Whether the route runs the local grounding probe (§2). Defaults to `true`. Set to `false` when the provider is itself a retrieval agent that enforces the knowledge-base boundary — the local lexical probe would otherwise refuse prompts the provider can answer. |
 
 Defined in `server/env.ts` (the `AI_CHAT_*` block). Notes:
@@ -144,10 +153,14 @@ Defined in `server/env.ts` (the `AI_CHAT_*` block). Notes:
   exactly as if no provider were configured.
 - `AI_CHAT_API_KEY` is deliberately **not** `@Public`, so it is never included
   in the serialized environment exposed to the client.
-- Setting **none** of the three is a safe no-op (see
+- Setting **none** of them is a safe no-op (see
   [Fail-soft behavior](#fail-soft-behavior-when-env-is-unset)).
 
 ## How to run the spike
+
+The TanStack packages are ESM-only and are loaded dynamically
+(`server/routes/api/ai/tanstack.ts`), so the CommonJS server build still works:
+run `yarn build:server` before booting.
 
 1. Set the provider env vars (e.g. in `.env.development` locally, using the
    names from `.env.sample`). Locally this is the Hermes gateway, which is
@@ -206,24 +219,38 @@ curl -N -i -X POST http://localhost:3050/api/ai.chat \
   -H "x-csrf-token: <token>" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"<a question answerable from the workspace KB>"}]}'
-# => text/event-stream, incremental "data:" frames, no Content-Encoding
+# => HTTP/1.1 200
+# => Content-Type: text/event-stream
+# => data: {"type":"RUN_STARTED",...}
+# => data: {"type":"TEXT_MESSAGE_START",...}
+# => data: {"type":"TEXT_MESSAGE_CONTENT","delta":"…",...}
+# => data: {"type":"TEXT_MESSAGE_END",...}
+# => data: {"type":"RUN_FINISHED",...}
 ```
 
-Pass `"sessionId":"<uuid>"` instead of `messages` to run a session-backed turn;
-the response is the same shape but ends with an `event: complete` (or
-`event: truncated`) terminal frame, and the turn is written to storage.
+Each frame is one `data: {json}` line followed by a blank line. There is no
+`event:` field and no provider sentinel. A reasoning model may emit
+`REASONING_MESSAGE_*` frames before the answer, and a tool-enabled run emits
+`TOOL_CALL_*` frames between text frames. The terminal event is `RUN_FINISHED`
+when the provider returned a `finish_reason`, and `RUN_ERROR` when it did not.
+
+Pass `"sessionId":"<uuid>"` (or the AG-UI `"threadId":"<uuid>"`) instead of
+`messages` to run a session-backed turn; the response is the same AG-UI shape and
+the turn is written to storage.
 
 A missing or mismatched token yields **403** (JSON), thrown by
 `server/middlewares/csrf.ts`.
 
 > **The prompt must be grounded.** Sending `"hi"` is refused by the scope gate
-> (no matching document) and returns a `text/event-stream` containing a single
-> `event: error` frame — not an answer. To exercise the streaming path on the
-> command line, send a question whose terms appear in a document the calling
-> user can read.
+> (no matching document) and returns a `text/event-stream` carrying a synthetic
+> AG-UI run with `X-AI-Chat-Kind: refusal` — not an answer. To exercise the
+> provider path on the command line, send a question whose terms appear in a
+> document the calling user can read.
 
 **Refusal check.** A prompt the knowledge base cannot ground is refused **before**
-the provider is contacted:
+the provider is contacted. This recipe was verified against the request boundary
+the test suite drives (local PostgreSQL and Redis, real Koa route, provider never
+called); the verbatim output is in `.omo/evidence/21-docs.txt`:
 
 ```sh
 curl -N -i -X POST http://localhost:3050/api/ai.chat \
@@ -231,19 +258,29 @@ curl -N -i -X POST http://localhost:3050/api/ai.chat \
   -H "x-csrf-token: <token>" \
   -H "Content-Type: application/json" \
   -d '{"messages":[{"role":"user","content":"What is the capital of France?"}]}'
-# => HTTP/1.1 200 text/event-stream
-# => event: error
-# => data: {"error":"This assistant only answers from this workspace’s knowledge base","kind":"refusal"}
+# => HTTP/1.1 200
+# => Content-Type: text/event-stream
+# => X-AI-Chat-Kind: refusal
+# => data: {"type":"RUN_STARTED","runId":"<uuid>","timestamp":…}
+# => data: {"type":"TEXT_MESSAGE_START","messageId":"<uuid>","role":"assistant","timestamp":…}
+# => data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"<uuid>","delta":"This assistant only answers from this workspace’s knowledge base","timestamp":…}
+# => data: {"type":"TEXT_MESSAGE_END","messageId":"<uuid>","timestamp":…}
+# => data: {"type":"RUN_FINISHED","runId":"<uuid>","timestamp":…}
 ```
 
-**Request body.** `messages` is an array (1–50 items) of
-`{ role: "user" | "assistant", content: string }`. Per-message `content` is
-capped at 8000 characters (`AiChatMaxMessageLength`). The `system` role is
-**rejected** so a caller cannot override server-side instructions.
+The header is the only discriminator. The body is an ordinary, complete run, so
+the client's stream reader needs no special case; a consumer that ignores the
+header will read the refusal as assistant text, which is the intended fallback.
 
-`messages` is now **optional when `sessionId` is present**, and required
+**Request body.** `messages` is an array (1–50 items) in either accepted shape:
+the legacy `{ role: "user" | "assistant", content: string }` or the AG-UI
+`{ id, role, parts }`, where a `text` part carries `content`. Per-message text is
+capped at 8000 characters (`AiChatMaxMessageLength`). The `system` role is
+**rejected** in both shapes so a caller cannot override server-side instructions.
+
+`messages` is optional when `sessionId` or `threadId` is present, and required
 otherwise. A `.refine()` in `server/routes/api/ai/schema.ts` enforces exactly
-that: a body with neither `messages` nor `sessionId` is rejected with
+that: a body with neither is rejected with
 `messages is required when sessionId is not provided`. Send either
 
 ```sh
@@ -252,10 +289,22 @@ that: a body with neither `messages` nor `sessionId` is rejected with
 
 # session-backed turn — the window is rebuilt from storage
 -d '{"sessionId":"<uuid>"}'
+
+# AG-UI caller — threadId is the persisted session id
+-d '{"threadId":"<uuid>","messages":[{"id":"…","role":"user","parts":[{"type":"text","content":"…"}]}]}'
 ```
 
 Both may be sent together; `messages` then supplies only the **new** turn, while
-the rest of the window comes from the stored rows.
+the rest of the window comes from the stored rows. A `threadId` is never used to
+create a session: it must name one the caller already owns, or the request is
+**404**.
+
+> **Parsed body, not a request stream.** `koa-body` has already drained the
+> request into `ctx.request.body` before this route runs, so the route cannot
+> hand a stream to the TanStack library. It calls
+> `chatParamsFromRequestBody(ctx.request.body)` as the AG-UI shape check, and
+> proceeds when that throws for a legacy `{ role, content }` body because the zod
+> schema has already validated it.
 
 ## The session API
 
@@ -431,19 +480,22 @@ than a later translation of a key.
 
 ### How the client learns the outcome
 
-For a **session-backed** turn the server authors its own last frame:
+Every chat turn is an AG-UI run, so the terminal event is the run's own
+`RUN_FINISHED` (a whole answer) or `RUN_ERROR` (an interrupted one), not a
+server-authored sentinel. A stream that ends without a `finish_reason` raises a
+`RUN_ERROR` whose adapter code is `incomplete-stream`; the persistence
+middleware maps that code to `status: "truncated"`, an abort to `"aborted"` and
+any other error to `"error"`. A **stateless** turn (`messages` with neither
+`sessionId` nor `threadId`) returns this same AG-UI stream and stores nothing.
+The old guarantee that a stateless response matched the provider's bytes is
+retired: TanStack re-frames every chunk and appends its own terminal event, so
+no consumer may depend on the provider's wire format.
 
-```
-event: complete
-data: {"runId":"<uuid>","finishReason":"stop"}
-```
-
-or `event: truncated` with `finishReason: null`. The payload is `{ runId,
-finishReason }`, derived from the upstream `finish_reason` — **never** from
-`data: [DONE]`, which the OpenAI SDK consumes and never forwards. A session-backed
-stream that ends without an `event: complete` frame raises
-`AiChatError kind="truncated"`, however much text it produced. A **stateless**
-turn gets no terminal frame and completes whenever the stream ends.
+Refusal and busy are **not** `RUN_ERROR`: each is a complete synthetic run
+(`RUN_STARTED … RUN_FINISHED`) carrying ordinary assistant text, and the only
+thing that tells them apart from a real answer is the `X-AI-Chat-Kind:
+refusal|busy` response header. The client branches on that header alone, never
+on the message text or the run id.
 
 ### Retention
 
@@ -469,33 +521,53 @@ incidental.
   `AuthenticationHelper.methodToScope`, it resolves to `Scope.Write`, so the
   request needs header `x-csrf-token` matching the `__Host-csrfToken` (secure) or
   `csrfToken` (http) cookie.
-- **`fetch`/SSE bypasses `ApiClient`.** The CSRF and editor-version headers are
-  attached manually in `app/utils/aiChat.ts`.
+- **The TanStack connection bypasses `ApiClient`.** The CSRF and editor-version
+  headers are attached manually per request in `app/utils/aiChat.ts`, because
+  the token is read at call time and may rotate.
 - **`koa-compress` is bypassed** via `ctx.compress = false`. SSE must not be
   compressed — buffering defeats incremental delivery. Default `compressible`
   filtering would otherwise match `text/event-stream`.
 - **Socket timeout.** The server-wide timeout is connection-level
   (`server.setTimeout(env.REQUEST_TIMEOUT)`, ~10s), which would cut a slow
   first token. The route calls `ctx.req.setTimeout(0)` to disable it per request.
-- **Node stream bridge.** `Readable.fromWeb(res.body)` is assigned to `ctx.body`
-  because the `apiResponse` middleware skips `Readable` (and `Buffer`), so the
-  stream is piped through untouched.
+- **Node stream bridge.** `toServerSentEventsResponse` returns a web
+  `ReadableStream`, so `Readable.fromWeb(response.body)` is assigned to
+  `ctx.body`: the `apiResponse` middleware skips `Readable` (and `Buffer`), so
+  the stream is piped through untouched. The synthetic refusal and busy runs
+  assign a Node `Readable` directly. A bare web `ReadableStream` is never
+  assigned to `ctx.body`.
 - **Abort on disconnect.** An `AbortController` aborts the upstream request when
   the client disconnects (`ctx.res.on("close", …)`, not `ctx.req` — see the
   design doc), so the provider connection is not left open. A mid-stream upstream
-  error is interposed as an in-band `event: error` SSE frame rather than a broken
-  pipe.
-- **Ownership is resolved before the stream exists.** With a `sessionId`, a
-  non-owned session is a JSON **404**, never a 200 carrying SSE, and the rows are
-  never loaded.
+  error is interposed as an in-band `RUN_ERROR` frame rather than a broken
+  pipe, and its provider text is replaced with a generic message so upstream
+  detail never reaches the browser.
+- **Ownership is resolved before the stream exists.** With a `sessionId` or
+  `threadId`, a non-owned session is a JSON **404**, never a 200 carrying SSE,
+  and the rows are never loaded.
 - **The window comes from storage, not the client.** `resolveUpstreamMessages`
   rebuilds the provider prompt from committed rows, re-asserting the role
   allow-list per row, so a replayed `messages` array cannot rewrite a stored
   conversation.
-- **The response ends only after the turn is durable.** The terminal frame is
-  written before the stream ends and the assistant row is committed before
-  `end()`, so a client that reloads history the moment it sees the frame cannot
-  race the insert.
+- **The response ends only after the turn is durable.** TanStack awaits the
+  terminal hook (`onFinish` / `onAbort` / `onError`) before the SSE stream
+  closes, and the persistence middleware awaits the row write inside that hook,
+  so a client that reloads history the moment the run finishes cannot race the
+  insert.
+- **Tools are the server's own, read-only.** `server/routes/api/ai/tools.ts`
+  exports one frozen allowlist — `search_workspace` — passed to `chat({ tools })`
+  as-is. The request body is never read for tools, and `forwardedProps` is
+  never spread into the run, so a client cannot add a tool.
+- **The in-flight lock is bounded and released on every exit.** The Redis key
+  `aiChat:inflight:{userId}:{sessionId}` is taken with `SET … EX 900 NX` and
+  released by compare-and-delete on finish, error, abort and refusal. The TTL is
+  900s because the unit that matters is a **tool loop**, not one model call
+  (roughly 5 rounds × (120s model + 5s tool) ≈ 625s worst case); a lock that
+  expired mid-stream would silently defeat the cap, so the cost is pushed into
+  the crash case.
+- **Reasoning is an operator decision.** `AI_CHAT_REASONING` sets the Chat
+  Completions `reasoning_effort` through `modelOptions`; the request body never
+  carries a reasoning level, and an unconfigured value omits the field entirely.
 
 ## Panel behaviour
 
@@ -511,12 +583,16 @@ until the user closes it. A few UI facts worth knowing:
 - **Source citations stay in the panel.** An assistant answer's bare URLs render
   as links; a same-origin document URL navigates client-side, so the panel stays
   mounted and open beside the document.
-- **Reasoning is a collapsed disclosure.** A `choices[0].delta.reasoning_content`
-  chunk is shown behind a collapsed `<details>` whose summary reads "Loading…",
-  never as the reply; it is live-only and never persisted. Mid-turn narration
-  still arrives as `content` until Hermes is set
-  `display.platforms.api_server.interim_assistant_messages: false` — see
-  [design §3.2](./AI-CHAT-DESIGN.md#32-why-the-client-needed-no-rewrite).
+- **Reasoning is a collapsed, live-only disclosure.** A `thinking` part is shown
+  behind a collapsed `<details>` whose summary reads "Loading…", never as the
+  reply. It exists only for the in-flight turn — the panel filters it out once
+  the turn finalizes — and it is never persisted, so a reopened conversation
+  shows the answer without the thinking behind it. The provider's
+  `reasoning_content` reaches the client as AG-UI `REASONING_MESSAGE_*` frames.
+- **Tool calls are read-only cards.** A `tool-call` part renders the tool name,
+  its input and its output, with a pending state while the call is still
+  running. There is no approval affordance; that belongs to the deferred
+  interrupts slice.
 - **Single-line composer.** The input is `type="text"`, not a textarea.
 - **Enter sends.** `Input` only fires `onRequestSubmit` on **Cmd+Enter**; the
   panel handles plain `Enter` locally and calls `preventDefault()` so the browser
@@ -536,8 +612,14 @@ until the user closes it. A few UI facts worth knowing:
   panel — header, transcript and composer — fills the screen; the toggle is
   header-only, so on mobile, where the panel is already a drawer, it is not shown.
 - **One turn in flight per session.** A second send while a turn is streaming is
-  refused in-band with `kind: "busy"`; the panel surfaces it as a
-  retry-later message rather than as an error banner.
+  refused by the server with a synthetic run marked `X-AI-Chat-Kind: busy`; the
+  panel surfaces it as a retry-later message rather than as an error banner,
+  and **puts the typed text back in the composer** so the retry is actionable.
+- **A send while streaming is queued by default.** The `whenBusy` prop selects
+  `queue` (default), `drop` or `interrupt`. Queued messages live in panel state,
+  never in the transcript and never in a stored row, and each one can be
+  cancelled on its own. The queue drains only after a settled turn; a failed or
+  interrupted turn discards it.
 
 The panel is rendered with `SidebarLayout scrollable={false}` so the transcript
 scrolls internally and the composer stays pinned. This and the clickability
@@ -545,9 +627,10 @@ traps behind the composer's flex rules are documented in
 [design doc §6](./AI-CHAT-DESIGN.md#6-design-constraints-the-bugs-paid-for).
 
 > **Not browser-verified.** Browser automation is unavailable on this host, so
-> the panel has never been rendered in a browser. Streaming was proven by an
-> authenticated round trip against `POST /api/ai.chat`; the panel's
-> cookie+CSRF path was verified by code reading only.
+> the panel has never been rendered in a browser. The transport was proven by an
+> authenticated round trip against `POST /api/ai.chat` and by the server and
+> client test suites; the panel's cookie+CSRF path was verified by code reading
+> only.
 
 ## Fail-soft behavior when env is unset
 
@@ -569,7 +652,7 @@ When `AI_CHAT_BASE_URL` **is** set but `AI_CHAT_MODEL` is unset:
 
 Setting only `AI_CHAT_API_KEY`/`AI_CHAT_MODEL` (without `AI_CHAT_BASE_URL`) is
 the one exception: it is **rejected at boot** by the `@CannotUseWithout`
-validator (`process.exit(1)`) — it is not a runtime crash. Leave all three unset
+validator (`process.exit(1)`) — it is not a runtime crash. Leave them all unset
 for a clean disabled state.
 
 ## Production open items (out of scope)
@@ -581,21 +664,62 @@ The current feature targets local development. Before production, address:
 - Reverse-proxy SSE settings: `proxy_buffering off` and a raised
   `proxy_read_timeout`, so the proxy does not buffer or time out the stream.
 
-## Slice 2 (deferred)
+## Slice 2 (implemented)
 
-Slice 2 layers TanStack AI on the transport proven above. Not implemented in
-slice 1. Facts to carry forward:
+Slice 2 replaced the hand-rolled provider proxy with the TanStack AI transport.
+It is implemented and shipped; what follows is the boundary of that work.
 
-- **Dependencies** (pin exact versions): `@tanstack/ai`, `@tanstack/ai-client`,
-  `@tanstack/ai-react`, `@tanstack/ai-openai`.
-- **`tsconfig.json` `paths` fix.** `tsconfig.json:17` sets
-  `resolvePackageJsonExports: false`, which requires a `paths` entry for the
-  TanStack AI packages; follow the existing precedent in `tsconfig.json:37-40`.
-- **Read the request body defensively.** Use
-  `chatParamsFromRequestBody(ctx.request.body)` because `koa-body` has already
-  drained the request stream into `ctx.request.body` before the route runs.
-- **Keep the read-only tool allowlist.** Expose server-side tools only; ignore
-  client-supplied `params.tools`; **never** spread `forwardedProps`.
-- **Reuse slice 1's mechanics**: abort-on-disconnect, error taxonomy,
-  `ctx.compress = false`, and `ctx.req.setTimeout(0)`.
-- **Avoid `/mcp-apps`.**
+**Shipped:**
+
+- `@tanstack/ai`, `@tanstack/ai-client`, `@tanstack/ai-react` and
+  `@tanstack/ai-openai` pinned to exact versions.
+- An ESM loader seam (`server/routes/api/ai/tanstack.ts`) because all four
+  packages publish an `import`-only exports map and the server build emits
+  CommonJS. The loader assembles a real `import()` that swc cannot rewrite to
+  `require()`.
+- `openaiCompatibleText` with `api: "chat-completions"`
+  (`server/routes/api/ai/adapter.ts`), the only place the adapter is built.
+- `chat()` + `toServerSentEventsResponse` on `POST /api/ai.chat`, with the
+  response bridged to Koa as a Node `Readable` (`Readable.fromWeb`).
+- The `threadId` alias: the server resolves `body.sessionId ?? body.threadId`,
+  mints its own `runId`, and ignores any client-supplied `runId`, `tools` or
+  `forwardedProps`.
+- A frozen, read-only server tool allowlist
+  (`server/routes/api/ai/tools.ts`, `search_workspace`) passed to
+  `chat({ tools })`; client-supplied tools are ignored.
+- Reasoning through `AI_CHAT_REASONING` → `modelOptions.reasoning_effort`, with
+  thinking rendered live-only as a collapsed disclosure.
+- AG-UI `UIMessage.parts` on the client: `text`, `thinking` and `tool-call`
+  render from one parts model, while the stored transcript stays flat.
+- A per-turn headless `ChatClient` (not `useChat`) because the persisted session
+  id only exists after the first send, and a `threadId` is fixed at construction.
+- The `whenBusy` queue (`queue` / `drop` / `interrupt`) in panel state, with a
+  per-item cancel and the busy-text restore.
+- `chatParamsFromRequestBody(ctx.request.body)` as the AG-UI body check, since
+  `koa-body` already parsed the request.
+- The in-flight lock TTL raised to **900s** and justified by the tool-loop worst
+  case; the lock is released on finish, error, abort and refusal.
+- Server tests assert the AG-UI contract (no `event:` names, no provider
+  sentinel); client tests assert the parts model, tools, reasoning and queue.
+
+**Still deferred (unchanged from the plan):**
+
+- **Subagents and interrupts.** No `defineAgent`, no approval affordance, no
+  human-in-the-loop tool gate.
+- **Resumable streams.** A dropped connection is not resumed; the turn is
+  recorded as truncated or aborted and the client retries from scratch.
+- **TanStack persistence.** The library's own persistence is not used; the
+  server store remains authoritative.
+- **Client tools.** Never accepted; the allowlist is the only source of tools.
+- **Token usage.** No usage capture or display; the provider's usage tail is not
+  surfaced.
+
+**Carry-forward engineering facts:**
+
+- `tsconfig.json` sets `resolvePackageJsonExports: false`, so the TanStack
+  packages need `paths` entries (the precedent is the `vite` entry).
+- The packages are ESM-only; any new runtime import must go through
+  `loadTanstack()` / `loadOpenaiCompatible()`, never a static import.
+- Keep slice 1's mechanics: abort-on-disconnect, the eight-kind client error
+  taxonomy, `ctx.compress = false`, and `ctx.req.setTimeout(0)`.
+- Avoid `/mcp-apps`.

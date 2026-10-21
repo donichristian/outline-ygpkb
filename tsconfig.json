@@ -37,7 +37,10 @@
       // Vite 8 and its plugins ship types only via their exports map, which
       // resolvePackageJsonExports disables; point tsc at their declaration entries.
       "vite": ["./node_modules/vite/dist/node/index.d.ts"],
-      "@vitejs/plugin-react": ["./node_modules/@vitejs/plugin-react/dist/index.d.ts"]
+      "@vitejs/plugin-react": ["./node_modules/@vitejs/plugin-react/dist/index.d.ts"],
+      // @tanstack/ai-openai's `compatible` subpath ships types only via its exports
+      // map, which resolvePackageJsonExports disables; point tsc at its declaration entry.
+      "@tanstack/ai-openai/compatible": ["./node_modules/@tanstack/ai-openai/dist/esm/compatible/index.d.ts"]
     }
   },
   "exclude": ["node_modules", "build", "server/migrations"]

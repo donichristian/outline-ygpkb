@@ -1,11 +1,11 @@
 ---
 title: AI Chat — System Design
 description: >-
-  Request path, KB-scope grounding, session persistence, the server-authored
-  terminal frame, streaming transport and failure modes for the workspace-gated
-  AI chat panel.
+  Request path, KB-scope grounding, session persistence, the TanStack AI
+  transport, the AG-UI frame contract and failure modes for the
+  workspace-gated AI chat panel.
 status: shipped
-last_updated: 2026-10-15
+last_updated: 2026-10-21
 related:
   - docs/AI-CHAT.md
   - docs/HERMES-OUTLINE-ARCHITECTURE.md
@@ -14,9 +14,9 @@ related:
 # AI Chat — System Design
 
 Architecture for the workspace-gated AI chat panel: how a keystroke in the
-right sidebar becomes a streamed answer from the Hermes gateway, how the
-knowledge-base boundary is enforced, where the conversation is stored, and what
-happens when any of it fails.
+right sidebar becomes a streamed answer from an OpenAI-compatible gateway
+through the TanStack AI transport, how the knowledge-base boundary is enforced,
+where the conversation is stored, and what happens when any of it fails.
 
 For how to *run and use* the feature — env vars, the settings toggle, curl
 recipes — see [docs/AI-CHAT.md](./AI-CHAT.md). That document is the operational
@@ -24,28 +24,31 @@ guide; this one is the design.
 
 ## 1. Scope and shape
 
-The feature is a **streaming proxy, a retrieval gate, and a server-authoritative
-session store**:
+The feature is a **TanStack AI transport, a retrieval gate, and a
+server-authoritative session store**:
 
 - **Server** — `POST /api/ai.chat` (`server/routes/api/ai/ai.ts`) validates the
   conversation, decides whether the workspace knowledge base can ground it, then
-  proxies `${AI_CHAT_BASE_URL}/chat/completions` with `stream: true` and
-  re-emits the upstream byte stream to the browser as Server-Sent Events.
-- **Client** — `app/utils/aiChat.ts` opens the request with a raw `fetch`
-  (bypassing `ApiClient`) and yields incremental text deltas; `AIChatPanel`
-  renders them into the right sidebar.
+  runs `chat()` from `@tanstack/ai` against a Chat Completions adapter
+  (`server/routes/api/ai/adapter.ts`). The run is framed as AG-UI over SSE by
+  `toServerSentEventsResponse` and bridged to Koa as a Node `Readable`. The
+  provider's bytes are re-framed, not proxied.
+- **Client** — `app/utils/aiChat.ts` builds the TanStack SSE connection
+  (`fetchServerSentEvents`) with the CSRF and editor-version headers;
+  `AIChatPanel` runs a per-turn headless `ChatClient`, maps AG-UI frames into
+  `UIMessage.parts` (`text`, `thinking`, `tool-call`) and renders them into the
+  right sidebar.
 - **Persistence** — server-authoritative. Two tables carry the conversation:
   `ai_chat_sessions` (one row per conversation, owned by a `(teamId, userId)`
   pair) and `ai_chat_messages` (one row per turn, ordered by `seq`, carrying
   `role`, `content`, `status` and `runId`). When a request supplies a
-  `sessionId`, the route appends the turn, streams the answer, and writes the
-  terminal assistant row; when it does not, nothing is stored and the response
-  is a pure byte proxy, byte-identical to the pre-turns wire format. Four RPC
-  endpoints expose the model (`server/routes/api/ai/aiSessions.ts`):
-  `ai.sessions.create`, `ai.sessions.list`, `ai.sessions.delete` and
-  `ai.messages.list`. On the client, `AIChatSessionsStore` and
-  `AIChatMessagesStore` (`app/stores/`) hold the same data and are the only
-  thing the panel reads.
+  `sessionId` or `threadId`, the route appends the turn, streams the answer, and
+  writes the terminal assistant row; when it supplies neither, nothing is
+  stored. Four RPC endpoints expose the model
+  (`server/routes/api/ai/aiSessions.ts`): `ai.sessions.create`,
+  `ai.sessions.list`, `ai.sessions.delete` and `ai.messages.list`. On the
+  client, `AIChatSessionsStore` and `AIChatMessagesStore` (`app/stores/`) hold
+  the same data and are the only thing the panel reads.
 
 The database reads on the path are the ownership lookup, the upstream window
 rebuild (§2.3), the grounding probe (§4), and — for a session-backed turn —
@@ -55,15 +58,17 @@ the `seq` allocation behind each write.
 
 Diagram A traces a single **session-backed** send from keystroke to the stored
 answer: the ownership check, the per-session in-flight lock, the grounding
-refusal branch, the three stream exits, and the server-authored terminal frame.
-A stateless send (`messages` with no `sessionId`) takes the same path with every
-storage step short-circuited — no row, no lock, no terminal frame.
+refusal branch, the TanStack run, the terminal hooks, and the frames the client
+consumes. A stateless send (`messages` with neither `sessionId` nor `threadId`)
+takes the same path with every storage step short-circuited — no row, no lock,
+and no persistence work.
 
 ```mermaid
 sequenceDiagram
 autonumber
 actor User
 participant Panel as "AIChatPanel (client)"
+participant Client as "ChatClient (per turn)"
 participant Util as "app/utils/aiChat.ts"
 participant MW as "Koa middleware chain"
 participant Route as "POST /api/ai.chat"
@@ -71,102 +76,95 @@ participant Store as "ai_chat_sessions / ai_chat_messages"
 participant Scope as "scope.ts findUngroundedReason"
 participant Search as "SearchProviderManager"
 participant Lock as "Redis aiChat:inflight:{user}:{session}"
-participant Hermes as "Hermes gateway /chat/completions"
+participant Tan as "TanStack chat() + adapter"
+participant Hermes as "OpenAI-compatible gateway"
 
 User->>Panel: type text, press Enter or click Send
-Panel->>Panel: "handleKeyDown catches plain Enter (Input only fires onRequestSubmit on Cmd+Enter)"
-Panel->>Panel: "handleSubmit appends user + empty assistant turn, sets isStreaming"
-Panel->>Util: "streamAiChat(history, {signal, sessionId})"
-Util->>MW: "fetch('/api/ai.chat') with credentials same-origin + x-csrf-token + x-editor-version"
-Note over MW: "requestContext, koa-body, coalesceBody, userAgent, requestTracer,<br/>apiResponse, apiErrorHandler, editor, apiContext, verifyCSRFToken"
+Panel->>Panel: "handleSubmit applies whenBusy (queue/drop/interrupt) and clears the composer"
+Panel->>Util: "createAiChatConnection({ onKind })"
+Panel->>Client: "new ChatClient({ connection, threadId: targetSessionId })"
+Client->>Util: "sendMessage(content) -> AG-UI body"
+Util->>MW: "fetch POST /api/ai.chat with credentials + x-csrf-token + x-editor-version"
+Note over MW: "requestContext, koa-body, coalesceBody, apiResponse,<br/>apiErrorHandler, apiContext, verifyCSRFToken"
 MW->>Route: dispatch to router
-Route->>Route: "auth({type: [APP]}) - API keys cannot call this route"
-Route->>Route: "rateLimiter(TenPerMinute)"
-Route->>Route: "validate(T.AiChatSchema)"
+Route->>Route: "auth APP + rateLimiter(TenPerMinute) + validate(AiChatSchema)"
+Route->>Route: "sessionId = body.sessionId ?? body.threadId; runId = uuidv4()"
 alt "workspace pref off, AI_CHAT_BASE_URL unset, or AI_CHAT_MODEL unset"
-Route-->>Util: "404 NotFoundError - indistinguishable from unknown route"
+Route-->>Util: "404 NotFoundError"
 else gate open
-Route->>Route: "runId = uuidv4(), stamped on both rows of the turn"
 Route->>Route: "AIChatSession.findOwned(sessionId, user)"
-alt "sessionId present but not owned (or absent)"
+alt "sessionId/threadId present but not owned"
 Route-->>Util: "404 NotFoundError as JSON, before any write or stream"
-else ownedSession (or stateless: sessionId absent)
-Route->>Lock: "SET aiChat:inflight:{user}:{session} = runId EX 300 NX"
-alt "lock not acquired - a turn is already streaming"
-Route-->>Util: "200 SSE, one event: error frame, kind=busy"
-Util-->>Panel: "AiChatError kind=busy"
-Panel-->>User: render 'another answer is still being generated'
+else ownedSession (or stateless: neither id)
+Route->>Lock: "SET aiChat:inflight:{user}:{session} = runId EX 900 NX"
+alt "lock not acquired"
+Route-->>Util: "200 SSE, synthetic AG-UI run, X-AI-Chat-Kind: busy"
+Util-->>Panel: "header observed; typed text restored in composer"
 else acquired
-Route->>Store: "appendTurn(user, content, completed) when the newest client message is a user turn"
-Note over Route,Store: "Written before the grounding gate, so a refusal is recoverable: reopening shows the question asked, not an orphan refusal"
-Route->>Route: "resolveUpstreamMessages - window rebuilt from committed rows, capped to 50"
+Route->>Store: "appendTurn(user, messageText(last message), completed) when the newest client message is a user turn"
+Route->>Route: "resolveUpstreamMessages - window from committed rows or client array"
 Route->>Scope: "findUngroundedReason(user, resolvedMessages)"
-Scope->>Scope: "normalize, drop WeakTerms, cap 8 OR-joined terms"
-Scope->>Search: "getProvider().searchForUser(user, {query, archivedAt isNull, limit 1})"
-Search-->>Scope: "{ total }"
+Scope->>Search: "searchForUser(query, limit 1)"
 alt "total === 0 or search threw (fails closed)"
-Scope-->>Route: "ungroundedReason"
-Route->>Store: "appendTurn(assistant, refusal string, completed) - locale frozen at send time"
-Route-->>Util: "200 SSE, one event: error frame (kind=refusal)"
+Route->>Store: "appendTurn(assistant, refusal string, completed)"
+Route-->>Util: "200 SSE, synthetic AG-UI run, X-AI-Chat-Kind: refusal"
 Route->>Lock: "compare-and-delete release"
-Util-->>Panel: "AiChatError kind=refusal"
-Panel-->>User: render refusal as ordinary text
-else "total > 0 (grounded)"
-Route->>Route: "ctx.compress = false, ctx.req.setTimeout(0)"
-Route->>Route: "register abort on ctx.res close"
-Route->>Hermes: "fetch .../chat/completions, model, stream true, messages"
-alt "upstream not ok or empty body"
-Route-->>Util: "ctx.throw(res.status) as JSON error"
-Route->>Lock: "compare-and-delete release"
-Util-->>Panel: "AiChatError kind=http with status"
-else "upstream streaming"
-Hermes-->>Route: "chunked SSE bytes (data:, : keepalive, event: hermes.tool.progress)"
-Route->>Route: "inspectChunk accumulates assistantText + lastFinishReason"
-Route->>Route: "Readable.fromWeb piped through wrapper Readable"
-Route-->>Util: "SSE frames, ctx.compress false + setTimeout 0 flush per chunk"
-Util->>Util: "parseFrame drops comments, skips frames without choices"
-Util->>Util: "extractDelta yields choices[0].delta.content"
-Util-->>Panel: "{ type delta, text }"
-Panel-->>User: transcript appends text, blinking cursor
+Panel-->>User: "refusal rendered as ordinary assistant text"
+else grounded
+Route->>Tan: "chat({ adapter, messages, threadId, runId, tools: allowlist, context: user, middleware })"
+Tan->>Hermes: "POST /chat/completions, model, stream true"
+Hermes-->>Tan: "Chat Completions chunks"
+Tan->>Route: "AG-UI events: RUN_STARTED, TEXT_MESSAGE_*, TOOL_CALL_*, REASONING_MESSAGE_*"
+Route-->>Util: "SSE data: {json} frames, ctx.compress false, setTimeout 0"
+Util-->>Client: "AG-UI events"
+Client-->>Panel: "UIMessage.parts (text, thinking, tool-call)"
+Panel-->>User: "transcript updates, blinking cursor"
 alt "client disconnects or user clicks Stop"
-Panel->>Util: "abort()"
-Util->>Hermes: "signal aborts upstream fetch"
-Route->>Route: "finish(aborted)"
+Panel->>Client: "abort()"
+Client->>Tan: "AbortController signal"
+Tan->>Hermes: "abort upstream fetch"
+Tan->>Route: "onAbort()"
+Route->>Store: "appendTurn(assistant, partial text, aborted)"
+Route->>Lock: "compare-and-delete release"
 else "upstream mid-stream error"
-Route-->>Util: "event: error frame pushed into the same stream"
-Util-->>Panel: "AiChatError kind=stream"
-Route->>Route: "finish(aborted if clientGone else error)"
+Tan->>Route: "RUN_ERROR with a generic message"
+Route->>Store: "appendTurn(assistant, partial text, error)"
+Route->>Lock: "compare-and-delete release"
 else "stream completes"
-Hermes-->>Route: "last frame carrying finish_reason (data: [DONE] is consumed by the SDK, never forwarded)"
-Route->>Route: "finish(completed if lastFinishReason else truncated)"
+Tan->>Route: "RUN_FINISHED when finish_reason is present; RUN_ERROR incomplete-stream otherwise"
+Route->>Store: "appendTurn(assistant, text, completed | truncated)"
+Route->>Lock: "compare-and-delete release"
 end
-Route->>Route: "author terminal frame {runId, finishReason} as event: complete | truncated"
-Route->>Store: "appendTurn(assistant, assistantText, status) in its own transaction"
-Route->>Lock: "compare-and-delete release, then end()"
-Route-->>Util: "terminal frame"
-Util-->>Panel: "generator returns; a session-backed turn without the frame raises kind=truncated"
+Route-->>Util: "stream closes after the row is durable"
+Util-->>Panel: "settled; AIChatMessagesStore.list() re-reads committed rows"
 end
 end
 end
 end
 ```
 
-### 2.0.1 What the diagram asserts that the old one did not
+### 2.0.1 What the diagram asserts
 
+- **The server owns the identifiers.** `sessionId` is resolved once as
+  `body.sessionId ?? body.threadId`; the `runId` is minted server-side. A
+  client-supplied `runId`, `tools` or `forwardedProps` is never forwarded.
 - **Storage is server-authoritative.** The upstream window is rebuilt from
   committed rows (`resolveUpstreamMessages`), never from the client array, once
-  a `sessionId` is present. A client cannot rewrite history by replaying a
+  a session id is present. A client cannot rewrite history by replaying a
   different `messages` array alongside a session id.
-- **The terminal frame is authored here.** `finish()` writes
-  `event: complete` or `event: truncated` with `{ runId, finishReason }`. It is
-  never derived from `data: [DONE]` — the OpenAI SDK consumes that sentinel and
-  does not forward it, so nothing downstream can rely on seeing it. See §3.3.
-- **The busy refusal is in-band.** A second turn on the same session gets a
-  200 `text/event-stream` carrying one `event: error` frame with
-  `kind: "busy"`, not a bare status. The client is already expecting a stream
-  from this endpoint and has no frame to attach the message to otherwise.
+- **The transport owns the terminal event.** TanStack emits `RUN_FINISHED` when
+  the provider returned a `finish_reason`, and `RUN_ERROR` when the stream ended
+  without one. The persistence middleware maps the adapter's
+  `incomplete-stream` code to `truncated`. There is no hand-authored terminal
+  frame. See §3.3.
+- **Refusal and busy are synthetic runs, not error frames.** Each is a complete
+  five-event run carrying ordinary assistant text; the only discriminator is
+  the `X-AI-Chat-Kind` response header. The client is already expecting a
+  stream from this endpoint, so a bare status would leave it with nothing to
+  attach the message to.
 - **Every exit releases the lock**, including the two that return before a
-  stream exists (`refusal` and the provider-unreachable `throw`).
+  TanStack run exists (`busy` and `refusal`) and the three terminal hooks
+  (`onFinish`, `onAbort`, `onError`).
 
 ### 2.1 Middleware chain
 
@@ -188,41 +186,53 @@ Per-route the stack is `auth({ type: [AuthenticationType.APP] })` →
 - **CSRF is enforced for cookie transport.** `verifyCSRFToken()` skips requests
   whose transport is not `cookie`, and skips anything callable with
   `Scope.Read`. `POST /api/ai.chat` is not, so a cookie-authenticated request
-  must carry `x-csrf-token` matching the CSRF cookie. `streamAiChat` attaches it
-  manually from `getCSRFToken()`.
+  must carry `x-csrf-token` matching the CSRF cookie. `createAiChatConnection`
+  attaches it manually from `getCSRFToken()` on every request.
 
 ### 2.2 Body shape
 
-`validate(T.AiChatSchema)` accepts **either** `{ messages: [{ role, content }] }`
-— **not** `{ prompt }` — **or** `{ sessionId }`, and the two forms are mutually
-exclusive in practice: a `.refine()` in `server/routes/api/ai/schema.ts` requires
-at least one of the two, so `messages` is **optional when `sessionId` is present**
-and required otherwise. When both are supplied, `messages` supplies only the
-*new* turn; the window the provider sees is rebuilt from storage (§2.3). The
-panel sends **both** on every session-backed turn — it creates the session on
-the first send of a new chat and always includes the outgoing turn, because a
-turn sent with the session alone gives the server nothing to append and an empty
-prompt.
+`validate(T.AiChatSchema)` accepts either the AG-UI body
+`{ threadId, messages: UIMessage[] }` or the legacy RPC body
+`{ sessionId, messages: [{ role, content }] }`. `messages` is **optional when
+`sessionId` or `threadId` is present** and required otherwise; the `.refine()`
+in `server/routes/api/ai/schema.ts` enforces that split. When both are supplied,
+`messages` supplies only the *new* turn; the window the provider sees is rebuilt
+from storage (§2.3). The panel sends both on every session-backed turn — it
+creates the session on the first send of a new chat and always includes the
+outgoing turn, because a turn sent with the session alone gives the server
+nothing to append and an empty prompt.
 
-Either way the array holds 1–50 messages (`AiChatMaxMessages`), each `content`
-1–8000 characters (`AiChatMaxMessageLength`), and `role` is restricted to `user`
-or `assistant`: the `system` role is rejected at the schema so a caller cannot
-inject server-side instructions. `sessionId` is a `z.uuid()`.
+Either way the array holds 1–50 messages (`AiChatMaxMessages`). A legacy
+message carries 1–8000 characters of `content`; an AG-UI message carries `parts`,
+whose `text` parts are flattened with `messageText` and capped at the same
+`AiChatMaxMessageLength`. `role` is restricted to `user` or `assistant` in both
+shapes: the `system` role is rejected at the schema so a caller cannot inject
+server-side instructions. `sessionId` and `threadId` are `z.uuid()`; `threadId`
+is only ever used to look up a session the caller already owns, never to create
+one.
+
+Because `koa-body` has already drained the request into `ctx.request.body`, the
+route cannot hand a stream to TanStack. It calls
+`chatParamsFromRequestBody(ctx.request.body)` as the AG-UI shape check and
+proceeds when that throws for a legacy `{ role, content }` body, which the zod
+schema has already validated.
 
 ### 2.3 The upstream window is rebuilt from storage
 
 `resolveUpstreamMessages` (`server/routes/api/ai/ai.ts`) is what makes the store
 authoritative rather than advisory:
 
-- **No `sessionId`** — the schema has already guaranteed `messages`, so the
+- **No session id** — the schema has already guaranteed `messages`, so the
   client array is the whole conversation and nothing is read or written.
-- **With a `sessionId`** — ownership is resolved first, then the rows are read
-  in `seq ASC` order and reduced by `toUpstreamMessages`, which keeps only
-  `role` and `content` (dropping `seq`, `status`, `runId`, `sessionId`,
-  `teamId`, `userId`) and slices to the most recent `AiChatMaxMessages`. The
-  allow-list is **re-asserted at runtime** on every row rather than trusted from
-  the column type, so a stored role outside the provider's set cannot be
-  forwarded.
+- **With a `sessionId` or `threadId`** — ownership is resolved first, then the
+  rows are read in `seq ASC` order and reduced by `toUpstreamMessages`, which
+  keeps only `role` and `content` (dropping `seq`, `status`, `runId`,
+  `sessionId`, `teamId`, `userId`) and slices to the most recent
+  `AiChatMaxMessages`. `messageText` flattens AG-UI `parts` to `text` first, so
+  a legacy `{ role, content }` message and an equivalent AG-UI message produce
+  the same provider window. The allow-list is **re-asserted at runtime** on
+  every row rather than trusted from the column type, so a stored role outside
+  the provider's set cannot be forwarded.
 
 Because ownership is checked before the read, a session belonging to another
 user raises `NotFoundError` **without loading a single row**, and before the
@@ -231,17 +241,19 @@ carries SSE.
 
 ## 3. Streaming transport
 
-The response is SSE, and three details make it work:
+The response is AG-UI over SSE, and three details make it work:
 
 - **`ctx.compress = false`** before anything is written. `koa-compress` treats
   `text/event-stream` as compressible and would otherwise buffer, defeating
   incremental delivery.
 - **`ctx.req.setTimeout(0)`** clears the per-request socket timeout, which
   would otherwise cut a slow first token.
-- **`setTimeout(0)` / writer discipline.** `ctx.body` is a hand-rolled
-  `Readable` and the only writer on the socket; koa pipes it to `ctx.res`. A
-  second writer would interleave frames, so the wrapper interposes a mid-stream
-  error *into* that same stream rather than throwing.
+- **Web stream to Node bridge.** `toServerSentEventsResponse` returns a web
+  `ReadableStream`, so the route assigns
+  `Readable.fromWeb(response.body as ReadableStream<Uint8Array>)` to `ctx.body`.
+  The `apiResponse` middleware skips `Readable` (and `Buffer`) and pipes it
+  through untouched. The synthetic refusal/busy runs assign a Node `Readable`
+  directly. A bare web `ReadableStream` is never assigned to `ctx.body`.
 
 No `timeout` option is passed to `fetch`, so undici's 300-second default
 applies. On client disconnect an `AbortController` aborts the upstream request,
@@ -260,118 +272,91 @@ within 10 ms and `req` never fired at all.
 
 | Failure | Mechanism | Client sees |
 |---|---|---|
-| Feature off / unset base URL / unset model | `throw NotFoundError()` | 404 JSON, `AiChatError kind=http status=404` |
+| Feature off / unset base URL / unset model | `assertAiChatEnabled` → `NotFoundError` | 404 JSON, `AiChatError kind=http status=404` |
 | Session not owned by the caller | `AIChatSession.findOwned` → `NotFoundError`, before any write or stream | 404 JSON, `kind=http status=404` |
-| Prompt not grounded | in-band `event: error` frame (`kind: "refusal"`), upstream never called; the refusal is stored as a `completed` assistant turn | refusal rendered as ordinary transcript text |
-| Another turn already streaming for this `(user, session)` | Redis `SET … NX` misses → in-band `event: error` frame with `kind: "busy"` | `kind=busy`, "another answer is still being generated" |
-| Upstream non-OK | `ctx.throw(res.status, "AI chat provider error")`; upstream detail logged only | JSON error status, `kind=http` |
-| Upstream unreachable | `fetch` rejects with no HTTP status → `ProviderUnavailableError` (502) | 502 JSON, `kind=http`, "provider is unavailable" |
-| Upstream mid-stream error | `event: error` frame pushed into the same stream | `kind=stream`, provider message |
-| Transport failure / abort | `fetch` rejects or reader rejects | `kind=network`, or `kind=aborted` when the caller aborted |
-| Unparseable frame | `JSON.parse` throws in `parseFrame` | `kind=malformed` |
-| Session-backed stream ends with no `event: complete` | socket drop, proxy cut, or terminal frame never read | `kind=truncated`, "the answer stopped before it finished" |
+| Prompt not grounded | synthetic AG-UI run with `X-AI-Chat-Kind: refusal`, upstream never called; the refusal is stored as a `completed` assistant turn | ordinary transcript text, `kind=refusal` |
+| Another turn already streaming for this `(user, session)` | Redis `SET … EX 900 NX` misses → synthetic AG-UI run with `X-AI-Chat-Kind: busy` | `kind=busy`, retry-later; typed text restored in the composer |
+| Adapter cannot be built / provider unavailable before the stream | `createAiChatAdapter` or `chat()` throws → `ProviderUnavailableError` (502); lock released | 502 JSON, `kind=http` |
+| Upstream rejects the request (non-OK) | adapter surfaces a `RUN_ERROR`; row `error` | `kind=stream` |
+| Upstream mid-stream error | `RUN_ERROR` in the same stream, provider text replaced with a generic message; row `error` | `kind=stream` |
+| Transport failure / abort | fetch or reader rejects; abort signal fires | `kind=network`, or `kind=aborted` when the caller aborted |
+| Unparseable frame | the stream processor rejects | `kind=malformed` |
+| Stream ends with no `finish_reason` | adapter `RUN_ERROR` code `incomplete-stream`; row `truncated` | `kind=truncated`, "the answer stopped before it finished" |
 
 Upstream failure is deliberately **in-band**: if the provider dies after the
 first token, the browser already holds a 200 `text/event-stream`, and replaying
-a status is impossible. A frame on the same channel is the only lossless option.
-The `busy` refusal follows the same reasoning for the same reason: the client is
-already expecting a stream from this endpoint and has no frame to attach the
-message to otherwise.
+a status is impossible. An AG-UI `RUN_ERROR` on the same channel is the only
+lossless option. The `busy` and `refusal` runs follow the same reasoning: the
+client is already expecting a stream from this endpoint and has no frame to
+attach the message to otherwise.
 
-### 3.2 Why the client needed no rewrite
+### 3.2 From provider chunks to UI parts
 
-The upstream interleaves two frame kinds the client does not want: `: keepalive`
-comments and `event: hermes.tool.progress`. `parseFrame` iterates only lines
-starting with `event:` or `data:` — comments produce `dataLines.length === 0`
-and are dropped — and `extractDelta` returns `""` for any frame without
-`choices[0].delta.content`. Frames split across `read()` boundaries are buffered
-until the `\n\n` terminator arrives, so punctuation mid-frame cannot corrupt
-accumulation.
+The TanStack adapter consumes the provider's Chat Completions chunks and the
+engine emits AG-UI events. The client never parses provider frames; `ChatClient`
+reads the AG-UI events and projects them into `UIMessage.parts`:
 
-**Reasoning is a third frame kind, routed rather than dropped.** Hermes sends the
-model's thinking as a standard chunk carrying `choices[0].delta.reasoning_content`
-(the DeepSeek-style field). The client parses that into a `reasoning` event (see
-`extractReasoning`) and the panel renders it behind a collapsed `<details>`
-disclosure whose summary reads "Loading…", never as the reply. It is deliberately
-*not* accumulated server-side — `inspectChunk` reads only `choices[].delta.content`
-— so a reopened conversation shows the answer without the thinking that produced
-it.
+- `TEXT_MESSAGE_*` → one `text` part. Its `content` becomes the answer and is
+  the only text the server persists.
+- `REASONING_MESSAGE_*` → a `thinking` part. The panel renders it in a
+  collapsed `<details>` while the turn streams and drops it on finalize; it is
+  never written to a row.
+- `TOOL_CALL_START` / `TOOL_CALL_ARGS` / `TOOL_CALL_END` / `TOOL_CALL_RESULT`
+  → a `tool-call` part carrying `name`, `input` and `output`. The panel renders
+  a read-only card with a pending state until the result arrives.
 
-**Mid-turn narration still pollutes `content`, and that *is* a Hermes setting.** A
-separate stream — mid-turn assistant messages ("Let me fetch…"), gated by
-`display.interim_assistant_messages` — is delivered as ordinary `content` and
-therefore lands in the answer text. The `api_server` platform defaults it **on**
-(`gateway/display_config.py`, `_TIER_HIGH`), so it must be turned off there:
+Unknown part types render nothing, so a new event kind cannot break the panel.
+The wire carries only `data: {json}` frames separated by blank lines: there is
+no `event:` field and no provider sentinel, keepalive comments are not
+re-emitted, and the client buffers across `read()` boundaries rather than
+assuming one frame per chunk.
 
-```yaml
-display:
-  platforms:
-    api_server:
-      interim_assistant_messages: false   # no mid-turn narration in `content`
-      tool_progress: off                  # no `hermes.tool.progress` breadcrumbs
-```
-
-`reasoning_content` is unaffected by `show_reasoning` on this surface: the
-chat-completions SSE writer emits the reasoning delta whenever the agent produces
-one, so reasoning keeps flowing to the disclosure regardless of that toggle.
-
-### 3.3 The terminal frame, and why the server authors it
+### 3.3 The terminal event
 
 A stream that simply stops is ambiguous: the socket dropped, a proxy cut the
 response, an output limit truncated the answer, and a complete answer all end
-the `for await` loop identically. The server therefore writes its own last
-frame:
+the stream identically. AG-UI distinguishes them at the run boundary:
 
-```
-event: complete
-data: {"runId":"<uuid>","finishReason":"stop"}
+- `RUN_FINISHED` means the provider returned a `finish_reason`; the turn is
+  `completed`.
+- `RUN_ERROR` with the adapter code `incomplete-stream` means the provider ended
+  without one; the persistence middleware records `truncated`.
+- `RUN_ERROR` with any other cause records `error`; `onAbort` records
+  `aborted`.
 
-event: truncated
-data: {"runId":"<uuid>","finishReason":null}
-```
-
-The payload is `{ runId, finishReason }`, emitted by `finish()` in
-`server/routes/api/ai/ai.ts`. `finishReason` is the provider's
-`choices[0].finish_reason`, captured by `inspectChunk` as it forwards bytes.
-
-**It is never derived from `data: [DONE]`.** The OpenAI SDK consumes that
-sentinel and never forwards it, so nothing downstream can rely on seeing it —
-and a proxy in front of the provider may strip it too. `finish_reason` is the
-one signal that survives every hop, which makes it the only defensible basis for
-"this answer is whole".
-
-`finish()` is idempotent and every exit funnels through it, so an `end` after
-an `error` — or the `error` an abort produces after the disconnect handler has
-already flushed — cannot append a second row for one turn. Status is decided at
-the exit, not by the writer:
+The persistence middleware is the single exit point. TanStack awaits exactly one
+of `onFinish`, `onAbort` or `onError` before the SSE stream closes, and each
+await includes the row write and the lock release, so an `end` after an `error`
+cannot append a second row. Status is decided by which hook ran, not by the
+writer:
 
 | Exit | Status |
 |---|---|
-| upstream `end` with a `finish_reason` | `completed` |
-| upstream `end` without one | `truncated` |
-| upstream `error` with `clientGone` | `aborted` |
-| upstream `error` without `clientGone` | `error` |
-| socket close before the stream ends | `aborted` |
+| `onFinish` with a `finishReason` | `completed` |
+| `onFinish` without one | `truncated` |
+| `onError` with `incomplete-stream` | `truncated` |
+| `onError` with any other code | `error` |
+| `onAbort` | `aborted` |
 
-An aborted or errored turn writes **no terminal frame**: both already terminate
-with `event: error`, and in the aborted case there is no client left to read
-anything. An empty assistant turn is never persisted — the client optimistically
-appends `content: ""`, so storing a blank bubble would be indistinguishable from
-a lost answer. The response is terminated only once the turn is durable, so a
-client that reloads history the instant it sees the terminal frame cannot race
-the insert.
+An aborted or errored turn still ends the stream; it simply may carry no answer
+row when no text was produced. An empty assistant turn is never persisted — the
+client optimistically appends `content: ""`, so storing a blank bubble would be
+indistinguishable from a lost answer. The response is terminated only once the
+turn is durable, so a client that reloads history the instant the run finishes
+cannot race the insert.
 
 Turn status is recorded on the row (`AIChatMessage.status`) and returned by
 `ai.messages.list`. The four values are `completed`, `aborted`, `error` and
 `truncated` — the same four the client-side `AiChatTurnStatus` in
 `app/utils/aiChat.ts` declares.
 
-**A stateless chat authors nothing.** `finish()` early-returns on
-`if (!ownedSession)` without writing a row *or* a frame, so the wire format of a
-session-less turn is exactly what it was before turns were stored. The two sides
-of that contract depend on each other: `streamAiChat` demands the terminal frame
-only when `options.sessionId` is defined, because demanding it unconditionally
-would report the first turn of every new conversation as truncated.
+**A stateless chat stores nothing.** The same middleware runs, but `appendTurn`
+returns immediately when there is no session id, and no lock was taken. The
+stateless response is still a full AG-UI run, so a client cannot tell it apart
+from a persisted one on the wire; the difference is only that nothing was
+written. The old guarantee that a stateless response matched the provider's
+bytes is retired: the transport re-frames every chunk and appends its own
+terminal event.
 
 ### 3.4 The grounding refusal is stored, and frozen
 
@@ -499,14 +484,14 @@ they say nothing about whether a `completed` answer is true.
 This risk is inherited from the retrieval gate itself and is not made worse by
 storage. The gate admits a prompt when `total > 0` (§4.1), which is a claim, not
 a measurement; storing the result just makes the consequence durable. The
-mitigations already in place — bias toward refusing, the terminal frame, the
+mitigations already in place — bias toward refusing, the terminal event, the
 stored `status` column — bound *whether an answer exists*, never *whether it is
 correct*.
 
 **What this is not.** It is **not** an access-control or exfiltration risk, and
 it would be wrong to describe it that way. Two properties hold:
 
-- **The proxy never injects document content.** `ai.ts` forwards exactly the
+- **The route never injects document content.** `ai.ts` forwards exactly the
   conversation rows it holds and sends no document body, no excerpt and no
   snippet upstream. What the provider sees is the user's own turns plus its own
   answers.
@@ -567,7 +552,8 @@ subgraph render["Right sidebar render path"]
 SidebarCtx["RightSidebarContext<br/>ephemeral content slot"]
 Layout["AuthenticatedLayout > Layout<br/>AnimatePresence initial=false"]
 SidebarLayout["SidebarLayout scrollable=false<br/>header + content, toggles fullscreen overlay"]
-Panel["AIChatPanel<br/>Transcript + Composer"]
+Panel["AIChatPanel<br/>Transcript + Composer + queue"]
+Client["ChatClient (per turn)<br/>AG-UI events -> UIMessage.parts"]
 History["AIChatHistory<br/>session dropdown, delete confirmation"]
 Stores["AIChatSessionsStore + AIChatMessagesStore<br/>RootStore keys aiChatSessions / aiChatMessages"]
 end
@@ -578,12 +564,15 @@ Gate["404 gate: TeamPreference.AIChat AND AI_CHAT_BASE_URL AND AI_CHAT_MODEL"]
 Scope["scope.ts findUngroundedReason<br/>fails closed"]
 Search["SearchProviderManager.getProvider().searchForUser"]
 Sessions["ai.sessions.create / list / delete<br/>ai.messages.list<br/>findOwned + authorize"]
-Lock["Redis in-flight cap<br/>aiChat:inflight:{user}:{session}"]
+Lock["Redis in-flight cap<br/>aiChat:inflight:{user}:{session}, TTL 900s"]
+Chain["TanStack chat()<br/>openaiCompatibleText adapter"]
+Tools["tools.ts<br/>frozen search_workspace allowlist"]
+Persist["persistence middleware<br/>appendTurn + lock release"]
 Db[("ai_chat_sessions<br/>ai_chat_messages")]
 end
 
 subgraph external["External"]
-Hermes["Hermes gateway :8642/p/matius/v1<br/>model=matius runs the agent"]
+Gateway["OpenAI-compatible gateway<br/>AI_CHAT_BASE_URL + AI_CHAT_MODEL"]
 end
 
 Trigger -->|"client"| Provider
@@ -595,9 +584,10 @@ Content -->|"client"| SidebarCtx
 SidebarCtx --> Layout
 Layout -->|"client"| SidebarLayout
 SidebarLayout --> Panel
+Panel --> Client
 Panel --> History
 History --> Stores
-Panel -->|"server: fetch /api/ai.chat"| Route
+Client -->|"server: fetch /api/ai.chat"| Route
 Stores -->|"server: RPC POST"| Sessions
 Sessions --> Db
 Route --> Gate
@@ -606,22 +596,26 @@ Scope --> Search
 Search -->|"server: total > 0"| Route
 Route -->|"server: SET NX + compare-and-delete"| Lock
 Route -->|"server: appendTurn(user)"| Db
-Route -->|"server: appendTurn(assistant, status)"| Db
-Route -->|"server: terminal frame, then end"| Panel
-Route -->|"server: fetch chat/completions"| Hermes
-Hermes -->|"SSE frames re-emitted"| Panel
+Route -->|"server: run"| Chain
+Chain -->|"server: tools"| Tools
+Chain -->|"server: middleware"| Persist
+Persist -->|"server: appendTurn(assistant, status)"| Db
+Persist -->|"server: release lock"| Lock
+Chain -->|"server: POST /chat/completions"| Gateway
+Chain -->|"server: AG-UI events, then close"| Client
 
 classDef clientOnly fill:#eef,stroke:#88a,stroke-dasharray:4 3
 classDef serverSide fill:#efe,stroke:#585
-class Trigger,Action,Toggle,Provider,Bridge,Content,SidebarCtx,Layout,SidebarLayout,Panel,History,Stores clientOnly
-class Route,Gate,Scope,Search,Sessions,Lock,Db serverSide
+class Trigger,Action,Toggle,Provider,Bridge,Content,SidebarCtx,Layout,SidebarLayout,Panel,Client,History,Stores clientOnly
+class Route,Gate,Scope,Search,Sessions,Lock,Chain,Tools,Persist,Db serverSide
 ```
 
 **Server-enforced edges** (a request cannot cross them without satisfying the
 check): `Gate` on `TeamPreference.AIChat` + `AI_CHAT_BASE_URL` +
 `AI_CHAT_MODEL`, `auth({type: [APP]})`, CSRF, the rate limiter, the zod schema,
 the grounding probe, the `findOwned` + `authorize` ownership check on every
-session route, and the Redis in-flight cap. A client that skips every UI
+session route, the Redis in-flight cap, and the frozen server tool allowlist
+(`Chain` never receives tools from the request). A client that skips every UI
 predicate still hits these.
 
 **Client-only edges** (visibility, not security): the trigger rendering, the
@@ -701,14 +695,18 @@ randomly stopped working.
   unavailable on this host (`Windows named-pipe discovery is not implemented`).
   No screenshot exists. Every claim about layout and clickability above is from
   reading the code and the CSS, and is stated as such.
-- **Streaming was proven by a real authenticated round trip** through
-  `POST /api/ai.chat` using a Bearer session JWT: 200 `text/event-stream`, 184 ms
-  to the first frame, 287 incremental deltas, a clean `[DONE]`, 102 s total for a
-  KB question. That measurement predates turn storage and was taken on the
-  stateless path; the terminal frame, the in-flight cap and the session endpoints
-  are documented here from the code and from their own tests, not from a fresh
-  round trip. The panel's cookie + CSRF path was verified by **code reading
-  only**.
+- **Streaming was proven by a real authenticated round trip** through the
+  pre-TanStack transport (`POST /api/ai.chat`, Bearer session JWT): 200
+  `text/event-stream`, 184 ms to the first frame, 287 incremental deltas, 102 s
+  total for a KB question. That measurement predates both turn storage and the
+  TanStack rewrite, so it does not describe the current wire. The current
+  transport is proven by the server and client suites (AG-UI frame assertions,
+  the refusal and busy synthetic runs, the terminal-hook ordering) rather than
+  by a live gateway transcript: the gateway at `127.0.0.1:8642` is down on this
+  host, so no live model tokens exist. The refusal recipe in AI-CHAT.md was
+  verified against the route boundary the test suite exercises, and that run is
+  recorded verbatim; no provider output is claimed. The panel's cookie + CSRF
+  path was verified by **code reading only**.
 - **CI does not run on this fork.** Despite workflow files and
   `actions/permissions.enabled: true`, there are 0 check-runs and 0 workflow
   runs. All verification is local.
@@ -725,7 +723,8 @@ document.
 |---|---|
 | `AI_CHAT_BASE_URL` | `@Public`, `@IsUrl` (http/https). Appends `/chat/completions`. Unset disables the feature. |
 | `AI_CHAT_API_KEY` | **Secret.** Deliberately **not** `@Public`, so it never serializes to the client. |
-| `AI_CHAT_MODEL` | Forwarded as `model` in the upstream body (§7). **Required to enable the route**: with `AI_CHAT_BASE_URL` set but no model, `POST /api/ai.chat` returns 404 and is never sent upstream. |
+| `AI_CHAT_MODEL` | Handed to the `openaiCompatibleText` adapter and forwarded as `model` in the upstream body (§7). **Required to enable the route**: with `AI_CHAT_BASE_URL` set but no model, `POST /api/ai.chat` returns 404 and is never sent upstream. |
+| `AI_CHAT_REASONING` | `@IsIn(["minimal", "low", "medium", "high"])`, optional. Sets the Chat Completions `reasoning_effort` through `modelOptions`; unset omits the field entirely. Never read from the request body. |
 | `AI_CHAT_GROUNDING` | `@IsBoolean`, default `true`. Runs the local grounding probe (§4). Set `false` to skip it when the provider is itself the retrieval agent and enforces the boundary, so the lexical probe does not refuse prompts the provider can answer. |
 
 `AI_CHAT_API_KEY` and `AI_CHAT_MODEL` are `@CannotUseWithout("AI_CHAT_BASE_URL")`,
