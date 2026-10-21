@@ -774,7 +774,7 @@ const AIChatPanel = observer(function AIChatPanel({
               return null;
             }
 
-            const marker = turnMarker(turn);
+            const marker = turnMarker(turn, t);
 
             return (
               <Message
@@ -812,7 +812,7 @@ const AIChatPanel = observer(function AIChatPanel({
                     data-testid={`message-status-${turn.status}`}
                     $tone={marker.tone}
                   >
-                    {t(marker.labelKey)}
+                    {marker.label}
                   </TurnMarker>
                 )}
               </Message>
@@ -909,26 +909,28 @@ const AIChatPanel = observer(function AIChatPanel({
  * non-`completed` status is what keeps a short answer from being read as a
  * whole one.
  *
- * The label is a translation key rather than text, so the copy is resolved by
- * the caller's `t` at render time.
+ * The copy is resolved here with the caller's `t` so every label stays a literal
+ * argument and the extractor can find it.
  *
  * @param turn the transcript entry to describe.
+ * @param t the translation function.
  * @returns the marker to render, or undefined when the turn needs none.
  */
 function turnMarker(
-  turn: TranscriptTurn
-): { labelKey: string; tone: "danger" | "warning" } | undefined {
+  turn: TranscriptTurn,
+  t: (key: string) => string
+): { label: string; tone: "danger" | "warning" } | undefined {
   if (turn.role !== "assistant") {
     return undefined;
   }
 
   switch (turn.status) {
     case "truncated":
-      return { labelKey: "Response cut short", tone: "warning" };
+      return { label: t("Response cut short"), tone: "warning" };
     case "aborted":
-      return { labelKey: "Stopped", tone: "warning" };
+      return { label: t("Stopped"), tone: "warning" };
     case "error":
-      return { labelKey: "Failed", tone: "danger" };
+      return { label: t("Failed"), tone: "danger" };
     default:
       return undefined;
   }
