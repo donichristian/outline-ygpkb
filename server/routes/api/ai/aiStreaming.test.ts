@@ -60,14 +60,19 @@ function streamingResponse(chunks: string[], status = 200): Response {
 }
 
 /**
- * The terminal two Chat Completions chunks recorded from the gateway probe in
- * `.omo/evidence/03-gateway-finish-reason.txt` (todo 3), verbatim. The verdict
- * recorded there is `finish_reason present`, which is why the contract test
- * below asserts a finished run rather than an incomplete-stream error.
+ * The terminal two Chat Completions chunks the adapter parses, in the SSE wire
+ * shape the gateway speaks. They are STUB-produced: the live gateway refused
+ * every connection (`ECONNREFUSED 127.0.0.1:8642`, §1 of
+ * `.omo/evidence/03-gateway-finish-reason.txt`), and §2 of that file records
+ * these bytes as a stubbed-upstream fixture. The probe's `finish_reason
+ * present` verdict is derived from that Chat Completions wire contract, not
+ * from live bytes, so these tests prove the adapter's contract against the
+ * wire shape — not that a real gateway returned them. Plan row `24` (blocked
+ * on a live gateway) will replay the live bytes when one is reachable.
  *
- * @returns the recorded chunks, in wire order.
+ * @returns the stub-produced chunks, in wire order.
  */
-function recordedGatewayChunks(): string[] {
+function gatewayWireShapeChunks(): string[] {
   return [
     'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"matius","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}\n\n',
     'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"matius","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
@@ -1177,13 +1182,13 @@ describe("POST /api/ai.chat node Readable invariant", () => {
   });
 });
 
-describe("AG-UI contract against the recorded gateway bytes", () => {
-  it("turns the recorded Chat Completions output into a finished run", async () => {
+describe("AG-UI contract against the gateway wire shape (stubbed)", () => {
+  it("turns the stubbed Chat Completions output into a finished run", async () => {
     // The SDK captures `fetch` when the client is constructed, so the stub has
     // to be in place before the adapter is built.
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(streamingResponse(recordedGatewayChunks()))
+      vi.fn().mockResolvedValue(streamingResponse(gatewayWireShapeChunks()))
     );
     const adapter = await createAiChatAdapter();
 
@@ -1214,16 +1219,16 @@ describe("AG-UI contract against the recorded gateway bytes", () => {
     expect(finished?.metadata?.tanstack?.finishReason).toEqual("stop");
   });
 
-  it("turns the recorded output without a finish_reason into incomplete-stream", async () => {
-    // The first recorded chunk is what the gateway sends before terminating;
+  it("turns the stubbed output without a finish_reason into incomplete-stream", async () => {
+    // The first stub chunk is what the wire sequence carries before terminating;
     // without the terminal chunk the adapter must report the incomplete stream
-    // that todo 5 maps to `truncated`. Only recorded bytes are used here too.
+    // that todo 5 maps to `truncated`. Only stub-produced bytes are used here too.
     vi.stubGlobal(
       "fetch",
       vi
         .fn()
         .mockResolvedValue(
-          streamingResponse(recordedGatewayChunks().slice(0, 1))
+          streamingResponse(gatewayWireShapeChunks().slice(0, 1))
         )
     );
     const adapter = await createAiChatAdapter();
