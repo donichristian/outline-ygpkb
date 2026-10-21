@@ -542,6 +542,60 @@ describe("POST /api/ai.chat turn persistence", () => {
     expect(sent.at(-1)).toEqual({ role: "user", content: question });
   });
 
+  it("sends an assistant-last regeneration turn upstream exactly once", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(
+      user,
+      "The deployment runbook covers the payments service"
+    );
+    const session = await buildSession(user);
+
+    const question = "What is the payments deployment runbook?";
+    const answer = "It is documented.";
+    await AIChatMessage.bulkCreate([
+      {
+        sessionId: session.id,
+        role: AIChatMessageRole.User,
+        seq: 1,
+        content: question,
+      },
+      {
+        sessionId: session.id,
+        role: AIChatMessageRole.Assistant,
+        seq: 2,
+        content: answer,
+      },
+    ]);
+
+    const { fetchMock } = providerContacted();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await server.post("/api/ai.chat", user, {
+      body: {
+        sessionId: session.id,
+        messages: [
+          { role: "user", content: question },
+          { role: "assistant", content: answer },
+        ],
+      },
+    });
+    await res.text();
+
+    const [, init] = fetchMock.mock.calls[0];
+    const sent = JSON.parse((init as { body: string }).body).messages;
+
+    // The committed window already ends with this assistant row, so forwarding
+    // it as a pending turn would bill the provider for the same message twice.
+    expect(
+      sent.filter(
+        (message: { role: string; content: string }) =>
+          message.role === "assistant" && message.content === answer
+      )
+    ).toHaveLength(1);
+    expect(sent.at(-1)).toEqual({ role: "assistant", content: answer });
+  });
+
   it("authors a terminal complete frame derived from finish_reason", async () => {
     const user = await buildUser();
     await configureAiChat(user);

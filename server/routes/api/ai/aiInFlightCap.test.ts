@@ -11,8 +11,21 @@ import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
 import Redis from "@server/storage/redis";
 
+/**
+ * Controls the engine loader so a test can force the pre-stream
+ * `Promise.all([loadTanstack(), loadServerTools()])` to reject after the lock
+ * has been taken.
+ */
+const engineLoad = vi.hoisted(() => ({ rejectOnce: false }));
+
 vi.mock("./tanstack", () => ({
-  loadTanstack: () => import("@tanstack/ai"),
+  loadTanstack: () => {
+    if (engineLoad.rejectOnce) {
+      engineLoad.rejectOnce = false;
+      return Promise.reject(new Error("tanstack module failed to load"));
+    }
+    return import("@tanstack/ai");
+  },
 }));
 
 vi.mock("./adapter", () => ({
@@ -297,6 +310,7 @@ const originalModel = env.AI_CHAT_MODEL;
 afterEach(() => {
   env.AI_CHAT_BASE_URL = originalBaseUrl;
   env.AI_CHAT_MODEL = originalModel;
+  engineLoad.rejectOnce = false;
   vi.unstubAllGlobals();
 });
 
@@ -662,6 +676,61 @@ describe("POST /api/ai.chat in-flight cap", () => {
 
     // Settle both flushes: the errored partial answer and the clean answer.
     await waitForRows(session.id, 4);
+  });
+
+  it("releases the lock when reading the committed window throws before the stream exists", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user, groundedDocumentText);
+    const session = await buildSession(user);
+
+    const realFindAll = AIChatMessage.findAll.bind(AIChatMessage);
+    const findAll = vi
+      .spyOn(AIChatMessage, "findAll")
+      .mockImplementation(((...args: Parameters<typeof AIChatMessage.findAll>) => {
+        const attributes = (
+          args[0] as { attributes?: readonly string[] } | undefined
+        )?.attributes;
+        if (attributes?.includes("role")) {
+          return Promise.reject(new Error("database unavailable"));
+        }
+        return realFindAll(...args);
+      }) as typeof AIChatMessage.findAll);
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const res = await chat(user, groundedBody(session.id));
+
+      // A JSON error, never a half-open stream: the failure happens before the
+      // SSE response exists.
+      expect(res.status).toEqual(500);
+      expect(res.headers.get("content-type")).toContain("application/json");
+      expect(fetchMock).not.toHaveBeenCalled();
+      await expectNoInFlightLock(user);
+    } finally {
+      findAll.mockRestore();
+    }
+  });
+
+  it("releases the lock when the engine loader rejects before the stream exists", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user, groundedDocumentText);
+    const session = await buildSession(user);
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    engineLoad.rejectOnce = true;
+
+    const res = await chat(user, groundedBody(session.id));
+
+    expect(res.status).toEqual(500);
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(fetchMock).not.toHaveBeenCalled();
+    // Without the outer release this key would refuse every later turn on the
+    // session for the full 900s TTL.
+    await expectNoInFlightLock(user);
   });
 
   it("releases the lock when the grounding gate refuses the turn", async () => {

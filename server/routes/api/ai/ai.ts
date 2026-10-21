@@ -138,7 +138,16 @@ export function toUpstreamMessages(
 
   const pending = pendingTurn ? toUpstreamMessage(pendingTurn) : undefined;
 
-  return (pending ? [...committed, pending] : committed).slice(
+  // An assistant-last client array is a regeneration: the committed window
+  // already ends with that answer, so appending it as pending would send the
+  // same assistant message to the provider twice.
+  const lastCommitted = committed.at(-1);
+  const alreadyCommitted =
+    pending?.role === AIChatMessageRole.Assistant &&
+    lastCommitted?.role === pending.role &&
+    lastCommitted.content === pending.content;
+
+  return (pending && !alreadyCommitted ? [...committed, pending] : committed).slice(
     -T.AiChatMaxMessages
   );
 }
@@ -420,238 +429,250 @@ router.post(
       }
     };
 
-    // Every write on this path delegates to `appendTurn`, which opens and
-    // commits its own short-lived transaction: `aiChatMessageCreator` never
-    // reads or replaces `ctx.state.transaction`, and `ai.chat` carries no
-    // `transaction()` middleware, so there is none to hold open. That is
-    // deliberate and load-bearing — the assistant flush runs after the stream
-    // has ended, long after this handler returned, so a transaction opened here
-    // would have to stay open across the entire SSE stream.
+    // A throw between acquisition and the stream existing would otherwise
+    // leave the key set for its full TTL, refusing every later turn on the
+    // session. The terminal hooks own the release once the stream is handed
+    // off; this releases on every exit before that.
+    let streamHandedOff = false;
+    try {
+      // Every write on this path delegates to `appendTurn`, which opens and
+      // commits its own short-lived transaction: `aiChatMessageCreator` never
+      // reads or replaces `ctx.state.transaction`, and `ai.chat` carries no
+      // `transaction()` middleware, so there is none to hold open. That is
+      // deliberate and load-bearing — the assistant flush runs after the stream
+      // has ended, long after this handler returned, so a transaction opened here
+      // would have to stay open across the entire SSE stream.
 
-    // The turn being started now, as supplied by the client. With a stored
-    // session it is the newest client message; only a user turn is new
-    // material, an assistant-last array being a regeneration whose answer is
-    // stored when the stream finishes.
-    const pendingTurn = messages?.at(-1);
+      // The turn being started now, as supplied by the client. With a stored
+      // session it is the newest client message; only a user turn is new
+      // material, an assistant-last array being a regeneration whose answer is
+      // stored when the stream finishes.
+      const pendingTurn = messages?.at(-1);
 
-    if (ownedSession && pendingTurn?.role === "user") {
-      // Written *before* the grounding gate, which is what makes a refusal
-      // recoverable: reopening the session must show the question the user
-      // actually asked, not an orphan refusal with nothing above it. Persisting
-      // after the gate would leave the refusal as the first row and lose the
-      // turn that produced it.
-      const pendingContent = messageText(pendingTurn);
-      await appendTurn({
+      if (ownedSession && pendingTurn?.role === "user") {
+        // Written *before* the grounding gate, which is what makes a refusal
+        // recoverable: reopening the session must show the question the user
+        // actually asked, not an orphan refusal with nothing above it. Persisting
+        // after the gate would leave the refusal as the first row and lose the
+        // turn that produced it.
+        const pendingContent = messageText(pendingTurn);
+        await appendTurn({
+          user,
+          sessionId: ownedSession?.id,
+          role: AIChatMessageRole.User,
+          content: pendingContent,
+          status: AIChatMessageStatus.Completed,
+          runId,
+          ctx,
+          requestId,
+        });
+      }
+
+      // Resolved after the turn is committed, so the gate and the provider are
+      // asked about the same conversation. A user turn was just written, so it
+      // is already in the committed window; an assistant-last array is a
+      // regeneration whose row the window already ends with. Neither may reach
+      // the provider a second time, so the resolver drops a pending turn the
+      // committed window already contains.
+      const resolvedMessages = await resolveUpstreamMessages({
         user,
-        sessionId: ownedSession?.id,
-        role: AIChatMessageRole.User,
-        content: pendingContent,
-        status: AIChatMessageStatus.Completed,
-        runId,
         ctx,
-        requestId,
+        sessionId,
+        pendingTurn: pendingTurn?.role === "user" ? undefined : pendingTurn,
       });
-    }
 
-    // Resolved after the turn is committed, so the gate and the provider are
-    // asked about the same conversation. `pendingTurn` is passed only when the
-    // turn was not written: the committed window already contains it, and
-    // supplying both would send the turn to the provider twice.
-    const resolvedMessages = await resolveUpstreamMessages({
-      user,
-      ctx,
-      sessionId,
-      pendingTurn: pendingTurn?.role === "user" ? undefined : pendingTurn,
-    });
+      // SSE responses must not be compressed – buffering defeats incremental
+      // delivery. koa-compress honors `ctx.compress = false` as a filter bypass.
+      ctx.compress = false;
 
-    // SSE responses must not be compressed – buffering defeats incremental
-    // delivery. koa-compress honors `ctx.compress = false` as a filter bypass.
-    ctx.compress = false;
+      // The upstream stream may be long-lived; disable the per-request socket
+      // timeout that would otherwise cut the connection mid-stream.
+      ctx.req.setTimeout(0);
 
-    // The upstream stream may be long-lived; disable the per-request socket
-    // timeout that would otherwise cut the connection mid-stream.
-    ctx.req.setTimeout(0);
-
-    // The provider's persona carries the knowledge-base boundary as prompt
-    // text only, and honours it roughly 60% of the time – it answers general
-    // knowledge from memory otherwise. Refuse here, unless the requesting user's
-    // own documents can ground the prompt, so the boundary is structural and
-    // costs no upstream call or latency on a refusal. The refusal is delivered
-    // as a synthetic AG-UI run whose `X-AI-Chat-Kind` header is `refusal` (see
-    // `refuseWithAgUiRun`) so the panel renders it as an ordinary transcript
-    // turn rather than an error.
-    //
-    // Skipped entirely when `AI_CHAT_GROUNDING` is off: a provider that is itself
-    // a retrieval agent enforces the boundary, and the local lexical probe would
-    // only refuse prompts that corpus cannot lexically match.
-    const ungroundedReason = env.AI_CHAT_GROUNDING
-      ? await findUngroundedReason(user, resolvedMessages)
-      : undefined;
-    if (ungroundedReason) {
-      Logger.warn("AI chat prompt rejected as ungrounded", {
-        requestId,
-        reason: ungroundedReason,
-      });
-      // Inlined, not `OutOfScopeRefusal`: i18next-parser sees string literals
-      // only. ai.test.ts fails if these two ever differ. The literal must stay
-      // contiguous in source, so it is bound here rather than split across the
-      // call's named arguments.
+      // The provider's persona carries the knowledge-base boundary as prompt
+      // text only, and honours it roughly 60% of the time – it answers general
+      // knowledge from memory otherwise. Refuse here, unless the requesting user's
+      // own documents can ground the prompt, so the boundary is structural and
+      // costs no upstream call or latency on a refusal. The refusal is delivered
+      // as a synthetic AG-UI run whose `X-AI-Chat-Kind` header is `refusal` (see
+      // `refuseWithAgUiRun`) so the panel renders it as an ordinary transcript
+      // turn rather than an error.
       //
-      // Stored before the frame is written, so a client that reacts to the
-      // refusal by reloading history already finds the row. The string is
-      // **locale-frozen at send time**: it is never re-translated on read, so
-      // reopening the session replays the text the sender received rather than a
-      // later translation of a key. Storing the `OutOfScopeRefusal` constant
-      // instead would let the row drift away from the wire on any future change
-      // to either one.
-      const refusal = t("This assistant only answers from this workspace’s knowledge base");
+      // Skipped entirely when `AI_CHAT_GROUNDING` is off: a provider that is itself
+      // a retrieval agent enforces the boundary, and the local lexical probe would
+      // only refuse prompts that corpus cannot lexically match.
+      const ungroundedReason = env.AI_CHAT_GROUNDING
+        ? await findUngroundedReason(user, resolvedMessages)
+        : undefined;
+      if (ungroundedReason) {
+        Logger.warn("AI chat prompt rejected as ungrounded", {
+          requestId,
+          reason: ungroundedReason,
+        });
+        // Inlined, not `OutOfScopeRefusal`: i18next-parser sees string literals
+        // only. ai.test.ts fails if these two ever differ. The literal must stay
+        // contiguous in source, so it is bound here rather than split across the
+        // call's named arguments.
+        //
+        // Stored before the frame is written, so a client that reacts to the
+        // refusal by reloading history already finds the row. The string is
+        // **locale-frozen at send time**: it is never re-translated on read, so
+        // reopening the session replays the text the sender received rather than a
+        // later translation of a key. Storing the `OutOfScopeRefusal` constant
+        // instead would let the row drift away from the wire on any future change
+        // to either one.
+        const refusal = t("This assistant only answers from this workspace’s knowledge base");
 
-      await appendTurn({
+        await appendTurn({
+          user,
+          sessionId: ownedSession?.id,
+          role: AIChatMessageRole.Assistant,
+          content: refusal,
+          status: AIChatMessageStatus.Completed,
+          runId,
+          ctx,
+          requestId,
+        });
+
+        refuseWithAgUiRun({
+          ctx,
+          message: refusal,
+          kind: "refusal",
+          runId,
+          sessionId: ownedSession?.id,
+        });
+
+        // A refusal returns before the stream exists, so `finish` never runs for
+        // this request; the `finally` below releases the lock in that case.
+        return;
+      }
+
+      // Abort the upstream request if the client disconnects before the stream
+      // has finished, so we do not keep the provider connection open.
+      //
+      // The listener is on `ctx.res`, not `ctx.req`. An `IncomingMessage` emits
+      // `close` exactly once, as soon as its body has been consumed — which
+      // koa-body did before this handler ran — so by the time this listener is
+      // attached that event is already gone and a real disconnect is invisible.
+      // `ServerResponse` emits `close` when the socket actually goes away, which
+      // is the signal this needs; verified against a live abort, where `res`
+      // fired within 10ms and `req` never fired at all. `writableEnded`
+      // separates a genuine disconnect from the ordinary close after `end()`.
+      // The abort surfaces as the chat middleware's `onAbort` terminal hook.
+      const ac = new AbortController();
+      ctx.res.on("close", () => {
+        if (!ctx.res.writableEnded) {
+          ac.abort();
+        }
+      });
+
+      // SECURITY: threadId from server-owned sessionId, runId server-minted.
+      // Tools are the server's own frozen allowlist – the request body is never
+      // read for tools and `forwardedProps` is never spread into `chat()`.
+      // Client-supplied tools/forwardedProps/state/resume are ignored.
+      const [
+        { chat, chatParamsFromRequestBody, toServerSentEventsResponse },
+        serverTools,
+      ] = await Promise.all([loadTanstack(), loadServerTools()]);
+
+      // ponytail: chatParamsFromRequestBody validates the AG-UI shape. For a
+      // legacy `{ role, content }` body it throws; the zod schema already
+      // validated the body, so we proceed rather than reject.
+      try {
+        await chatParamsFromRequestBody(ctx.request.body);
+      } catch {
+        // Legacy body shape; the zod schema already validated it.
+      }
+
+      // Terminal persistence and lock release ride TanStack's own terminal hooks:
+      // each is awaited before the stream closes, so a row is written and the key
+      // freed on every exit (finish, abort, error).
+      const persistenceMiddleware = createPersistenceMiddleware({
         user,
         sessionId: ownedSession?.id,
-        role: AIChatMessageRole.Assistant,
-        content: refusal,
-        status: AIChatMessageStatus.Completed,
         runId,
         ctx,
         requestId,
+        releaseInFlightLock,
       });
 
-      refuseWithAgUiRun({
-        ctx,
-        message: refusal,
-        kind: "refusal",
-        runId,
-        sessionId: ownedSession?.id,
-      });
-
-      // A refusal returns before the stream exists, so `finish` never runs for
-      // this request. The lock taken above would otherwise sit until its TTL.
-      await releaseInFlightLock();
-      return;
-    }
-
-    // Abort the upstream request if the client disconnects before the stream
-    // has finished, so we do not keep the provider connection open.
-    //
-    // The listener is on `ctx.res`, not `ctx.req`. An `IncomingMessage` emits
-    // `close` exactly once, as soon as its body has been consumed — which
-    // koa-body did before this handler ran — so by the time this listener is
-    // attached that event is already gone and a real disconnect is invisible.
-    // `ServerResponse` emits `close` when the socket actually goes away, which
-    // is the signal this needs; verified against a live abort, where `res`
-    // fired within 10ms and `req` never fired at all. `writableEnded`
-    // separates a genuine disconnect from the ordinary close after `end()`.
-    // The abort surfaces as the chat middleware's `onAbort` terminal hook.
-    const ac = new AbortController();
-    ctx.res.on("close", () => {
-      if (!ctx.res.writableEnded) {
-        ac.abort();
-      }
-    });
-
-    // SECURITY: threadId from server-owned sessionId, runId server-minted.
-    // Tools are the server's own frozen allowlist – the request body is never
-    // read for tools and `forwardedProps` is never spread into `chat()`.
-    // Client-supplied tools/forwardedProps/state/resume are ignored.
-    const [
-      { chat, chatParamsFromRequestBody, toServerSentEventsResponse },
-      serverTools,
-    ] = await Promise.all([loadTanstack(), loadServerTools()]);
-
-    // ponytail: chatParamsFromRequestBody validates the AG-UI shape. For a
-    // legacy `{ role, content }` body it throws; the zod schema already
-    // validated the body, so we proceed rather than reject.
-    try {
-      await chatParamsFromRequestBody(ctx.request.body);
-    } catch {
-      // Legacy body shape; the zod schema already validated it.
-    }
-
-    // Terminal persistence and lock release ride TanStack's own terminal hooks:
-    // each is awaited before the stream closes, so a row is written and the key
-    // freed on every exit (finish, abort, error).
-    const persistenceMiddleware = createPersistenceMiddleware({
-      user,
-      sessionId: ownedSession?.id,
-      runId,
-      ctx,
-      requestId,
-      releaseInFlightLock,
-    });
-
-    let response: Response;
-    try {
-      const adapter = await createAiChatAdapter();
-      // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- AiChatAdapter is a structurally-compatible subtype of AnyTextAdapter; the adapter type is a union that TanStack's generic parameters reject at compile time but accept at runtime.
-      const stream = chat({
-        adapter: adapter as unknown as Parameters<typeof chat>[0]["adapter"],
-        // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- UpstreamMessage is a valid ModelMessage at runtime; TanStack's generic type parameter is too strict for the schema-inferred shape.
-        messages: resolvedMessages as unknown as Parameters<typeof chat>[0]["messages"],
-        threadId: sessionId,
-        runId,
-        // The allowlist is static and read-only. It is the only source of
-        // tools on this path; the request body contributes none.
-        tools: serverTools,
-        // Server tools receive the requesting user through this context, so
-        // no tool closes over a request-scoped value.
-        context: { user },
-        // REASONING: an operator decision (`AI_CHAT_REASONING`), never the
-        // request body. The installed `openaiCompatibleText` adapter never
-        // maps `chat({ reasoning })` onto the wire — its base
-        // `modelReasoning()` default is `undefined`, and the compatible
-        // adapter does not override it — so `reasoning_effort` is placed in
-        // the provider-native `modelOptions`, which the adapter spreads into
-        // the Chat Completions body verbatim. Unconfigured, the key is
-        // omitted entirely and the body carries no reasoning field, so a
-        // plain gateway is not sent an unsupported parameter.
-        ...(env.AI_CHAT_REASONING
-          ? {
-              modelOptions: {
-                reasoning_effort: env.AI_CHAT_REASONING,
-              },
+      let response: Response;
+      try {
+        const adapter = await createAiChatAdapter();
+        // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- AiChatAdapter is a structurally-compatible subtype of AnyTextAdapter; the adapter type is a union that TanStack's generic parameters reject at compile time but accept at runtime.
+        const stream = chat({
+          adapter: adapter as unknown as Parameters<typeof chat>[0]["adapter"],
+          // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- UpstreamMessage is a valid ModelMessage at runtime; TanStack's generic type parameter is too strict for the schema-inferred shape.
+          messages: resolvedMessages as unknown as Parameters<typeof chat>[0]["messages"],
+          threadId: sessionId,
+          runId,
+          // The allowlist is static and read-only. It is the only source of
+          // tools on this path; the request body contributes none.
+          tools: serverTools,
+          // Server tools receive the requesting user through this context, so
+          // no tool closes over a request-scoped value.
+          context: { user },
+          // REASONING: an operator decision (`AI_CHAT_REASONING`), never the
+          // request body. The installed `openaiCompatibleText` adapter never
+          // maps `chat({ reasoning })` onto the wire — its base
+          // `modelReasoning()` default is `undefined`, and the compatible
+          // adapter does not override it — so `reasoning_effort` is placed in
+          // the provider-native `modelOptions`, which the adapter spreads into
+          // the Chat Completions body verbatim. Unconfigured, the key is
+          // omitted entirely and the body carries no reasoning field, so a
+          // plain gateway is not sent an unsupported parameter.
+          ...(env.AI_CHAT_REASONING
+            ? {
+                modelOptions: {
+                  reasoning_effort: env.AI_CHAT_REASONING,
+                },
+              }
+            : {}),
+          abortController: ac,
+          // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- TanStack's middleware generic defaults to `undefined`; a middleware array is accepted at runtime.
+          middleware: [persistenceMiddleware] as unknown as Parameters<
+            typeof chat
+          >[0]["middleware"],
+        });
+        // The adapter surfaces the provider's raw error text inside RUN_ERROR;
+        // replace it with a generic message so the wire never leaks upstream
+        // detail. The real cause is logged by the middleware's onError.
+        const sanitized = (async function* () {
+          for await (const chunk of stream) {
+            if (chunk.type === "RUN_ERROR") {
+              yield {
+                ...chunk,
+                message: "The AI chat stream failed",
+                code: undefined,
+              };
+            } else {
+              yield chunk;
             }
-          : {}),
-        abortController: ac,
-        // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- TanStack's middleware generic defaults to `undefined`; a middleware array is accepted at runtime.
-        middleware: [persistenceMiddleware] as unknown as Parameters<
-          typeof chat
-        >[0]["middleware"],
-      });
-      // The adapter surfaces the provider's raw error text inside RUN_ERROR;
-      // replace it with a generic message so the wire never leaks upstream
-      // detail. The real cause is logged by the middleware's onError.
-      const sanitized = (async function* () {
-        for await (const chunk of stream) {
-          if (chunk.type === "RUN_ERROR") {
-            yield {
-              ...chunk,
-              message: "The AI chat stream failed",
-              code: undefined,
-            };
-          } else {
-            yield chunk;
           }
+        })();
+        response = toServerSentEventsResponse(sanitized, { abortController: ac });
+      } catch (err) {
+        if (typeof (err as { status?: unknown }).status === "number") {
+          throw err;
         }
-      })();
-      response = toServerSentEventsResponse(sanitized, { abortController: ac });
-    } catch (err) {
-      await releaseInFlightLock();
-      if (typeof (err as { status?: unknown }).status === "number") {
-        throw err;
+        throw ProviderUnavailableError();
       }
-      throw ProviderUnavailableError();
-    }
 
-    ctx.status = response.status;
-    response.headers.forEach((value, key) => {
-      ctx.set(key, value);
-    });
-    ctx.set("X-Accel-Buffering", "no");
-    ctx.compress = false;
-    ctx.req.setTimeout(0);
-    // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- Node's ReadableStream generic is incompatible with Readable.fromWeb; the runtime type is correct.
-    ctx.body = Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>);
+      ctx.status = response.status;
+      response.headers.forEach((value, key) => {
+        ctx.set(key, value);
+      });
+      ctx.set("X-Accel-Buffering", "no");
+      ctx.compress = false;
+      ctx.req.setTimeout(0);
+      // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- Node's ReadableStream generic is incompatible with Readable.fromWeb; the runtime type is correct.
+      ctx.body = Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>);
+      streamHandedOff = true;
+    } finally {
+      if (!streamHandedOff) {
+        await releaseInFlightLock();
+      }
+    }
   }
 );
 

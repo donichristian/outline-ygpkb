@@ -385,6 +385,33 @@ describe("toUpstreamMessages", () => {
     expect(resolved[T.AiChatMaxMessages - 1].content).toEqual("the newest turn");
   });
 
+  it("drops a pending assistant turn the committed window already ends with", () => {
+    const resolved = toUpstreamMessages(
+      [
+        { role: "user", content: "What is the payments runbook?" },
+        { role: "assistant", content: "It is in the docs." },
+      ],
+      { role: "assistant", content: "It is in the docs." }
+    );
+
+    expect(resolved).toEqual([
+      { role: "user", content: "What is the payments runbook?" },
+      { role: "assistant", content: "It is in the docs." },
+    ]);
+  });
+
+  it("keeps a pending assistant turn the committed window does not contain", () => {
+    const resolved = toUpstreamMessages(
+      [{ role: "user", content: "What is the payments runbook?" }],
+      { role: "assistant", content: "A draft the user is regenerating." }
+    );
+
+    expect(resolved).toEqual([
+      { role: "user", content: "What is the payments runbook?" },
+      { role: "assistant", content: "A draft the user is regenerating." },
+    ]);
+  });
+
   it("flattens multi-part text in order and skips thinking parts", () => {
     expect(
       toUpstreamMessages([
