@@ -8,7 +8,7 @@ describe("shouldAutoDeleteDraftOnUnmount", () => {
     isDraft: true,
     isActive: true,
     hasEmptyTitle: true,
-    isJustCreated: false,
+    isPersistedOnce: true,
   };
 
   it("does not auto delete drafts with non-empty editor content", () => {
@@ -34,7 +34,7 @@ describe("shouldAutoDeleteDraftOnUnmount", () => {
       shouldAutoDeleteDraftOnUnmount({
         ...baseOptions,
         isEditorEmpty: true,
-        isJustCreated: true,
+        isPersistedOnce: false,
       })
     ).toBe(false);
   });

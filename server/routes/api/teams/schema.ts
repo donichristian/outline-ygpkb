@@ -78,8 +78,10 @@ export const TeamsUpdateSchema = BaseSchema.extend({
         [TeamPreference.MCP]: z.boolean(),
         /** List of disabled embed provider titles. */
         [TeamPreference.DisabledEmbeds]: z.array(z.string()),
-        /** Whether the AI chat workspace feature is enabled. */
-        [TeamPreference.AIChat]: z.boolean(),
+          /** Whether the AI chat workspace feature is enabled. */
+          [TeamPreference.AIChat]: z.boolean(),
+          /** Whether users can create documents in a personal collection. */
+          [TeamPreference.PersonalDocs]: z.boolean(),
       })
       .partial()
       .optional(),
@@ -95,3 +97,12 @@ export const TeamsDeleteSchema = BaseSchema.extend({
 });
 
 export type TeamsDeleteSchemaReq = z.infer<typeof TeamsDeleteSchema>;
+
+export const TeamsCreateSchema = BaseSchema.extend({
+  body: z.object({
+    /** Name of the new team */
+    name: z.string(),
+  }),
+});
+
+export type TeamsCreateSchemaReq = z.infer<typeof TeamsCreateSchema>;

@@ -59,7 +59,7 @@ export function shouldAutoDeleteDraftOnUnmount({
   isDraft,
   isActive,
   hasEmptyTitle,
-  isJustCreated,
+  isPersistedOnce,
 }: {
   isEditorEmpty: boolean;
   title: string;
@@ -68,12 +68,13 @@ export function shouldAutoDeleteDraftOnUnmount({
   isDraft: boolean;
   isActive: boolean;
   hasEmptyTitle: boolean;
-  isJustCreated: boolean;
+  isPersistedOnce: boolean;
 }) {
-  // A document the user is still in the middle of creating must never be
-  // trashed. `isJustCreated` covers both the window right after creation and the
-  // synthetic unmount React StrictMode performs on mount, which would otherwise
-  // delete a fresh draft before the user has typed anything.
+  // A document that was never persisted after it was created is still the
+  // user's in-progress draft, so it must never be trashed. `isPersistedOnce`
+  // covers both the window right after creation and the synthetic unmount
+  // React StrictMode performs on mount, which would otherwise delete a fresh
+  // draft before the user has typed anything.
   return (
     isEditorEmpty &&
     title.trim() === "" &&
@@ -81,7 +82,7 @@ export function shouldAutoDeleteDraftOnUnmount({
     isDraft &&
     isActive &&
     hasEmptyTitle &&
-    !isJustCreated
+    isPersistedOnce
   );
 }
 
@@ -329,7 +330,7 @@ export function useDocumentSave({
   // Initial dirty check on mount
   useEffect(() => {
     updateIsDirty();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // When readOnly changes from true to false, recalculate dirty state
@@ -342,35 +343,49 @@ export function useDocumentSave({
   }, [readOnly, updateIsDirty]);
 
   // Auto-delete/auto-save on unmount + debounce cleanup
-  useEffect(
-    () => () => {
+  const isMountedRef = useRef(false);
+  useEffect(() => {
+    isMountedRef.current = true;
+
+    return () => {
+      isMountedRef.current = false;
       autosave.cancel();
+
+      // Read the editor now, as it may be destroyed by the time the check runs.
+      // oxlint-disable-next-line react-hooks/exhaustive-deps
       const currentDoc = editorRef.current?.view.state.doc;
       const isEditorEmpty =
         !currentDoc || ProsemirrorHelper.isEmpty(currentDoc);
+      const currentTitle = titleRef.current;
 
-      if (
-        shouldAutoDeleteDraftOnUnmount({
-          isEditorEmpty,
-          title: titleRef.current,
-          createdById: document.createdBy?.id,
-          currentUserId: auth.user?.id,
-          isDraft: document.isDraft,
-          isActive: document.isActive,
-          hasEmptyTitle: document.hasEmptyTitle,
-          isJustCreated: document.isJustCreated,
-        })
-      ) {
-        void document.delete();
-      } else if (document.isDirty()) {
-        void document.save(undefined, {
-          autosave: true,
-        });
-      }
-    },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    []
-  );
+      // Defer the check so that a StrictMode remount does not count as an unmount.
+      queueMicrotask(() => {
+        if (isMountedRef.current) {
+          return;
+        }
+
+        if (
+          shouldAutoDeleteDraftOnUnmount({
+            isEditorEmpty,
+            title: currentTitle,
+            createdById: document.createdBy?.id,
+            currentUserId: auth.user?.id,
+            isDraft: document.isDraft,
+            isActive: document.isActive,
+            hasEmptyTitle: document.hasEmptyTitle,
+            isPersistedOnce: document.isPersistedOnce,
+          })
+        ) {
+          void document.delete();
+        } else if (document.isDirty()) {
+          void document.save(undefined, {
+            autosave: true,
+          });
+        }
+      });
+    };
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return {
     isUploading,

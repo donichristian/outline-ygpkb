@@ -58,10 +58,14 @@ outline-ygpkb/
 └── server/migrations/   307 Sequelize migrations (compiled before db:migrate)
 ```
 
+Note that `shared/types.ts` no longer exists — upstream split it into the
+`shared/types/` directory (`index.ts` re-exports every module). Import
+`@shared/types` as before; only the file layout changed.
+
 ## Path aliases (critical for crawling imports)
 
-Defined in `tsconfig.json`; **duplicated** in `vitest.config.ts`, `vite.config.ts`
-(only `~` and `@shared`), and `.swcrc`. Keep all in sync.
+Defined in `tsconfig.json`; **duplicated** in `vitest.config.mts`,
+`vite.config.mts` (only `~` and `@shared`), and `.swcrc`. Keep all in sync.
 
 | Alias | Resolves to |
 |-------|-------------|
@@ -125,6 +129,39 @@ something.
 `yarn lint` → `yarn tsc` → `yarn test <file>`. Typecheck before tests; a
 type error usually explains a test failure.
 
+## General guidelines
+
+- Critical – Do not create new markdown (.md) files.
+- Use early returns for readability.
+- Leave an empty line above every comment, unless the comment is the first line in a block.
+- Emphasize type safety and static analysis.
+- Follow consistent oxfmt formatting.
+- Do not replace smart quotes (“”) or (‘’) with simple quotes ("").
+- Do not add translation strings manually; they will be extracted automatically from the codebase.
+
+## Dependencies and upgrading
+
+- Use `yarn` for all dependency management.
+- After updating dependency versions, install to update lockfiles:
+
+```bash
+yarn install
+```
+
+- When adding a `resolutions` entry to address a security advisory in a transitive dependency, target only the specific vulnerable descriptors using the `name@npm:<range>` syntax rather than overriding the package globally. Inspect `yarn.lock` to find the exact ranges requested by upstream packages and add one entry per vulnerable range, e.g.:
+
+```json
+"resolutions": {
+  "qs@npm:^6.5.2": "^6.14.2",
+  "qs@npm:^6.11.0": "^6.14.2",
+  "qs@npm:^6.14.0": "^6.14.2"
+}
+```
+
+This keeps overrides scoped to the affected dependents and avoids forcing
+unrelated consumers onto an incompatible version. Never hand-merge
+`yarn.lock` — take either side whole and regenerate with `yarn install`.
+
 ## Windows environment
 
 No Docker, no WSL, no bash (WSL is not installed and virtualization is
@@ -183,13 +220,17 @@ For multi-line commit messages, read the message from a file and pipe it to
 - Unhandled promise rejections do **not** fail tests
   (`dangerouslyIgnoreUnhandledErrors: true`). A green run does not prove there
   are no stray rejections.
+- Mock external dependencies in the `__mocks__` folder. Aim for high coverage
+  of the critical paths, not 100% coverage.
 
 ## Code conventions
 
-- TypeScript strict mode. Never `any`; avoid `unknown`. Prefer types over
-  assertions (`as`, `!`).
+- TypeScript strict mode. Never `any`; avoid `unknown` unless absolutely
+  necessary. Prefer types over assertions (`as`, `!`). Prefer `interface` over
+  `type` for object shapes.
 - JSDoc on all exported functions and classes, including `@param`/`@return`
-  (lowercase, trailing period) and `@throws` where applicable.
+  (lowercase, trailing period) and `@throws` where applicable. Add a newline
+  between the description and the `@` block.
 - Named exports only. Exported members go at the top of the file.
 - Members ordered: public static vars → public static methods → public vars →
   public methods → protected → private. Use `private`, not `#`.
@@ -197,20 +238,68 @@ For multi-line commit messages, read the message from a file and pipe it to
 - Preserve smart quotes (“” and ‘’) in copy.
 - React: function components with hooks, `handle*` for event handlers,
   styled-components, ARIA/semantic HTML. Import React only when used directly.
+  - In components that stay mounted across navigation (layout, sidebar,
+    command bar), do not use `useLocation`. Use `useLocationSelector` to select
+    only the value you need, or read `history.location` in effects and handlers.
+  - Give stable props to memoized and `observer` components, especially list
+    rows. Do not create new arrays, objects, or JSX on each render; use shared
+    constants for empty arrays.
+  - Do not read `ref.current` during render to pass it to props or context.
+    Keep the element in state with a callback ref.
+  - If the initial value of `useState` reads observables, use a lazy
+    initializer. Otherwise the expression runs, and subscribes, on every render.
 - MobX: stores in `app/stores/`, business logic in stores not components,
   prefer `computed` over recalculating in render.
+  - Do not read an observable during render only for an effect or a per-item
+    check. Use `useComputed` to derive a narrow value (e.g. `isActive`) so only
+    affected components re-render.
+  - Use `observable.map` rather than a set when observers check membership by
+    key. `ObservableSet.has()` tracks the whole set, so any change re-renders
+    every observer.
+  - Store lookups called for each row of a list must not scan a computed list
+    such as `orderedData`, as this subscribes the component to every item.
+  - A context value provided near the app root must not change on navigation.
+    Expose frequently changing store values as getters read on access, not
+    values read during render.
 - Sequelize models in `server/models/`; transactions for multi-table writes.
+  - When updating Sequelize array or JSON attributes, replace the value instead
+    of mutating it in place; reload the model in tests to verify persistence
+    rather than trusting its in-memory state.
+  - Schedule optional background work that depends on a transaction from
+    `afterCommit`, and use non-fatal scheduling so a queue failure does not fail
+    the committed operation.
 - API routes in `server/routes/api/` stay thin — put logic in model methods or
   `server/commands/`. Validate with the `validate` middleware and zod schemas,
   shape responses with presenters.
 - Authorization via policies in `server/policies/` (cancan-style abilities).
-  Always authorize before data access.
+  Always authorize before data access. JWTs authenticate; `AuthenticationType`
+  records how. Set account email and passkey management routes to
+  `AuthenticationType.APP`; API-key authentication must not change login
+  credentials or authenticators.
+- Real-time: Y.js over WebSocket for collaborative editing; handle connection
+  state changes gracefully. For bulk deletions that drive authorization or
+  WebSocket processing, load affected models in the transaction and delete each
+  with request context so downstream processors receive the expected per-item
+  events. Do not persist viewer-specific unfurls in shared document mentions;
+  only store unfurls that map to a stable mention type.
 - Errors: custom classes in `server/errors.ts`. Never leak sensitive detail.
+  Log errors with appropriate context and return user-friendly messages.
 - Sanitize user input. In ProseMirror `toDOM`, always wrap
   user-controlled `href`/`src` in `sanitizeUrl()` — unlike React, `toDOM`
-  writes raw DOM and does not sanitize.
+  writes raw DOM and does not sanitize. Use CSRF protection and the
+  `rateLimiter` middleware for sensitive endpoints; follow OWASP guidelines and
+  never store sensitive data in plain text.
 - Use `yarn` for dependency changes. Scope `resolutions` entries to specific
   vulnerable descriptors (`pkg@npm:^x.y.z`) rather than overriding globally.
+
+## Performance
+
+- Use React.memo for expensive components.
+- Implement pagination for large lists.
+- Use database indexes effectively.
+- Cache expensive computations.
+- Monitor performance with appropriate tools.
+- Lazy load routes and components where appropriate.
 
 ## Architecture notes
 

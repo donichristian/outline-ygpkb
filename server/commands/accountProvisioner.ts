@@ -217,6 +217,7 @@ async function accountProvisioner(
       const count = await Collection.count({
         where: {
           teamId: team.id,
+          ownerId: null,
         },
       });
       provision = count === 0;
@@ -246,7 +247,16 @@ async function accountProvisioner(
   };
 }
 
-async function provisionFirstCollection(
+/**
+ * Creates the default "Welcome" collection and onboarding documents for a
+ * newly created team.
+ *
+ * @param ctx the request context.
+ * @param team the team to provision the collection for.
+ * @param user the user that will be recorded as the creator.
+ * @returns a promise that resolves when the collection has been created.
+ */
+export async function provisionFirstCollection(
   ctx: APIContext,
   team: Team,
   user: User

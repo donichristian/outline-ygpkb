@@ -1,4 +1,4 @@
-import Router from "koa-router";
+import Router from "@koa/router";
 import ai from "./ai";
 import aiSessions from "./aiSessions";
 

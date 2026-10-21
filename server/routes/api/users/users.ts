@@ -1,4 +1,4 @@
-import Router from "koa-router";
+import Router from "@koa/router";
 import type { WhereOptions } from "sequelize";
 import { Op, Sequelize } from "sequelize";
 import { NotificationEventType, UserRole } from "@shared/types";
@@ -119,7 +119,6 @@ router.post(
       }),
       User.count({
         where,
-        // @ts-expect-error Types are incorrect for count
         replacements,
       }),
     ]);
@@ -164,7 +163,7 @@ router.post(
   validate(T.UsersUpdateEmailSchema),
   async (ctx: APIContext<T.UsersUpdateEmailReq>) => {
     if (!env.EMAIL_ENABLED) {
-      throw ValidationError("Email support is not setup for this instance");
+      throw ValidationError("Email support is not set up for this instance");
     }
 
     const { user: actor } = ctx.state.auth;
@@ -207,7 +206,7 @@ router.get(
   validate(T.UsersUpdateEmailConfirmSchema),
   async (ctx: APIContext<T.UsersUpdateEmailConfirmReq>) => {
     if (!env.EMAIL_ENABLED) {
-      throw ValidationError("Email support is not setup for this instance");
+      throw ValidationError("Email support is not set up for this instance");
     }
 
     const { transaction } = ctx.state;
@@ -372,10 +371,11 @@ async function updateRole(ctx: APIContext<T.UsersChangeRoleReq>) {
   const actor = ctx.state.auth.user;
 
   const user = await User.findByPk(userId, {
-    rejectOnEmpty: true,
     transaction,
     lock: transaction.LOCK.UPDATE,
   });
+  authorize(actor, "update", user);
+
   await Team.findByPk(user.teamId, {
     transaction,
     lock: transaction.LOCK.UPDATE,
@@ -572,7 +572,7 @@ router.post(
   auth(),
   async (ctx: APIContext) => {
     if (!env.EMAIL_ENABLED) {
-      throw ValidationError("Email support is not setup for this instance");
+      throw ValidationError("Email support is not set up for this instance");
     }
 
     const { user } = ctx.state.auth;
