@@ -212,7 +212,6 @@ describe("POST /api/ai.chat reasoning", () => {
 
     const bodies = stubProvider([
       'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n',
-      "data: [DONE]\n\n",
     ]);
 
     await ask(user, session.id);
@@ -237,7 +236,6 @@ describe("POST /api/ai.chat reasoning", () => {
 
     const bodies = stubProvider([
       'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n',
-      "data: [DONE]\n\n",
     ]);
 
     await ask(user, session.id);
@@ -258,7 +256,6 @@ describe("POST /api/ai.chat reasoning", () => {
 
     const bodies = stubProvider([
       'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":"stop"}]}\n\n',
-      "data: [DONE]\n\n",
     ]);
 
     await ask(user, session.id, {
@@ -287,7 +284,6 @@ describe("POST /api/ai.chat reasoning", () => {
     stubProvider([
       'data: {"choices":[{"delta":{"reasoning_content":"The runbook covers payments."}}]}\n\n',
       'data: {"choices":[{"delta":{"content":"The payments deployment runbook is indexed."},"finish_reason":"stop"}]}\n\n',
-      "data: [DONE]\n\n",
     ]);
 
     const text = await ask(user, session.id);

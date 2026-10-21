@@ -62,7 +62,6 @@ function groundedAnswerResponse(): Response {
   return streamingResponse([
     'data: {"choices":[{"delta":{"content":"Payments."}}]}\n\n',
     'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
-    "data: [DONE]\n\n",
   ]);
 }
 
@@ -440,8 +439,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
       )}"`
     );
     expect(busyText).not.toContain('"type":"CUSTOM"');
-    expect(busyText).not.toContain("event:");
-    expect(busyText).not.toContain("[DONE]");
+    expect(busyText.split("\n\n").filter(Boolean)).toHaveLength(5);
 
     // The busy turn wrote no row, and it must not have released the lock the
     // first turn still holds — a bare release here would un-cap the session.

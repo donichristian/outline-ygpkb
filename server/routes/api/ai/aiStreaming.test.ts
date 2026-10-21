@@ -1,4 +1,7 @@
 // @vitest-isolate true
+import { Readable } from "node:stream";
+import { readFileSync } from "node:fs";
+import { chat, toServerSentEventsResponse } from "@tanstack/ai";
 import { TeamPreference } from "@shared/types";
 import env from "@server/env";
 import Logger from "@server/logging/Logger";
@@ -11,6 +14,7 @@ import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
 import Redis from "@server/storage/redis";
 import { OutOfScopeRefusal } from "./scope";
+import { createAiChatAdapter } from "./adapter";
 
 vi.mock("./tanstack", () => ({
   loadTanstack: () => import("@tanstack/ai"),
@@ -53,6 +57,21 @@ function streamingResponse(chunks: string[], status = 200): Response {
     status,
     headers: { "Content-Type": "text/event-stream" },
   });
+}
+
+/**
+ * The terminal two Chat Completions chunks recorded from the gateway probe in
+ * `.omo/evidence/03-gateway-finish-reason.txt` (todo 3), verbatim. The verdict
+ * recorded there is `finish_reason present`, which is why the contract test
+ * below asserts a finished run rather than an incomplete-stream error.
+ *
+ * @returns the recorded chunks, in wire order.
+ */
+function recordedGatewayChunks(): string[] {
+  return [
+    'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"matius","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}\n\n',
+    'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"matius","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+  ];
 }
 
 /**
@@ -248,6 +267,28 @@ function lockKey(user: TestUser, sessionId: string) {
 }
 
 /**
+ * Parses an SSE body into its AG-UI frames, asserting the wire shape as it
+ * goes: every block is an unlabelled `data:` line carrying one JSON event —
+ * the AG-UI helper emits no named events and no terminal sentinel.
+ *
+ * @param text the SSE response body.
+ * @returns the parsed frames, in wire order.
+ */
+function parseAgUiFrames(text: string) {
+  return text
+    .split("\n\n")
+    .filter((block) => block.length > 0)
+    .map((block) => {
+      expect(block.startsWith("data: ")).toBe(true);
+      return JSON.parse(block.slice("data: ".length)) as {
+        type: string;
+        delta?: string;
+        metadata?: { tanstack?: { finishReason?: string } };
+      };
+    });
+}
+
+/**
  * Waits for the in-flight lock to disappear. The release runs after the row is
  * committed, so a test that only awaited the rows can still catch the key.
  *
@@ -319,7 +360,6 @@ function providerContacted() {
       streamingResponse([
         'data: {"choices":[{"delta":{"content":"Hi"}}]}\n\n',
         'data: {"choices":[{"delta":{"content":" there"},"finish_reason":"stop"}]}\n\n',
-        "data: [DONE]\n\n",
       ])
     );
   });
@@ -444,10 +484,13 @@ describe("POST /api/ai.chat turn persistence", () => {
     const frames = text
       .split("\n\n")
       .filter((frame) => frame.startsWith("data: "))
-      .map((frame) => JSON.parse(frame.slice("data: ".length)) as {
-        type: string;
-        threadId?: string;
-      });
+      .map(
+        (frame) =>
+          JSON.parse(frame.slice("data: ".length)) as {
+            type: string;
+            threadId?: string;
+          }
+      );
     expect(frames[0]?.type).toEqual("RUN_STARTED");
     expect(frames[0]?.threadId).toEqual(session.id);
     expect(frames.at(-1)?.threadId).toEqual(session.id);
@@ -510,7 +553,6 @@ describe("POST /api/ai.chat turn persistence", () => {
         .mockResolvedValue(
           streamingResponse([
             'data: {"choices":[{"delta":{"content":"Quarterly."},"finish_reason":"stop"}]}\n\n',
-            "data: [DONE]\n\n",
           ])
         )
     );
@@ -718,18 +760,7 @@ describe("POST /api/ai.chat turn persistence", () => {
     expect(await waitForLockRelease(user, session.id)).toEqual(null);
   });
 
-  it.each([
-    [
-      "completed",
-      'data: {"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}\n\n',
-      '"type":"RUN_FINISHED"',
-    ],
-    [
-      "truncated",
-      'data: {"choices":[{"delta":{"content":"Cut off"}}]}\n\n',
-      '"type":"RUN_ERROR"',
-    ],
-  ])("records a stream that ends with %s", async (status, frame, terminal) => {
+  it("records a stream that ends with a finish_reason as completed", async () => {
     const user = await buildUser();
     await configureAiChat(user);
     await seedReadableDocument(
@@ -740,7 +771,13 @@ describe("POST /api/ai.chat turn persistence", () => {
 
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(streamingResponse([frame, "data: [DONE]\n\n"]))
+      vi
+        .fn()
+        .mockResolvedValue(
+          streamingResponse([
+            'data: {"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}\n\n',
+          ])
+        )
     );
 
     const res = await server.post("/api/ai.chat", user, {
@@ -756,11 +793,59 @@ describe("POST /api/ai.chat turn persistence", () => {
     });
     const text = await res.text();
 
-    expect(text).toContain(terminal);
+    expect(text).toContain('"type":"RUN_FINISHED"');
+    expect(text).not.toContain('"type":"RUN_ERROR"');
 
     const rows = await waitForRows(session.id, 2);
     expect(rows).toHaveLength(2);
-    expect(rows[1].status).toEqual(status);
+    expect(rows[1].status).toEqual(AIChatMessageStatus.Completed);
+    expect(rows[1].role).toEqual(AIChatMessageRole.Assistant);
+    expect(rows[1].runId).toEqual(rows[0].runId);
+    expect(await waitForLockRelease(user, session.id)).toEqual(null);
+  });
+
+  it("maps a stream that ends without a finish_reason to truncated and releases the lock", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(
+      user,
+      "The deployment runbook covers the payments service"
+    );
+    const session = await buildSession(user);
+
+    // The adapter converts this exact case into a RUN_ERROR with the code
+    // `incomplete-stream` (verified in todo 3's probe); the route strips the
+    // code off the wire, so `truncated` is the only status reachable through
+    // that code and asserting it here proves the mapping.
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          streamingResponse([
+            'data: {"choices":[{"delta":{"content":"Cut off"}}]}\n\n',
+          ])
+        )
+    );
+
+    const res = await server.post("/api/ai.chat", user, {
+      body: {
+        sessionId: session.id,
+        messages: [
+          {
+            role: "user",
+            content: "What is the payments deployment runbook?",
+          },
+        ],
+      },
+    });
+    const text = await res.text();
+
+    expect(text).toContain('"type":"RUN_ERROR"');
+
+    const rows = await waitForRows(session.id, 2);
+    expect(rows).toHaveLength(2);
+    expect(rows[1].status).toEqual(AIChatMessageStatus.Truncated);
     expect(rows[1].role).toEqual(AIChatMessageRole.Assistant);
     expect(rows[1].runId).toEqual(rows[0].runId);
     expect(await waitForLockRelease(user, session.id)).toEqual(null);
@@ -777,12 +862,13 @@ describe("POST /api/ai.chat turn persistence", () => {
 
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        streamingResponse([
-          'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
-          "data: [DONE]\n\n",
-        ])
-      )
+      vi
+        .fn()
+        .mockResolvedValue(
+          streamingResponse([
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          ])
+        )
     );
 
     const res = await server.post("/api/ai.chat", user, {
@@ -853,7 +939,6 @@ describe("POST /api/ai.chat turn persistence", () => {
           streamingResponse([
             'data: {"choices":[{"delta":{"content":"He"}}]}\n\n',
             'data: {"choices":[{"delta":{"content":"llo"},"finish_reason":"stop"}]}\n\n',
-            "data: [DONE]\n\n",
           ])
         )
     );
@@ -887,17 +972,9 @@ describe("POST /api/ai.chat turn persistence", () => {
     expect(res.status).toEqual(200);
     expect(res.headers.get("content-type")).toContain("text/event-stream");
 
-    // Every frame is an unlabelled `data:` event: AG-UI carries no `event:`
-    // names and no `[DONE]` sentinel, and the terminal frame is server-authored
-    // rather than the provider's.
-    expect(text).not.toContain("event:");
-    expect(text).not.toContain("[DONE]");
-    const frames = text
-      .split("\n\n")
-      .filter((frame) => frame.startsWith("data: "))
-      .map((frame) => JSON.parse(frame.slice("data: ".length)) as {
-        type: string;
-      });
+    // Every frame is an unlabelled `data:` event, and the terminal frame is
+    // server-authored rather than the provider's.
+    const frames = parseAgUiFrames(text);
     expect(frames[0]?.type).toEqual("RUN_STARTED");
     expect(frames.at(-1)?.type).toEqual("RUN_FINISHED");
     expect(frames.some((frame) => frame.type === "RUN_ERROR")).toBe(false);
@@ -1047,5 +1124,124 @@ describe("POST /api/ai.chat turn persistence", () => {
         ([warning]) => warning === "No transaction provided to insertEvent"
       )
     ).toHaveLength(0);
+  });
+});
+
+describe("POST /api/ai.chat node Readable invariant", () => {
+  it("builds the streamed body through Readable.fromWeb", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(
+      user,
+      "The deployment runbook covers the payments service"
+    );
+    const session = await buildSession(user);
+
+    const { fetchMock } = providerContacted();
+    vi.stubGlobal("fetch", fetchMock);
+
+    // The API response middleware only treats a node stream as unserializable
+    // (middlewares/apiResponse.ts), so asserting the exact constructor the
+    // route hands to Koa is the invariant itself.
+    const fromWeb = vi.spyOn(Readable, "fromWeb");
+
+    const res = await server.post("/api/ai.chat", user, {
+      body: {
+        sessionId: session.id,
+        messages: [
+          { role: "user", content: "What is the payments deployment runbook?" },
+        ],
+      },
+    });
+    expect(res.status).toEqual(200);
+    await res.text();
+
+    expect(fromWeb).toHaveBeenCalledTimes(1);
+    const body = fromWeb.mock.results[0]?.value;
+    expect(body).toBeInstanceOf(Readable);
+  });
+
+  it("assigns ctx.body only through Readable.fromWeb or a synthetic node Readable", () => {
+    const source = readFileSync(new URL("./ai.ts", import.meta.url), "utf8");
+    const assignments = [...source.matchAll(/ctx\.body\s*=\s*([^;]+);/g)].map(
+      (match) => match[1].trim()
+    );
+
+    expect(assignments.length).toBeGreaterThan(0);
+    for (const rhs of assignments) {
+      if (/^(Readable\.fromWeb\(|new Readable\()/.test(rhs)) {
+        continue;
+      }
+      expect(source).toMatch(new RegExp(`const ${rhs} = new Readable\\(`));
+    }
+  });
+});
+
+describe("AG-UI contract against the recorded gateway bytes", () => {
+  it("turns the recorded Chat Completions output into a finished run", async () => {
+    // The SDK captures `fetch` when the client is constructed, so the stub has
+    // to be in place before the adapter is built.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(streamingResponse(recordedGatewayChunks()))
+    );
+    const adapter = await createAiChatAdapter();
+
+    // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- cast precedent: server/routes/api/ai/ai.ts feeds the same adapter type into chat().
+    const stream = chat({
+      adapter: adapter as unknown as Parameters<typeof chat>[0]["adapter"],
+      messages: [{ role: "user", content: "hello" }] as unknown as Parameters<
+        typeof chat
+      >[0]["messages"],
+      threadId: "thread-contract",
+    });
+    const response = toServerSentEventsResponse(stream);
+    const text = await response.text();
+
+    const frames = parseAgUiFrames(text);
+    const types = frames.map((frame) => frame.type);
+    expect(types).toEqual([
+      "RUN_STARTED",
+      "TEXT_MESSAGE_START",
+      "TEXT_MESSAGE_CONTENT",
+      "TEXT_MESSAGE_END",
+      "RUN_FINISHED",
+    ]);
+    expect(
+      frames.find((frame) => frame.type === "TEXT_MESSAGE_CONTENT")?.delta
+    ).toEqual(" world");
+    const finished = frames.at(-1);
+    expect(finished?.metadata?.tanstack?.finishReason).toEqual("stop");
+  });
+
+  it("turns the recorded output without a finish_reason into incomplete-stream", async () => {
+    // The first recorded chunk is what the gateway sends before terminating;
+    // without the terminal chunk the adapter must report the incomplete stream
+    // that todo 5 maps to `truncated`. Only recorded bytes are used here too.
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          streamingResponse(recordedGatewayChunks().slice(0, 1))
+        )
+    );
+    const adapter = await createAiChatAdapter();
+
+    // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- cast precedent: server/routes/api/ai/ai.ts feeds the same adapter type into chat().
+    const stream = chat({
+      adapter: adapter as unknown as Parameters<typeof chat>[0]["adapter"],
+      messages: [{ role: "user", content: "hello" }] as unknown as Parameters<
+        typeof chat
+      >[0]["messages"],
+      threadId: "thread-contract",
+    });
+    const response = toServerSentEventsResponse(stream);
+    const text = await response.text();
+
+    const error = parseAgUiFrames(text).find(
+      (frame) => frame.type === "RUN_ERROR"
+    ) as { code?: string } | undefined;
+    expect(error?.code).toEqual("incomplete-stream");
   });
 });

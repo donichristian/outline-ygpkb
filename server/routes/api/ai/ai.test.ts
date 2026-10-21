@@ -234,7 +234,6 @@ describe("POST /api/ai.chat", () => {
         streamingResponse([
           'data: {"choices":[{"delta":{"content":"He"}}]}\n\n',
           'data: {"choices":[{"delta":{"content":"llo"},"finish_reason":"stop"}]}\n\n',
-          "data: [DONE]\n\n",
         ])
       );
     vi.stubGlobal("fetch", fetchMock);
@@ -259,8 +258,6 @@ describe("POST /api/ai.chat", () => {
     expect(text).toContain('"delta":"He"');
     expect(text).toContain('"delta":"llo"');
     expect(text).toContain('"type":"RUN_FINISHED"');
-    expect(text).not.toContain("event:");
-    expect(text).not.toContain("[DONE]");
 
     // The upstream was called with the stream flag and our message payload.
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -394,8 +391,6 @@ describe("POST /api/ai.chat", () => {
         "RUN_FINISHED",
       ]);
       expect(text).toContain('"delta":"' + OutOfScopeRefusal + '"');
-      expect(text).not.toContain("event:");
-      expect(text).not.toContain("[DONE]");
       // The header is the only out-of-band signal: a CUSTOM event would make the
       // client depend on its library surfacing custom events, which it need not.
       expect(text).not.toContain('"type":"CUSTOM"');
@@ -417,7 +412,6 @@ describe("POST /api/ai.chat", () => {
         .mockResolvedValue(
           streamingResponse([
             'data: {"choices":[{"delta":{"content":"See onboarding"},"finish_reason":"stop"}]}\n\n',
-            "data: [DONE]\n\n",
           ])
         );
       vi.stubGlobal("fetch", fetchMock);
@@ -498,8 +492,6 @@ describe("POST /api/ai.chat", () => {
       ]);
       expect(text).toContain(`"delta":"${OutOfScopeRefusal}"`);
       expect(text).not.toContain('"type":"CUSTOM"');
-      expect(text).not.toContain("event:");
-      expect(text).not.toContain("[DONE]");
       expect(fetchMock).not.toHaveBeenCalled();
 
       // `appendTurn` is awaited before the synthetic `Readable` is built, so a
@@ -537,7 +529,6 @@ describe("POST /api/ai.chat", () => {
         .mockResolvedValue(
           streamingResponse([
             'data: {"choices":[{"delta":{"content":"Paris"},"finish_reason":"stop"}]}\n\n',
-            "data: [DONE]\n\n",
           ])
         );
       vi.stubGlobal("fetch", fetchMock);
@@ -595,8 +586,7 @@ describe("POST /api/ai.chat", () => {
         .fn()
         .mockResolvedValue(
           streamingResponse([
-            'data: {"choices":[{"delta":{"content":"Hello"}}]}\n\n',
-            "data: [DONE]\n\n",
+            'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":"stop"}]}\n\n',
           ])
         );
       vi.stubGlobal("fetch", fetchMock);
@@ -623,8 +613,7 @@ describe("POST /api/ai.chat", () => {
         .fn()
         .mockResolvedValue(
           streamingResponse([
-            'data: {"choices":[{"delta":{"content":"Halo"}}]}\n\n',
-            "data: [DONE]\n\n",
+            'data: {"choices":[{"delta":{"content":"Halo"},"finish_reason":"stop"}]}\n\n',
           ])
         );
       vi.stubGlobal("fetch", fetchMock);
@@ -683,7 +672,11 @@ describe("POST /api/ai.chat", () => {
 
       const fetchMock = vi
         .fn()
-        .mockResolvedValue(streamingResponse(["data: [DONE]\n\n"]));
+        .mockResolvedValue(
+          streamingResponse([
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+          ])
+        );
       vi.stubGlobal("fetch", fetchMock);
 
       const res = await server.post("/api/ai.chat", user, {

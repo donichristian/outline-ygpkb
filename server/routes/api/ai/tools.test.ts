@@ -56,7 +56,6 @@ function toolCallFrames(): string[] {
   return [
     'data: {"id":"cmpl-1","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search_workspace","arguments":"{\\"query\\":\\"payments deployment runbook\\"}"}}]}}]}\n\n',
     'data: {"id":"cmpl-1","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
-    "data: [DONE]\n\n",
   ];
 }
 
@@ -69,7 +68,6 @@ function answerFrames(): string[] {
   return [
     'data: {"id":"cmpl-2","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"content":"Found"}}]}\n\n',
     'data: {"id":"cmpl-2","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"content":" it in the runbook"},"finish_reason":"stop"}]}\n\n',
-    "data: [DONE]\n\n",
   ];
 }
 
@@ -87,12 +85,16 @@ function stubProviderTwoTurns() {
 
   vi.stubGlobal(
     "fetch",
-    vi.fn().mockImplementation(
-      (_url: unknown, init: { body?: string } | undefined) => {
-        requestBodies.push(init?.body ?? "");
-        return Promise.resolve(streamingResponse(requestBodies.length === 1 ? toolFrames : answer));
-      }
-    )
+    vi
+      .fn()
+      .mockImplementation(
+        (_url: unknown, init: { body?: string } | undefined) => {
+          requestBodies.push(init?.body ?? "");
+          return Promise.resolve(
+            streamingResponse(requestBodies.length === 1 ? toolFrames : answer)
+          );
+        }
+      )
   );
 
   return requestBodies;
@@ -136,7 +138,9 @@ function parseFrames(text: string) {
   return text
     .split("\n\n")
     .filter((frame) => frame.startsWith("data: "))
-    .map((frame) => JSON.parse(frame.slice("data: ".length)) as { type: string });
+    .map(
+      (frame) => JSON.parse(frame.slice("data: ".length)) as { type: string }
+    );
 }
 
 const originalBaseUrl = env.AI_CHAT_BASE_URL;
@@ -195,7 +199,9 @@ describe("POST /api/ai.chat server tools", () => {
 
     // The route forwards exactly the frozen allowlist, regardless of the client.
     expect(
-      firstSent.tools.map((t: { function: { name: string } }) => t.function.name)
+      firstSent.tools.map(
+        (t: { function: { name: string } }) => t.function.name
+      )
     ).toEqual(["search_workspace"]);
     expect(JSON.stringify(secondSent.messages)).toContain("Reference notes");
 
@@ -254,7 +260,9 @@ describe("POST /api/ai.chat server tools", () => {
     }
     const firstSent = JSON.parse(requestBodies[0]);
     expect(
-      firstSent.tools.map((t: { function: { name: string } }) => t.function.name)
+      firstSent.tools.map(
+        (t: { function: { name: string } }) => t.function.name
+      )
     ).toEqual(["search_workspace"]);
 
     // The injected tool was not merged in one of them later either: the run is
