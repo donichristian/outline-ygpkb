@@ -3,6 +3,7 @@ import { TeamPreference } from "@shared/types";
 import env from "@server/env";
 import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
+import { SearchQuery } from "@server/models";
 import { loadServerTools } from "./tools";
 
 vi.mock("./tanstack", () => ({
@@ -213,6 +214,40 @@ describe("POST /api/ai.chat server tools", () => {
     expect(types).toContain("RUN_FINISHED");
     const content = text.includes(" it in the runbook");
     expect(content).toBe(true);
+  });
+
+  it("records the search tool's query in the search audit table under the ai source", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user);
+
+    stubProviderTwoTurns();
+
+    const res = await server.post("/api/ai.chat", user, {
+      body: {
+        messages: [
+          {
+            role: "user",
+            content: "What does the payments deployment runbook cover?",
+          },
+        ],
+      },
+    });
+    const text = await res.text();
+
+    expect(res.status).toEqual(200);
+    expect(text).toContain(" it in the runbook");
+
+    const recorded = await SearchQuery.findAll({
+      where: {
+        teamId: user.teamId,
+        userId: user.id,
+        query: "payments deployment runbook",
+      },
+    });
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].source).toEqual("ai");
+    expect(recorded[0].query).toEqual("payments deployment runbook");
   });
 
   it("ignores tools injected into the request body", async () => {

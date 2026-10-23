@@ -2,6 +2,8 @@ import type * as TanstackAIModule from "@tanstack/ai";
 import type { Filter } from "@shared/helpers/FilterHelper";
 import { z } from "zod";
 import type { User } from "@server/models";
+import { SearchQuery } from "@server/models";
+import { SearchQuerySource } from "@server/models/SearchQuery";
 import SearchProviderManager from "@server/utils/SearchProviderManager";
 import { loadTanstack } from "./tanstack";
 
@@ -66,13 +68,27 @@ function buildServerTools(toolDefinition: TanstackAI["toolDefinition"]) {
     // Authorization is the search provider's own: `searchForUser` narrows
     // results to documents the user can read, so a query cannot surface a
     // document from a collection the requester cannot access.
-    const { total, results } = await SearchProviderManager.getProvider()
-      .searchForUser(context.context.user, {
-        query,
-        filter: ArchivedFilter,
-        offset: 0,
-        limit: MaxToolResults,
-      });
+    const startedAt = Date.now();
+    const { total, results } =
+      await SearchProviderManager.getProvider().searchForUser(
+        context.context.user,
+        {
+          query,
+          filter: ArchivedFilter,
+          offset: 0,
+          limit: MaxToolResults,
+        }
+      );
+    const duration = Date.now() - startedAt;
+
+    await SearchQuery.record({
+      userId: context.context.user.id,
+      teamId: context.context.user.teamId,
+      source: SearchQuerySource.Ai,
+      query,
+      results: total,
+      duration,
+    });
 
     return {
       total,
