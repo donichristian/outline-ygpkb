@@ -9,9 +9,14 @@ import {
   User,
 } from "@server/models";
 import { authorize, can } from "@server/policies";
-import { AuthorizationError, ValidationError } from "@server/errors";
+import { AuthorizationError } from "@server/errors";
 import { presentNavigationNode, presentUser } from "@server/presenters";
 import AuthenticationHelper from "@shared/helpers/AuthenticationHelper";
+import {
+  DEFAULT_CHUNK_LIMIT,
+  MAX_CHUNK_LIMIT,
+  readDocumentBody,
+} from "@server/commands/documentReader";
 import { presentCollection } from "./collections";
 import { presentDocument } from "./documents";
 import { presentTemplate } from "./templates";
@@ -27,88 +32,6 @@ import {
 } from "../util";
 
 const SELF_TOKENS = new Set(["self", "me", "current_user"]);
-
-/** Default characters returned for a document body when none is requested. */
-const DEFAULT_CHUNK_LIMIT = 20000;
-
-/** Maximum characters a single fetch may return, to bound tool output. */
-const MAX_CHUNK_LIMIT = 60000;
-
-/**
- * Extracts the ATX/fenced heading lines from markdown, used to locate a section.
- *
- * @param markdown - the markdown body.
- * @returns an array of `{ level, title, index }` ordered as they appear.
- */
-function findHeadings(markdown: string) {
-  const headings: { level: number; title: string; index: number }[] = [];
-  const lines = markdown.split("\n");
-  let offset = 0;
-
-  for (const line of lines) {
-    const match = /^(#{1,6})\s+(.*\S)\s*$/.exec(line);
-    if (match) {
-      headings.push({
-        level: match[1].length,
-        title: match[2].trim(),
-        index: offset,
-      });
-    }
-    offset += line.length + 1;
-  }
-
-  return headings;
-}
-
-/**
- * Slices out a section of markdown from a heading down to the next heading of
- * the same or higher level, so a subsection is returned whole.
- *
- * @param markdown - the markdown body.
- * @param query - heading text to locate (case-insensitive substring).
- * @returns the section text, or undefined when no heading matches.
- */
-function extractSection(markdown: string, query: string) {
-  const headings = findHeadings(markdown);
-  const needle = query.toLowerCase();
-  const index = headings.findIndex((heading) =>
-    heading.title.toLowerCase().includes(needle)
-  );
-
-  if (index === -1) {
-    return undefined;
-  }
-
-  const { level, index: start } = headings[index];
-  const next = headings
-    .slice(index + 1)
-    .find((heading) => heading.level <= level);
-  const end = next ? next.index : markdown.length;
-
-  return markdown.slice(start, end).trim();
-}
-
-/**
- * Applies offset/limit paging to a document body.
- *
- * @param text - the full markdown body.
- * @param offset - starting character offset.
- * @param limit - maximum characters to return.
- * @returns the chunk plus paging metadata for the caller to surface.
- */
-function chunkText(text: string, offset: number, limit: number) {
-  const total = text.length;
-  const start = Math.max(0, Math.min(offset, total));
-  const end = Math.min(total, start + limit);
-
-  return {
-    chunk: text.slice(start, end),
-    total,
-    start,
-    end,
-    hasMore: end < total,
-  };
-}
 
 /**
  * Extracts a resource identifier from a value that may be a URL or a plain ID.
@@ -237,7 +160,7 @@ export function fetchTool(server: McpServer, scopes: string[]) {
 
             authorize(actor, "read", document);
 
-            const [{ text, ...attributes }, breadcrumb, shareUrl] =
+            const [{ ...attributes }, breadcrumb, shareUrl] =
               await Promise.all([
                 presentDocument(document, {
                   includeData: false,
@@ -249,43 +172,26 @@ export function fetchTool(server: McpServer, scopes: string[]) {
                 getPublicShareUrlForDocument(actor.team, document.id),
               ]);
 
-            const body = typeof text === "string" ? text : "";
-            let content = body;
+            let content: string;
             let paging: Record<string, unknown> | undefined;
 
-            if (section) {
-              const found = extractSection(body, section);
-              if (found === undefined) {
-                return error(
-                  ValidationError(
-                    `No section heading matching "${section}" was found in the document.`
-                  )
-                );
+            try {
+              ({ content, paging } = await readDocumentBody(document, {
+                section,
+                offset,
+                limit,
+              }));
+            } catch (e) {
+              // An unmatched section surfaces as the reader's validation
+              // error; anything else is unexpected and must propagate.
+              if (
+                e instanceof Error &&
+                "id" in e &&
+                (e as { id: string }).id === "validation_error"
+              ) {
+                return error(e);
               }
-              content = found;
-              paging = { section };
-            } else if (offset !== undefined || limit !== undefined) {
-              const chunk = chunkText(
-                body,
-                offset ?? 0,
-                Math.min(limit ?? DEFAULT_CHUNK_LIMIT, MAX_CHUNK_LIMIT)
-              );
-              content = chunk.chunk;
-              paging = {
-                start: chunk.start,
-                end: chunk.end,
-                total: chunk.total,
-                hasMore: chunk.hasMore,
-              };
-            } else if (body.length > DEFAULT_CHUNK_LIMIT) {
-              const chunk = chunkText(body, 0, DEFAULT_CHUNK_LIMIT);
-              content = chunk.chunk;
-              paging = {
-                start: chunk.start,
-                end: chunk.end,
-                total: chunk.total,
-                hasMore: chunk.hasMore,
-              };
+              throw e;
             }
 
             return {
