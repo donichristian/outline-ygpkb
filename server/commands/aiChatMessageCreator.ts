@@ -35,6 +35,11 @@ type Props = {
    */
   citationMiss?: boolean;
   /**
+   * Body-free digest of the tool calls made while generating this message.
+   * Persisted into the `toolCallDigest` column. Absent means none.
+   */
+  toolCallDigest?: Record<string, unknown>;
+  /**
    * The request context, supplying the authenticated type and client address.
    * Its transaction is deliberately neither read nor replaced – a streaming
    * context outlives this write and must not be left pointing at a transaction
@@ -66,8 +71,10 @@ export default async function aiChatMessageCreator({
   runId,
   ctx,
   citationMiss,
+  toolCallDigest,
 }: Props) {
   void citationMiss;
+  void toolCallDigest;
   return retryOnUniqueConstraintError(() =>
     sequelize.transaction(async (transaction) => {
       // A short-lived context bound to this transaction. The caller's context
@@ -102,14 +109,15 @@ export default async function aiChatMessageCreator({
         transaction,
       });
 
-      const message = await AIChatMessage.createWithCtx(txCtx, {
-        sessionId: session.id,
-        role,
-        seq: (last?.seq ?? 0) + 1,
-        content,
-        status,
-        runId: runId ?? null,
-      });
+       const message = await AIChatMessage.createWithCtx(txCtx, {
+         sessionId: session.id,
+         role,
+         seq: (last?.seq ?? 0) + 1,
+         content,
+         status,
+         runId: runId ?? null,
+         toolCallDigest: toolCallDigest ?? null,
+       });
 
       // Sequelize makes `updatedAt` read-only: `set` returns without assigning it on
       // a persisted row (node_modules/sequelize/lib/model.js:2281), and the

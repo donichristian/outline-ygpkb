@@ -77,6 +77,12 @@ class AIChatMessage extends IdModel<
   @Column(DataType.UUID)
   runId: string | null;
 
+  /**
+   * Body-free digest of tool calls made while generating this message.
+   */
+  @Column(DataType.JSONB)
+  toolCallDigest: Record<string, unknown> | null;
+
   // associations
 
   @BelongsTo(() => AIChatSession, "sessionId")

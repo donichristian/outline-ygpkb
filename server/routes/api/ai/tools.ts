@@ -23,6 +23,8 @@ type TanstackAI = typeof TanstackAIModule;
 export type ServerToolContext = {
   /** The requesting user, whose access bounds every read the tool performs. */
   user: User;
+  /** A document bound server-side by an explicit reference on the request. */
+  boundDocumentId?: string;
 };
 
 /** How many documents one tool call returns, keeping the provider context small. */
