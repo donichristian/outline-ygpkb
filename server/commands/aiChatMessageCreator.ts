@@ -30,6 +30,11 @@ type Props = {
   /** The generation run that produced the message, when known. */
   runId?: string | null;
   /**
+   * True when the stored answer carries no document link or identifier that a
+   * tool returned in the same run. Persisted once the model column lands.
+   */
+  citationMiss?: boolean;
+  /**
    * The request context, supplying the authenticated type and client address.
    * Its transaction is deliberately neither read nor replaced – a streaming
    * context outlives this write and must not be left pointing at a transaction
@@ -60,7 +65,9 @@ export default async function aiChatMessageCreator({
   status = AIChatMessageStatus.Completed,
   runId,
   ctx,
+  citationMiss,
 }: Props) {
+  void citationMiss;
   return retryOnUniqueConstraintError(() =>
     sequelize.transaction(async (transaction) => {
       // A short-lived context bound to this transaction. The caller's context

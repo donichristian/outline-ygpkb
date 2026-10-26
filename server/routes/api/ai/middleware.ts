@@ -1,4 +1,4 @@
-import type { ChatMiddleware } from "@tanstack/ai";
+import type { ChatMiddleware, StreamChunk } from "@tanstack/ai";
 import { toError } from "@shared/utils/error";
 import aiChatMessageCreator from "@server/commands/aiChatMessageCreator";
 import Logger from "@server/logging/Logger";
@@ -28,9 +28,12 @@ export type AppendTurnProps = {
   ctx: APIContext;
   /** The request id used to correlate a failed write with the request. */
   requestId?: string;
+  /**
+   * True when the stored answer carries no document link or identifier that a
+   * tool returned in the same run. The turn writer persists it (todo 10).
+   */
+  citationMiss?: boolean;
 };
-
-/** Inputs for {@link createPersistenceMiddleware}. */
 export type PersistenceMiddlewareProps = {
   /** The user the turn belongs to. */
   user: User;
@@ -84,6 +87,7 @@ export async function appendTurn({
   runId,
   ctx,
   requestId,
+  citationMiss,
 }: AppendTurnProps): Promise<void> {
   if (!sessionId) {
     return;
@@ -102,6 +106,7 @@ export async function appendTurn({
       status,
       runId,
       ctx,
+      citationMiss,
     }).catch((err) =>
       Logger.error("AI chat turn could not be persisted", toError(err), {
         requestId,
@@ -137,6 +142,12 @@ function errorCode(error: unknown): unknown {
  * reasoning text is never stored as the answer. A run that produced no text
  * writes no row while still releasing the lock.
  *
+ * Tool-returned document identifiers are collected from `TOOL_CALL_RESULT`
+ * chunks, and at the terminal hook the accumulated answer is checked against
+ * them: an answer that carries none is a citation miss, logged once and passed
+ * to the turn writer so it can be persisted. The check is measure-and-warn
+ * only — it never blocks, buffers, or alters the streamed answer.
+ *
  * The status mapping is:
  * - `onFinish` with a `finishReason` → `completed`.
  * - `onFinish` with a null `finishReason`, or an `incomplete-stream` error →
@@ -156,6 +167,82 @@ export function createPersistenceMiddleware({
   releaseInFlightLock,
 }: PersistenceMiddlewareProps): ChatMiddleware {
   let content = "";
+  const toolResultIdentifiers: Set<string> = new Set();
+
+  /**
+   * Parses the tool result a `TOOL_CALL_RESULT` chunk carries and collects its
+   * document identifiers (link and id) for the citation-miss check. The
+   * engine serializes a tool's structured output into `content` as JSON, so a
+   * string payload is parsed back before reading the `results` array.
+   *
+   * @param chunk the `TOOL_CALL_RESULT` chunk.
+   */
+  const collectToolResultIdentifiers = (
+    chunk: Extract<StreamChunk, { type: "TOOL_CALL_RESULT" }>
+  ): void => {
+    let result: unknown;
+    if (typeof chunk.content === "string") {
+      try {
+        result = JSON.parse(chunk.content);
+      } catch {
+        result = undefined;
+      }
+    } else if (Array.isArray(chunk.content)) {
+      // ContentPart array; tool results serialize into the first text part.
+      const textPart = chunk.content.find(
+        (part): part is { type: "text"; text: string } =>
+          part.type === "text" && typeof part.text === "string"
+      );
+      result = textPart?.text;
+      if (typeof result === "string") {
+        try {
+          result = JSON.parse(result);
+        } catch {
+          result = undefined;
+        }
+      } else {
+        result = undefined;
+      }
+    }
+
+    const items =
+      result && typeof result === "object" && "results" in result
+        ? (result as { results?: unknown }).results
+        : undefined;
+    if (!Array.isArray(items)) {
+      return;
+    }
+    for (const item of items) {
+      if (item && typeof item === "object") {
+        const identifier = item as { documentId?: unknown; url?: unknown };
+        if (typeof identifier.documentId === "string" && identifier.documentId) {
+          toolResultIdentifiers.add(identifier.documentId);
+        }
+        if (typeof identifier.url === "string" && identifier.url) {
+          toolResultIdentifiers.add(identifier.url);
+        }
+      }
+    }
+  };
+
+  /**
+   * The citation-miss check: grounded only when the accumulated answer text
+   * contains an identifier some tool returned in this run. A link the model
+   * produced without a tool ever returning it does not count as sourced.
+   *
+   * @return true when no tool-returned identifier is present in the answer.
+   */
+  const isCitationMiss = (): boolean => {
+    if (toolResultIdentifiers.size === 0) {
+      return true;
+    }
+    for (const identifier of toolResultIdentifiers) {
+      if (content.includes(identifier)) {
+        return false;
+      }
+    }
+    return true;
+  };
 
   /**
    * Persists the accumulated assistant text, then frees the lock. The release
@@ -163,8 +250,20 @@ export function createPersistenceMiddleware({
    * strand the session.
    *
    * @param status how the run ended.
+   * @param citationMiss whether the answer carried no tool-returned source.
    */
-  const persistAndRelease = async (status: AIChatMessageStatus) => {
+  const persistAndRelease = async (
+    status: AIChatMessageStatus,
+    citationMiss: boolean
+  ) => {
+    if (citationMiss) {
+      Logger.warn("AI chat answer carries no tool-returned source", {
+        requestId,
+        runId,
+        reason: "citation-miss",
+      });
+    }
+
     await appendTurn({
       user,
       sessionId,
@@ -174,6 +273,7 @@ export function createPersistenceMiddleware({
       runId,
       ctx,
       requestId,
+      citationMiss,
     });
     await releaseInFlightLock();
   };
@@ -183,17 +283,20 @@ export function createPersistenceMiddleware({
     onChunk(_hookCtx, chunk) {
       if (chunk.type === "TEXT_MESSAGE_CONTENT") {
         content += chunk.delta;
+      } else if (chunk.type === "TOOL_CALL_RESULT") {
+        collectToolResultIdentifiers(chunk);
       }
     },
     async onFinish(_hookCtx, info) {
       await persistAndRelease(
         info.finishReason
           ? AIChatMessageStatus.Completed
-          : AIChatMessageStatus.Truncated
+          : AIChatMessageStatus.Truncated,
+        isCitationMiss()
       );
     },
     async onAbort() {
-      await persistAndRelease(AIChatMessageStatus.Aborted);
+      await persistAndRelease(AIChatMessageStatus.Aborted, isCitationMiss());
     },
     async onError(_hookCtx, info) {
       // The real cause stays server-side; the wire carries a generic message so
@@ -205,7 +308,8 @@ export function createPersistenceMiddleware({
       await persistAndRelease(
         errorCode(info.error) === IncompleteStreamCode
           ? AIChatMessageStatus.Truncated
-          : AIChatMessageStatus.Error
+          : AIChatMessageStatus.Error,
+        isCitationMiss()
       );
     },
   };
