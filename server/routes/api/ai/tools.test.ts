@@ -159,12 +159,14 @@ describe("loadServerTools", () => {
     const tools = await loadServerTools();
 
     expect(Object.isFrozen(tools)).toBe(true);
-    expect(tools).toHaveLength(1);
-    const [tool] = tools;
-    expect(tool.name).toEqual("search_workspace");
-    expect(typeof tool.description).toEqual("string");
-    expect(tool.inputSchema).toBeDefined();
-    expect(typeof tool.execute).toEqual("function");
+    expect(tools).toHaveLength(2);
+    const names = tools.map((tool) => tool.name);
+    expect(names).toEqual(["search_workspace", "recommend_documents"]);
+    for (const tool of tools) {
+      expect(typeof tool.description).toEqual("string");
+      expect(tool.inputSchema).toBeDefined();
+      expect(typeof tool.execute).toEqual("function");
+    }
   });
 });
 
@@ -203,7 +205,7 @@ describe("POST /api/ai.chat server tools", () => {
       firstSent.tools.map(
         (t: { function: { name: string } }) => t.function.name
       )
-    ).toEqual(["search_workspace"]);
+    ).toEqual(["search_workspace", "recommend_documents"]);
     expect(JSON.stringify(secondSent.messages)).toContain("Reference notes");
 
     // The stream carries the tool-call lifecycle and a final answer.
@@ -298,7 +300,7 @@ describe("POST /api/ai.chat server tools", () => {
       firstSent.tools.map(
         (t: { function: { name: string } }) => t.function.name
       )
-    ).toEqual(["search_workspace"]);
+    ).toEqual(["search_workspace", "recommend_documents"]);
 
     // The injected tool was not merged in one of them later either: the run is
     // the same two-turn loop as the clean path, ending in a real answer.

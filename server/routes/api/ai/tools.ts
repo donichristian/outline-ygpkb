@@ -4,6 +4,10 @@ import { z } from "zod";
 import type { User } from "@server/models";
 import { SearchQuery } from "@server/models";
 import { SearchQuerySource } from "@server/models/SearchQuery";
+import {
+  authorizeFilterFields,
+  combineFilters,
+} from "@server/models/helpers/Filters";
 import SearchProviderManager from "@server/utils/SearchProviderManager";
 import { loadTanstack } from "./tanstack";
 
@@ -30,6 +34,9 @@ const MaxToolResults = 5;
  */
 const ArchivedFilter: Filter = { field: "archivedAt", operator: "isNull" };
 
+/** Maximum number of results a caller can request from the search tool. */
+const MaxToolResultsBound = 10;
+
 /**
  * Builds the read-only server tool allowlist. Every tool here is executed on
  * the server and can only read the requesting user's own documents.
@@ -52,6 +59,16 @@ function buildServerTools(toolDefinition: TanstackAI["toolDefinition"]) {
         .min(1)
         .max(800)
         .describe("Keywords describing the topic to look up."),
+      collectionId: z
+        .string()
+        .optional()
+        .describe("Restrict results to a specific collection."),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Maximum number of results to return."),
     }),
     outputSchema: z.object({
       total: z.number().describe("How many documents matched in total."),
@@ -64,21 +81,34 @@ function buildServerTools(toolDefinition: TanstackAI["toolDefinition"]) {
         })
       ),
     }),
-  }).server<ServerToolContext>(async ({ query }, context) => {
+  }).server<ServerToolContext>(async ({ query, collectionId, limit }, context) => {
+    const user = context.context.user;
+    const requestedLimit =
+      typeof limit === "number" ? Math.min(limit, MaxToolResultsBound) : MaxToolResults;
+    const collectionFilter: Filter | undefined = collectionId
+      ? { field: "collectionId", operator: "eq", value: collectionId }
+      : undefined;
+
+    const filter = combineFilters(
+      collectionFilter ? [collectionFilter, ArchivedFilter] : [ArchivedFilter]
+    );
+
+    if (collectionFilter) {
+      await authorizeFilterFields(user, collectionFilter);
+    }
+
     // Authorization is the search provider's own: `searchForUser` narrows
     // results to documents the user can read, so a query cannot surface a
     // document from a collection the requester cannot access.
     const startedAt = Date.now();
     const { total, results } =
-      await SearchProviderManager.getProvider().searchForUser(
-        context.context.user,
-        {
-          query,
-          filter: ArchivedFilter,
-          offset: 0,
-          limit: MaxToolResults,
-        }
-      );
+      await SearchProviderManager.getProvider().searchForUser(user, {
+        query,
+        filter,
+        offset: 0,
+        limit: requestedLimit,
+        usePopularityBoost: false,
+      });
     const duration = Date.now() - startedAt;
 
     await SearchQuery.record({
@@ -101,7 +131,93 @@ function buildServerTools(toolDefinition: TanstackAI["toolDefinition"]) {
     };
   });
 
-  return Object.freeze([searchWorkspace]);
+  const recommendDocuments = toolDefinition({
+    name: "recommend_documents",
+    description:
+      "Recommend documents from this workspace’s knowledge base for a topic. Returns relevance-ranked candidates with an explicit reason (matching excerpt) and a link. Read-only; results are limited to documents the requesting user can already read.",
+    inputSchema: z.object({
+      query: z
+        .string()
+        .min(1)
+        .max(800)
+        .describe("Topic or question to recommend documents for."),
+      collectionId: z
+        .string()
+        .optional()
+        .describe("Restrict recommendations to a specific collection."),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Maximum number of results to return."),
+    }),
+    outputSchema: z.object({
+      total: z.number().describe("How many documents matched in total."),
+      results: z.array(
+        z.object({
+          documentId: z.string(),
+          title: z.string(),
+          url: z.string(),
+          reason: z.string(),
+        })
+      ),
+    }),
+  }).server<ServerToolContext>(async ({ query, collectionId, limit }, context) => {
+    const user = context.context.user;
+    const requestedLimit =
+      typeof limit === "number" ? Math.min(limit, MaxToolResultsBound) : MaxToolResults;
+    const collectionFilter: Filter | undefined = collectionId
+      ? { field: "collectionId", operator: "eq", value: collectionId }
+      : undefined;
+
+    const filter = combineFilters(
+      collectionFilter ? [collectionFilter, ArchivedFilter] : [ArchivedFilter]
+    );
+
+    if (collectionFilter) {
+      await authorizeFilterFields(user, collectionFilter);
+    }
+
+    // Authorization is the search provider's own: `searchForUser` narrows
+    // results to documents the user can read, so a query cannot surface a
+    // document from a collection the requester cannot access.
+    const startedAt = Date.now();
+    const { total, results } =
+      await SearchProviderManager.getProvider().searchForUser(user, {
+        query,
+        filter,
+        offset: 0,
+        limit: requestedLimit,
+        usePopularityBoost: false,
+      });
+    const duration = Date.now() - startedAt;
+
+    await SearchQuery.record({
+      userId: context.context.user.id,
+      teamId: context.context.user.teamId,
+      source: SearchQuerySource.Ai,
+      query,
+      results: total,
+      duration,
+    });
+
+    return {
+      total,
+      results: results
+        .map(({ document, context: snippet }) => ({
+          documentId: document.id,
+          title: document.title,
+          url: document.url,
+          reason: snippet ?? "",
+        }))
+        .filter((result) => result.reason.trim().length > 0),
+    };
+  });
+
+  // ponytail: text-relevance-only ranking; provider's popularity blend is the
+  // named opt-in upgrade path.
+  return Object.freeze([searchWorkspace, recommendDocuments]);
 }
 
 /** The frozen allowlist produced by {@link buildServerTools}. */
