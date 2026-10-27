@@ -220,7 +220,7 @@ export function fetchTool(server: McpServer, scopes: string[]) {
           .describe(
             "Documents only. Return only the section whose heading contains this text (case-insensitive), from that heading down to the next heading of the same or higher level. Use for long structured documents instead of paging through the whole body."
           ),
-       }), upstream/main
+       }),
     },
     withTracing(
       "fetch",
