@@ -1,6 +1,5 @@
 import { z } from "zod";
-import { type McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { type CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import type { McpServer, CallToolResult } from "@modelcontextprotocol/server";
 import {
   Attachment,
   Collection,
@@ -186,10 +185,12 @@ export function fetchTool(server: McpServer, scopes: string[]) {
       description:
         'Fetches a document, collection, user, attachment, or template by type and ID. When fetching a collection the response includes the full hierarchical document tree. For users, "current_user" can be used as the ID to get the authenticated user. For attachments, the response includes a short-lived signed URL that can be used to download the file contents directly. For templates, the response includes the template body as markdown. For long documents, prefer `section` to read a single heading, or `offset`/`limit` to page through the body; large bodies are chunked and the metadata block reports `paging` with `total` and `hasMore`.',
       annotations: {
+        destructiveHint: false,
         idempotentHint: true,
+        openWorldHint: false,
         readOnlyHint: true,
       },
-      inputSchema: {
+      inputSchema: z.object({
         resource: z.enum(allowedTypes).describe("The resource to fetch."),
         id: z
           .string()
@@ -219,7 +220,7 @@ export function fetchTool(server: McpServer, scopes: string[]) {
           .describe(
             "Documents only. Return only the section whose heading contains this text (case-insensitive), from that heading down to the next heading of the same or higher level. Use for long structured documents instead of paging through the whole body."
           ),
-      },
+       }), upstream/main
     },
     withTracing(
       "fetch",
@@ -320,11 +321,18 @@ export function fetchTool(server: McpServer, scopes: string[]) {
               presentCollection(collection),
               getPublicShareUrlForCollection(actor.team, collection.id),
             ]);
+            const metadata = {
+              ...pathToUrl(actor.team, presented),
+              ...(shareUrl !== undefined && { shareUrl }),
+            };
+
+            // Admins can read private collection metadata without access to its documents.
+            if (!can(actor, "readDocument", collection)) {
+              return success(metadata);
+            }
+
             return success([
-              {
-                ...pathToUrl(actor.team, presented),
-                ...(shareUrl !== undefined && { shareUrl }),
-              },
+              metadata,
               (collection.documentStructure ?? []).map((node) =>
                 presentNavigationNode(actor.team, node)
               ),
