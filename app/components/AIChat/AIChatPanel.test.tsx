@@ -51,7 +51,11 @@ vi.mock("~/scenes/Document/components/SidebarLayout", () => ({
 vi.mock("~/components/Button", () => ({
   default: (props: React.ButtonHTMLAttributes<HTMLButtonElement>) => {
     const { children, type, ...rest } = props;
-    return <button type={type ?? "button"} {...rest}>{children}</button>;
+    return (
+      <button type={type === undefined || type === null ? "button" : type} {...rest}>
+        {children}
+      </button>
+    );
   },
 }));
 
@@ -64,7 +68,9 @@ vi.mock("~/components/ActionButton", () => ({
     type,
     ...rest
   }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
-    <button type={type ?? "button"} {...rest}>{children}</button>
+    <button type={type === undefined || type === null ? "button" : type} {...rest}>
+      {children}
+    </button>
   ),
 }));
 
