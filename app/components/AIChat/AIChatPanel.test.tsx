@@ -48,33 +48,26 @@ vi.mock("~/scenes/Document/components/SidebarLayout", () => ({
 
 // Button renders through ActionButton, which needs the action context and MobX
 // store providers this focused test does not set up.
-vi.mock("~/components/Button", () => ({
-  default: (props: React.ButtonHTMLAttributes<HTMLButtonElement>) => {
+vi.mock("~/components/Button", () => {
+  const ButtonMock = (props: React.ButtonHTMLAttributes<HTMLButtonElement>) => {
     const { children, type, ...rest } = props;
-    return (
-      <button type={type ?? "button"} {...rest}>
-        {children}
-      </button>
-    );
-  },
-  __esModule: true,
-}));
+    return React.createElement("button", { type: type ?? "button", ...rest }, children);
+  };
+  return { default: ButtonMock, __esModule: true };
+});
 
 // The header's AIChatHistory composes NudeButton (through ActionButton) and
 // Tooltip (portal + delay timer). Mocking them at the root keeps the
 // dropdown drivable with plain DOM clicks.
-vi.mock("~/components/ActionButton", () => ({
-  default: ({
+vi.mock("~/components/ActionButton", () => {
+  const ActionButtonMock = ({
     children,
     type,
     ...rest
-  }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
-    <button type={type ?? "button"} {...rest}>
-      {children}
-    </button>
-  ),
-  __esModule: true,
-}));
+  }: React.ButtonHTMLAttributes<HTMLButtonElement>) =>
+    React.createElement("button", { type: type ?? "button", ...rest }, children);
+  return { default: ActionButtonMock, __esModule: true };
+});
 
 vi.mock("~/components/Tooltip", () => ({
   default: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
