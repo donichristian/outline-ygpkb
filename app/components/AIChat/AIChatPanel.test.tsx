@@ -51,13 +51,13 @@ vi.mock("~/scenes/Document/components/SidebarLayout", () => ({
 vi.mock("~/components/Button", () => ({
   default: (props: React.ButtonHTMLAttributes<HTMLButtonElement>) => {
     const { children, type, ...rest } = props;
-    const buttonType = type === undefined || type === null ? "button" : type;
     return (
-      <button type={buttonType} {...rest}>
+      <button type={type ?? "button"} {...rest}>
         {children}
       </button>
     );
   },
+  __esModule: true,
 }));
 
 // The header's AIChatHistory composes NudeButton (through ActionButton) and
@@ -68,14 +68,12 @@ vi.mock("~/components/ActionButton", () => ({
     children,
     type,
     ...rest
-  }: React.ButtonHTMLAttributes<HTMLButtonElement>) => {
-    const buttonType = type === undefined || type === null ? "button" : type;
-    return (
-      <button type={buttonType} {...rest}>
-        {children}
-      </button>
-    );
-  },
+  }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
+    <button type={type ?? "button"} {...rest}>
+      {children}
+    </button>
+  ),
+  __esModule: true,
 }));
 
 vi.mock("~/components/Tooltip", () => ({
