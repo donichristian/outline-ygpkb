@@ -49,9 +49,13 @@ vi.mock("~/scenes/Document/components/SidebarLayout", () => ({
 // Button renders through ActionButton, which needs the action context and MobX
 // store providers this focused test does not set up.
 vi.mock("~/components/Button", () => {
-  const ButtonMock = (props: any) => {
+  const ButtonMock = (props: React.ButtonHTMLAttributes<HTMLButtonElement>) => {
     const { children, type, ...rest } = props;
-    return React.createElement("button", { type: type !== undefined && type !== null ? type : "button", ...rest }, children);
+    return React.createElement(
+      "button",
+      { type: type !== undefined && type !== null ? type : "button", ...rest },
+      children
+    );
   };
   ButtonMock.displayName = "ButtonMock";
   return { default: ButtonMock };
@@ -61,9 +65,13 @@ vi.mock("~/components/Button", () => {
 // Tooltip (portal + delay timer). Mocking them at the root keeps the
 // dropdown drivable with plain DOM clicks.
 vi.mock("~/components/ActionButton", () => {
-  const ActionButtonMock = (props: any) => {
+  const ActionButtonMock = (props: React.ButtonHTMLAttributes<HTMLButtonElement>) => {
     const { children, type, ...rest } = props;
-    return React.createElement("button", { type: type !== undefined && type !== null ? type : "button", ...rest }, children);
+    return React.createElement(
+      "button",
+      { type: type !== undefined && type !== null ? type : "button", ...rest },
+      children
+    );
   };
   ActionButtonMock.displayName = "ActionButtonMock";
   return { default: ActionButtonMock };
