@@ -50,8 +50,8 @@ vi.mock("~/scenes/Document/components/SidebarLayout", () => ({
 // store providers this focused test does not set up.
 vi.mock("~/components/Button", () => ({
   default: (props: React.ButtonHTMLAttributes<HTMLButtonElement>) => {
-    const { children, ...rest } = props;
-    return <button {...rest}>{children}</button>;
+    const { children, type, ...rest } = props;
+    return <button type={type ?? "button"} {...rest}>{children}</button>;
   },
 }));
 
@@ -61,9 +61,10 @@ vi.mock("~/components/Button", () => ({
 vi.mock("~/components/ActionButton", () => ({
   default: ({
     children,
+    type,
     ...rest
   }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
-    <button {...rest}>{children}</button>
+    <button type={type ?? "button"} {...rest}>{children}</button>
   ),
 }));
 
