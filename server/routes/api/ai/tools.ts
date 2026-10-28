@@ -1,7 +1,11 @@
 import type * as TanstackAIModule from "@tanstack/ai";
 import type { Filter } from "@shared/helpers/FilterHelper";
 import { z } from "zod";
+import { NotFoundError } from "@server/errors";
+import { Document } from "@server/models";
 import type { User } from "@server/models";
+import { DocumentHelper } from "@server/models/helpers/DocumentHelper";
+import { authorize } from "@server/policies";
 import SearchProviderManager from "@server/utils/SearchProviderManager";
 import { loadTanstack } from "./tanstack";
 
@@ -21,6 +25,13 @@ export type ServerToolContext = {
 
 /** How many documents one tool call returns, keeping the provider context small. */
 const MaxToolResults = 5;
+
+/**
+ * Characters of a document one `read_document` call returns. A whole document
+ * can exceed the model's context, so the text is truncated and the model is
+ * told it was; summary work is expected to page with `offset`.
+ */
+const MaxDocumentChars = 24000;
 
 /**
  * Archived documents are not readable in the assistant, so they are excluded
@@ -85,7 +96,55 @@ function buildServerTools(toolDefinition: TanstackAI["toolDefinition"]) {
     };
   });
 
-  return Object.freeze([searchWorkspace]);
+  const readDocument = toolDefinition({
+    name: "read_document",
+    description:
+      "Read the Markdown content of one document by id. Use after search_workspace when the answer needs the document’s actual text (summaries, procedures, step lists) rather than a snippet. Read-only; authorization is checked against the requesting user.",
+    inputSchema: z.object({
+      documentId: z.string().uuid().describe("Id returned by search_workspace."),
+      offset: z
+        .number()
+        .int()
+        .min(0)
+        .optional()
+        .describe("Character offset to continue from when a read was truncated."),
+    }),
+    outputSchema: z.object({
+      documentId: z.string(),
+      title: z.string(),
+      url: z.string(),
+      markdown: z.string().describe("Document text as Markdown."),
+      offset: z.number().describe("Offset this slice starts at."),
+      truncated: z.boolean().describe("Whether more text remains after this slice."),
+    }),
+  }).server<ServerToolContext>(async ({ documentId, offset = 0 }, context) => {
+    const document = await Document.findByPk(documentId, { rejectOnEmpty: false });
+    if (!document) {
+      throw NotFoundError();
+    }
+
+    // Read access is the user's, not the workspace's: a guessed id must not
+    // read a document the requester cannot open.
+    authorize(context.context.user, "read", document);
+
+    const text = await DocumentHelper.toMarkdown(document, {
+      includeTitle: false,
+      commonMark: true,
+      teamId: document.teamId,
+    });
+    const slice = text.slice(offset, offset + MaxDocumentChars);
+
+    return {
+      documentId: document.id,
+      title: document.title,
+      url: document.url,
+      markdown: slice,
+      offset,
+      truncated: offset + slice.length < text.length,
+    };
+  });
+
+  return Object.freeze([searchWorkspace, readDocument]);
 }
 
 /** The frozen allowlist produced by {@link buildServerTools}. */
