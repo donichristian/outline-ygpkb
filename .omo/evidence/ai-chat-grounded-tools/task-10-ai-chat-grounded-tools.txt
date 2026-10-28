@@ -1,0 +1,1 @@
+Task 10: persist tool-call digest with each assistant turn. yarn tsc --incremental false: clean. yarn test server/routes/api/ai/aiStreaming.test.ts: 25 passed. yarn lint: no new errors in middleware.ts.

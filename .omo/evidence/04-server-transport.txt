@@ -1,0 +1,70 @@
+# Todo 4 — server transport: chat() + toServerSentEventsResponse
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Date: 2026-10-20
+Commit under test: f5fbd405d (transport rewrite) + the refusal/busy AG-UI fix
+
+## 0. Live gateway condition
+
+`AI_CHAT_BASE_URL=http://127.0.0.1:8642/p/matius/v1` is DOWN on this host
+(`ECONNREFUSED 127.0.0.1:8642`, recorded in `03-gateway-finish-reason.txt` §1).
+No live curl transcript exists or is claimed. The QA channel is the wire-level
+stubbed-fetch test driven through the real Koa route.
+
+## 1. Happy path — wire-level round trip
+
+Exact command:
+
+    yarn test server/routes/api/ai/probe04.evidence.test.ts --reporter=verbose
+
+The temporary probe test (`probe04.evidence.test.ts`) was created only to drive
+the real route with a stubbed upstream, print the collected body, and then was
+deleted. Verbatim stdout:
+
+    {"EVIDENCE":"happy","status":200,"contentType":"text/event-stream","kindHeader":null,"types":["RUN_STARTED","TEXT_MESSAGE_START","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_END","RUN_FINISHED"],"containsEventLine":false,"containsDoneSentinel":false,"body":"data: {\"type\":\"RUN_STARTED\",\"metadata\":{\"tanstack\":{\"source\":{\"provider\":\"openai-compatible\",\"api\":\"openai-completions\",\"model\":\"test-model\"},\"model\":\"test-model\"}},\"runId\":\"openai-compatible-1792460572476-gxjs1zvy54e\",\"threadId\":\"thread-1792460572469-y0k934y\",\"timestamp\":1792460572485}\n\ndata: {\"type\":\"TEXT_MESSAGE_START\",\"messageId\":\"openai-compatible-1792460572476-as05dpc26j\",\"timestamp\":1792460572488,\"role\":\"assistant\",\"metadata\":{\"tanstack\":{\"source\":{\"provider\":\"openai-compatible\",\"api\":\"openai-completions\",\"model\":\"test-model\"},\"model\":\"test-model\"}}}\n\ndata: {\"type\":\"TEXT_MESSAGE_CONTENT\",\"messageId\":\"openai-compatible-1792460572476-as05dpc26j\",\"timestamp\":1792460572488,\"delta\":\"He\",\"metadata\":{\"tanstack\":{\"source\":{\"provider\":\"openai-compatible\",\"api\":\"openai-completions\",\"model\":\"test-model\"}}}}\n\ndata: {\"type\":\"TEXT_MESSAGE_CONTENT\",\"messageId\":\"openai-compatible-1792460572476-as05dpc26j\",\"timestamp\":1792460572489,\"delta\":\"llo\",\"metadata\":{\"tanstack\":{\"source\":{\"provider\":\"openai-compatible\",\"api\":\"openai-completions\",\"model\":\"test-model\"}}}}\n\ndata: {\"type\":\"TEXT_MESSAGE_END\",\"messageId\":\"openai-compatible-1792460572476-as05dpc26j\",\"timestamp\":1792460572489,\"metadata\":{\"tanstack\":{\"source\":{\"provider\":\"openai-compatible\",\"api\":\"openai-completions\",\"model\":\"test-model\"},\"model\":\"test-model\"}}}\n\ndata: {\"type\":\"RUN_FINISHED\",\"runId\":\"openai-compatible-1792460572476-gxjs1zvy54e\",\"threadId\":\"thread-1792460572469-y0k934y\",\"timestamp\":1792460572492,\"metadata\":{\"tanstack\":{\"source\":{\"provider\":\"openai-compatible\",\"api\":\"openai-completions\",\"model\":\"test-model\"},\"model\":\"test-model\",\"finishReason\":\"stop\"}}}\n\n"}
+
+    Test Files  1 passed (1)
+         Tests  5 passed (5)
+
+Explicit grep/assert lines from that output:
+
+    containsEventLine:false
+    containsDoneSentinel:false
+
+Sequence verified: `RUN_STARTED`, `TEXT_MESSAGE_START`, `TEXT_MESSAGE_CONTENT`
+(twice), `TEXT_MESSAGE_END`, `RUN_FINISHED`. No `event:` line and no `[DONE]`
+appears on OUR response. `data: [DONE]` in the fixture is the fake UPSTREAM's
+OpenAI wire, not the response body.
+
+## 2. Source grep
+
+    PS> Select-String -Path server/routes/api/ai/ai.ts -Pattern "sseFrame|fetch\(|inspectChunk"
+    (no matches)
+
+    PS> Select-String -Path server/routes/api/ai/ai.ts -Pattern "ctx.body"
+    254:ctx.body = body;
+    669:ctx.body = Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>);
+
+    PS> Select-String -Path server/routes/api/ai/ai.ts -Pattern "event:"
+    (no matches)
+
+Line 254 is the node `Readable` in `refuseWithAgUiRun`; line 669 is
+`Readable.fromWeb(response.body)`. No other body assignment exists.
+
+## 3. Full folder green
+
+    > yarn test server/routes/api/ai/
+    TEST_EXIT=0
+     Test Files  7 passed (7)
+          Tests  125 passed (125)
+       Duration  100.71s (transform 111.28s, setup 220.10s, import 28.97s, tests 21.81s, environment 1ms)
+
+## 4. Typecheck
+
+    > yarn tsc --incremental false
+    TSC_EXIT=0
+
+## 5. Files
+
+ai.test.ts, aiStreaming.test.ts, aiInFlightCap.test.ts, upstreamMessages.test.ts,
+schema.test.ts, scope.test.ts, aiSessions.test.ts.

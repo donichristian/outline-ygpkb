@@ -1,0 +1,67 @@
+# 09-client-connection-red — negative path
+
+# Command (worktree: tanstack-ai-slice2-w1):
+PS> $env:TZ="UTC"; $env:VITE_CONFIG_NATIVE_IGNORE_WARNING="true"; yarn vitest run app/utils/aiChat.test.ts --project app --reporter=verbose -t "should omit the CSRF header and surface a 403 as an http error"
+
+# With no CSRF cookie the request omits x-csrf-token, and a 403 response is
+# surfaced as an AiChatError with kind "http" and status 403. Assertions in
+# the passing red-path test:
+#   expect(new Headers(init.headers).has("x-csrf-token")).toBe(false)
+#   rejects.toMatchObject({ kind: "http", status: 403, message: "CSRF token invalid" })
+# Channel: jsdom-level assertion; no browser surface is driven here.
+
+# Unedited output:
+
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should yield a delta event for each content frame
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should reassemble a frame split across chunk boundaries
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should read past the [DONE] sentinel to the server's terminal frame
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should yield a reasoning event for a reasoning_content chunk, apart from deltas
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should throw a typed error for an event: error frame
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should parse a refusal frame as kind: refusal
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should parse a busy frame as kind: busy
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should default an untyped error frame to kind: stream
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should treat a malformed error payload as kind: stream
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should round-trip the literal server refusal frame over the wire
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should ignore frames that carry no data
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should skip contentless frames without inventing text
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should yield a terminal event for event: complete
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should yield a terminal event for event: truncated
+ Γåô |app| app/utils/aiChat.test.ts > #parseSSEStream > should end iteration at a terminal frame whose payload is malformed
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should accumulate deltas from a stubbed streaming response
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should send the CSRF and editor-version headers
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should send sessionId alongside the new turn in the request body
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should omit sessionId from the request body when not supplied
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should throw a typed http error on a 403 response
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should throw a typed http error on a 404 response
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > 'stateless, no terminal frame' should 'complete'
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > 'stateless, event: complete' should 'complete'
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > 'session-backed, event: complete' should 'complete'
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > 'session-backed, event: truncated' should 'truncated'
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > 'session-backed, no terminal frame' should 'truncated'
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > does not report a session-backed answer as truncated when [DONE] precedes the terminal frame
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should raise kind: aborted, distinct from network, on a user Stop
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should raise kind: aborted when the request is stopped before it opens
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should raise kind: network on a genuine socket failure
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should raise kind: refusal, not stream, for a refusal frame
+ Γåô |app| app/utils/aiChat.test.ts > #streamAiChat > should raise kind: busy when another turn is still streaming
+ Γåô |app| app/utils/aiChat.test.ts > draft helpers > should round-trip a draft through storage
+ Γåô |app| app/utils/aiChat.test.ts > draft helpers > should keep the pre-create draft under its own key
+ Γåô |app| app/utils/aiChat.test.ts > draft helpers > should clear the draft on send
+ Γåô |app| app/utils/aiChat.test.ts > draft helpers > should clear an emptied composer rather than store an empty draft
+ Γåô |app| app/utils/aiChat.test.ts > draft helpers > should not leak one session's draft into another's key
+ Γåô |app| app/utils/aiChat.test.ts > draft helpers > should degrade to no draft when storage throws on access
+ Γåô |app| app/utils/aiChat.test.ts > draft helpers > should degrade to no draft when a storage write throws
+ Γåô |app| app/utils/aiChat.test.ts > #createAiChatConnection > should read the CSRF token at send time, not module load
+ Γåô |app| app/utils/aiChat.test.ts > #createAiChatConnection > should send no client-supplied tools or forwardedProps
+ Γåô |app| app/utils/aiChat.test.ts > #createAiChatConnection > should observe X-AI-Chat-Kind: refusal
+ Γåô |app| app/utils/aiChat.test.ts > #createAiChatConnection > should observe null when the response carries no kind header
+ Γ£ô |app| app/utils/aiChat.test.ts > #createAiChatConnection > should omit the CSRF header and surface a 403 as an http error 20ms
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 43 skipped (44)
+   Start at  04:08:34
+   Duration  3.41s (transform 269ms, setup 2.11s, import 211ms, tests 22ms, environment 834ms)
+

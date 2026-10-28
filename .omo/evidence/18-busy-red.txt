@@ -1,0 +1,106 @@
+﻿TODO 18 - RED EVIDENCE
+
+(a) CLIENT GAP: the production AIChatPanel.tsx was reverted to HEAD (the
+    tests stayed in the working tree) and the new busy-restore test ran.
+    It failed because the refused text was NOT restored:
+
+      AssertionError: expected '' to be 'hi'
+      - Expected: hi
+      + Received: (empty)
+
+    After restoring the working tree panel the same test passes (see
+    18-busy.txt).
+
+(b) CONCURRENCY THROUGH THE REQUEST BOUNDARY: two simultaneous
+    POST /api/ai.chat calls against the test server, exactly as
+    aiInFlightCap.test.ts drives them (fetch stub is the QA channel: no live
+    gateway exists at 127.0.0.1:8642). One turn is admitted and streams a
+    complete RUN_FINISHED; the other gets X-AI-Chat-Kind: busy as a complete
+    synthetic AG-UI run. The stub provider is contacted exactly once, so the
+    first turn still completes while the second is refused. Test passes.
+
+--- RED: busy-restore test against HEAD panel ---node.exe : (!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ((!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+stderr | app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > shows a retry-later notice for a busy response 
+header and restores the text
+React does not recognize the `borderOnHover` prop on a DOM element. If you intentionally want it to appear in the DOM 
+as a custom attribute, spell it as lowercase `borderonhover` instead. If you accidentally passed it from a parent 
+component, remove it from the DOM element.
+Received `true` for a non-boolean attribute `neutral`.
+
+If you want to write it to the DOM, pass a string instead: neutral="true" or neutral={value.toString()}.
+
+ Î“Â¥Â» |app| app/components/AIChat/AIChatPanel.test.tsx (35 tests | 1 failed | 34 skipped) 173ms
+     â”œÃ¹ shows a retry-later notice for a busy response header and restores the text 171ms
+
+Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â» Failed Tests 1 Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»
+
+ FAIL  |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > shows a retry-later notice for a busy response 
+header and restores the text
+AssertionError: expected '' to be 'hi' // Object.is equality
+
+- Expected
++ Received
+
+- hi
+
+ Î“Â¥Â» app/components/AIChat/AIChatPanel.test.tsx:1272:26
+    1270|     // Nothing was sent, so the question is still the user's: it comesÎ“Ã‡Âª
+    1271|     // the composer and its draft, ready to retry, without being queueÎ“Ã‡Âª
+    1272|     expect(inputValue()).toBe("hi");
+       |                          ^
+    1273|     expect(readDraft("session-new")).toBe("hi");
+    1274|     expect(queueItems()).toEqual([]);
+
+Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»Î“Ã„Â»[1/1]Î“Ã„Â»
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 34 skipped (35)
+   Start at  01:47:28
+   Duration  6.37s (transform 1.83s, setup 2.21s, import 2.70s, tests 173ms, environment 1.04s)
+
+
+--- CONCURRENCY: second caller busy, first completes (1 passed) ---
+node.exe : (!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ((!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 8 skipped (9)
+   Start at  01:49:06
+   Duration  19.54s (transform 10.00s, setup 15.10s, import 3.01s, tests 1.16s, environment 0ms)
+
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/index.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/plugin.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/utils.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/inputRules.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/actions.js" points to missing source files

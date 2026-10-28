@@ -33,7 +33,7 @@ vi.mock("~/components/Button", () => ({
     // assertions below assert the mock instead of AIChatTrigger.
     const { children, onClick, "data-testid": testId, style } = props;
     return (
-      <button data-testid={testId} onClick={onClick} style={style}>
+      <button type="button" data-testid={testId} onClick={onClick} style={style}>
         {children}
       </button>
     );

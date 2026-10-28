@@ -1,0 +1,150 @@
+﻿=== task-1-ai-chat-grounded-tools.txt ===
+# Task 1 evidence ΓÇö operator-gated assistant instruction layer
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\ai-chat-grounded-tools-w1
+Branch: feat/ai-chat-grounded-tools
+Commit: d120d0c194 "feat(ai-chat): add an operator-gated assistant instruction layer"
+
+## Commands run (worktree, separate invocations)
+
+- yarn oxfmt server/routes/api/ai/prompt.ts server/routes/api/ai/ai.ts server/routes/api/ai/ai.test.ts server/routes/api/ai/upstreamMessages.test.ts server/env.ts  (format touched files only; oxfmt also re-wrapped pre-existing long lines in ai.ts ΓÇö see Byte-identity section)
+- yarn tsc --incremental false ΓåÆ exit 0, no errors
+- yarn lint ΓåÆ exit 1; 25 pre-existing warnings in 17 files (baseline noise; none in touched files), 0 errors in touched files. Note: bare `yarn lint` exits non-zero in this worktree because of the pre-existing warning set; the lint:changed baseline in AGENTS.md documents the same 25 warnings. No new warning was introduced.
+- yarn test server/routes/api/ai/ai.test.ts ΓåÆ Test Files 1 passed (1), Tests 29 passed (29)
+- yarn test server/routes/api/ai/upstreamMessages.test.ts ΓåÆ Test Files 1 passed (1), Tests 24 passed (24)
+
+## Flag-on / flag-off upstream-body assertions that ran
+
+Flag-off (no system message):
+- ai.test.ts: "sends no system message to the provider when the flag is off" ΓåÆ body.messages equals the client's user message only; filter for role "system" equals [].
+- ai.test.ts: "keeps the flag-off body byte-identical to the pre-instruction-layer shape" ΓåÆ body.model = "test-model", body.stream = true, body.messages = [{ role: "user", content: "What is the payments deployment runbook?" }], no system role.
+- upstreamMessages.test.ts (pre-existing pinned, untouched in substance): "grounds on the stored prompt and forwards the committed window upstream", "grounds on the stored window when the request carries no messages", "stores the flattened text and presents the unchanged message shape" ΓåÆ all three assert the exact flag-off messages array via toEqual on upstreamBody(...).messages.
+
+Flag-on (exactly one system message, first):
+- ai.test.ts: "sends exactly one system message, first, when the flag is on" ΓåÆ env.AI_CHAT_SYSTEM_PROMPT = true; body.messages[0] = { role: "system", content: buildSystemPrompts().join("\n") }; exactly one system message; client messages follow unchanged.
+- ai.test.ts: "still rejects a client-sent system message with 400 when the flag is on" ΓåÆ role:"system" in request body still yields 400.
+- upstreamMessages.test.ts: "sends exactly one system message, first, ahead of the conversation" ΓåÆ stored-session case with flag on: one leading system message with the repo text, then the committed window + pending turn unchanged; client cannot add its own system message (separate 400 test).
+
+## Byte-identity check result
+
+oxfmt (run on the touched files, per repo rule "format only files you touched") re-wrapped several pre-existing long lines in server/routes/api/ai/ai.ts:
+- `function toUpstreamMessage(\n  message: MessageLike\n): UpstreamMessage | undefined {` ΓåÆ one-line signature
+- `return (pending && !alreadyCommitted ? [...committed, pending] : committed).slice(\n  -T.AiChatMaxMessages\n);` ΓåÆ two-line return
+- `const refusal = t("This assistant only answers from this workspace's knowledge base");` ΓåÆ temporarily wrapped by oxfmt to a multi-line `t(\n  "...\n)`
+- `response = toServerSentEventsResponse(sanitized, { abortController: ac });` ΓåÆ multi-line object
+- `ctx.body = Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>);` ΓåÆ multi-line call
+
+The refusal `t()` call was then manually re-folded to its original single-line form (see diff), because ai.test.ts > "out of scope refusal string" reads ai.ts source and asserts `source` contains the contiguous literal `t("This assistant only answers from this workspace's knowledge base")` ΓÇö the multi-line wrap broke that pinned assertion and was fixed by restoring the one-line form. This one-line restore is oxfmt-non-conformant (oxfmt wants the wrap) but is the required shape for the pinned source-scan assertion; the tension is documented in ai.ts's comment above the call ("The literal must stay contiguous in source, so it is bound here rather than split across the call's named arguments").
+
+Net byte-identity of the RUNTIME flag-off upstream body: PROVEN by the passing pinned assertions (ai.test.ts:270-273, upstreamMessages.test.ts:557-561/:589-592/:651-653 all pass unchanged in substance ΓÇö oxfmt only re-wrapped their surrounding code, not the asserted values). The pinned expected values (messages arrays, model, stream) are byte-identical to pre-change; only surrounding source formatting shifted.
+
+No other file's behaviour changed. server/mcp/tools/fetch.ts and server/commands/documentReader.* present in the worktree are from a concurrent sibling task; they were NOT touched or committed by this commit.
+
+## Pinned assertions untouched (substance)
+
+- ai.test.ts:270-273: `expect(parsed).toMatchObject({ model, stream, messages: [user msg] })` ΓÇö value unchanged; oxfmt re-wrapped the surrounding `const parsed = ...` line only.
+- upstreamMessages.test.ts:557-561, :589-592, :651-653: `expect(upstreamBody(...).messages).toEqual([...])` ΓÇö asserted arrays unchanged; oxfmt re-wrapped the seed arrays' formatting.
+
+All four still assert the flag-off body and all pass.
+
+## Changed files (commit d120d0c194)
+
+- .env.sample (+16): AI_CHAT_SYSTEM_PROMPT and AI_CHAT_REASONING entries in the AI_CHAT block
+- server/env.ts (+15): AI_CHAT_SYSTEM_PROMPT boolean, default off, following the AI_CHAT_GROUNDING pattern
+- server/routes/api/ai/prompt.ts (new): buildSystemPrompts() ΓåÆ [single plain string]; plain-string-only because the adapter's system-prompt metadata type is `never`
+- server/routes/api/ai/ai.ts (+36/-10): import, flag-gated `systemPrompts` spread into `chat()`, plus oxfmt re-wraps
+- server/routes/api/ai/ai.test.ts (+155): new describe block "POST /api/ai.chat with the assistant instruction layer" (4 tests), afterEach restores env.AI_CHAT_SYSTEM_PROMPT
+- server/routes/api/ai/upstreamMessages.test.ts (+14/-3 + new describe): new describe block "POST /api/ai.chat with the assistant instruction layer enabled" (2 tests), afterEach restores env.AI_CHAT_SYSTEM_PROMPT, oxfmt re-wraps in the pinned block
+
+
+
+=== task-2-ai-chat-grounded-tools.txt ===
+Task 2 evidence: record AI retrievals in the search audit table under a new source value
+Branch: feat/ai-chat-grounded-tools (worktree D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\ai-chat-grounded-tools-w1)
+Commit: d4bb8ba9c7 feat(ai-chat): record AI retrievals in the search audit table
+Date: 2026-10-23
+
+Changed files:
+- server/models/SearchQuery.ts (enum: added Ai = "ai")
+- server/migrations/20261023000000-add-ai-to-search-queries-source.js (new)
+- server/routes/api/ai/tools.ts (record call site)
+- server/routes/api/ai/tools.test.ts (new test: audit row with source = "ai")
+- app/models/SearchQuery.ts (client union widened: + "mcp" + "ai")
+
+============================================================
+1. NEW TEST PASSING (server/routes/api/ai/tools.test.ts)
+============================================================
+Command: yarn test server/routes/api/ai/tools.test.ts
+Result:
+  Test Files  1 passed (1)
+       Tests  4 passed (4)
+  (4 tests = 2 pre-existing + 1 pre-existing "ignores tools injected" + new "records the search
+   tool's query in the search audit table under the ai source")
+
+New test asserts: after POST /api/ai.chat whose model calls the search_workspace tool,
+SearchQuery.findAll({ where: { teamId, userId, query: "payments deployment runbook" } })
+returns exactly 1 row with row.source === "ai" and row.query === "payments deployment runbook".
+Test passed.
+
+NOTE: The first run of this test (before applying the migration to the test DB) failed with
+`invalid input value for enum enum_search_queries_source: "ai"` (Postgres code 22P02) ΓÇö expected,
+proving the test genuinely exercises the new enum value end-to-end against the real test DB.
+
+============================================================
+2. MIGRATION: FORWARD + IDEMPOTENCY + DOWN-THROW
+============================================================
+Migration: server/migrations/20261023000000-add-ai-to-search-queries-source.js
+up:   ALTER TYPE enum_search_queries_source ADD VALUE IF NOT EXISTS 'ai'
+down: throws "Cannot rollback adding enum value to PostgreSQL"
+No transaction: false (matches repo convention; CLI does not wrap in a transaction).
+IF NOT EXISTS = deliberate improvement over the MCP precedent (20260714000000), per the
+idempotent-migration convention of 20260818120000-add-deletedById-to-documents.js.
+PostgreSQL's rule "a new enum value cannot be used inside the transaction that added it" does
+not apply: this migration only adds the value and never issues a second query.
+
+Test DB reachable: postgres://user:pass@127.0.0.1:5432/outline-test (from .env.test).
+
+2a. Forward run (yarn sequelize db:migrate --env test, NODE_ENV=test):
+== 20261023000000-add-ai-to-search-queries-source: migrating =======
+== 20261023000000-add-ai-to-search-queries-source: migrated (0.022s)
+exit 0.
+
+2b. Second forward run (idempotency):
+No migrations were executed, database schema was already up to date.
+exit 0. (The value is already present; a re-run of up would be a no-op via IF NOT EXISTS,
+and Umzug already records it as applied, so the CLI skips it.)
+
+2c. Down (yarn sequelize db:migrate:undo --env test, NODE_ENV=test):
+== 20261023000000-add-ai-to-search-queries-source: reverting =======
+ERROR: Cannot rollback adding enum value to PostgreSQL
+exit 1 ΓÇö documented throw confirmed (not silent success).
+
+2d. Post-undo re-migrate to restore test-DB state for the test suite:
+No migrations were executed, database schema was already up to date.
+(The value 'ai' remains physically present in Postgres; only the umzug bookkeeping mattered.
+The forward migration is re-confirmed idempotent.)
+
+============================================================
+3. SearchQuery MODEL TEST
+============================================================
+Command: yarn test server/models/SearchQuery.test.ts
+Result:
+  Test Files  1 passed (1)
+       Tests  6 passed (6)
+
+============================================================
+4. LINT + TYPECHECK
+============================================================
+yarn lint: exit 0; only pre-existing baseline warnings (no new warnings/errors in the 5 changed files).
+yarn tsc --incremental false: clean (0 errors). (Note: the worktree had no node_modules; a
+junction to the main checkout's node_modules was created for tooling ΓÇö not part of the commit.)
+
+Verification order followed: lint -> tsc -> tests.
+
+
+
+=== task-10-ai-chat-grounded-tools.txt ===
+Task 10: persist tool-call digest with each assistant turn. yarn tsc --incremental false: clean. yarn test server/routes/api/ai/aiStreaming.test.ts: 25 passed. yarn lint: no new errors in middleware.ts.
+
+
+

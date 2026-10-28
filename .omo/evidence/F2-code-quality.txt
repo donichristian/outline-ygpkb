@@ -1,0 +1,168 @@
+F2. Code-quality review — tanstack-ai-slice2-adoption (round 2)
+==============================================================
+VERIFIER LANE (read-only)
+Worktree : D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Branch   : feat/ai-chat-slice2
+Base     : df22f6970 (round-1 rejected tip)
+Head     : c5a487867 (fix commit under review)
+Date     : 2026-10-21
+Scope    : rows 26 (D1 lock leak) and 27 (D2 assistant resend) only.
+
+-----------------------------------------------------
+0. CHANGE SET
+-----------------------------------------------------
+`show --name-status c5a487867` -> exactly four files:
+  M server/routes/api/ai/ai.ts
+  M server/routes/api/ai/aiInFlightCap.test.ts
+  M server/routes/api/ai/aiStreaming.test.ts
+  M server/routes/api/ai/upstreamMessages.test.ts
+Diff stat df22f6970..c5a487867 -- server/routes/api/ai/: 4 files,
++388 / -217.
+
+The 453-line ai.ts diff is the wrapper reindent, not a rewrite:
+`diff -w df22f6970 c5a487867 -- .../ai.ts` reduces to +28 / -7, and every
+surviving hunk is one of the claimed edits (the D2 guard, the try/finally,
+the pendingTurn comment, and removal of the two old explicit releases).
+No adapter/tanstack/schema/middleware change is in the commit; the release
+primitive is defined in ai.ts and only awaited by middleware.ts.
+
+-----------------------------------------------------
+1. D1 — ONE RELEASE OWNER PER PHASE (ai.ts)
+-----------------------------------------------------
+Acquisition: ai.ts:367-403. The NX failure path (`acquired !== "OK"`)
+sends the busy AG-UI run and returns at :401 BEFORE the try (:437), so it
+releases nothing and cannot delete the holder's key. Correct.
+
+After acquisition, one outer try (:437) / finally (:671-675) covers every
+await and every exit:
+
+  * appendTurn(user turn)           :452-469  throw -> finally release
+  * resolveUpstreamMessages (DB)    :477-482  throw -> finally release
+  * ctx.compress / setTimeout       :486-490  throw -> finally release
+  * findUngroundedReason (grounding):504-506  throw -> finally release
+  * grounding refusal               :507-548  `return` -> finally release
+  * abort listener setup            :562-567  throw -> finally release
+  * Promise.all(loadTanstack, tools):573-576  throw -> finally release
+  * createAiChatAdapter / chat() /
+    toServerSentEventsResponse      :599-659  rethrow -> finally release
+  * status/headers/ctx.body assign  :661-669  throw -> finally release
+  * success handoff                 :670       streamHandedOff = true
+
+Exactly one owner per phase: `streamHandedOff` is set only after `ctx.body`
+is assigned (:669-670). Every path before it releases in the finally; after
+it the finally is skipped and the terminal hooks (middleware.ts:167-179 via
+onFinish/onAbort/onError) own the release. No path both hands off and
+releases early. The two explicit releases that used to live at the refusal
+return and inside the stream-creation catch were removed (confirmed by the
+`diff -w` hunk) and both sites now sit inside the same try, so no exit lost
+its release. A throw from `refuseWithAgUiRun` or `ctx.body` assignment — not
+covered at all before this commit — now also releases.
+
+Idempotency / compare-and-delete: ai.ts:411-430. `inFlightLock.released` is
+flipped synchronously before the await, so a second caller (finally racing a
+late terminal hook, or two terminal hooks) cannot run the script twice; the
+script itself is GET==runId then DEL, so a lock re-acquired by a newer turn
+after this turn's TTL lapses is never deleted. middleware.ts was not changed
+by this commit and needs no change: it only awaits the passed-in
+`releaseInFlightLock` (middleware.ts:167-179).
+
+-----------------------------------------------------
+2. D2 — ASSISTANT-LAST TURN SENT ONCE (ai.ts)
+-----------------------------------------------------
+ai.ts:139-152 (toUpstreamMessages): a pending turn is appended only when it
+is NOT an assistant turn equal in role and content to the last committed
+row. A pending *user* turn still appends (`pending?.role === Assistant` is
+false, so `alreadyCommitted` is false). The cap is still applied after the
+merge (`.slice(-AiChatMaxMessages)`), so the pending turn survives eviction.
+Regeneration still sends the full conversation: the committed window ends
+with the stored assistant row, which is forwarded once.
+
+Caller: ai.ts:477-482 passes `pendingTurn` only for a non-user role; a user
+turn was just persisted, so its duplicate is already avoided as before. The
+resolver now drops the assistant duplicate by content equality instead of
+blindly forwarding it.
+
+Boundary: an assistant turn the committed window does NOT end with is still
+appended, so a genuinely new draft is not lost (pinned by the counter-test).
+
+-----------------------------------------------------
+3. DO THE NEW TESTS BITE AT df22f6970?
+-----------------------------------------------------
+D1-a aiInFlightCap.test.ts:681-714 "reading the committed window throws".
+  Forces AIChatMessage.findAll to reject for the resolver query after NX.
+  Asserted: 500 + application/json + no fetch + KEYS empty. At df22f6970
+  the 500/JSON/no-fetch all already pass, but the key stayed set for the
+  900s TTL, so `expectNoInFlightLock` fails -> RED for the right reason.
+D1-b aiInFlightCap.test.ts:716-734 "engine loader rejects".
+  Forces loadTanstack() to reject once after acquisition. Same four
+  assertions. At df22f6970 the rejection escapes the unguarded Promise.all,
+  the key survives, `expectNoInFlightLock` fails -> RED. The fetch-mock
+  assertion alone would not bite; the key scan is the discriminator.
+D2-a aiStreaming.test.ts:545-597 "assistant-last regeneration ... once".
+  Seeds user+assistant rows, sends the identical assistant-last client
+  array, then reads the captured provider body. At df22f6970 the body had
+  two assistant copies -> `toHaveLength(1)` fails -> RED.
+  `sent.at(-1)` also pins that the answer still ends the conversation.
+D2-b upstreamMessages.test.ts:388-401 "drops a pending assistant turn the
+  committed window already ends with". At df22f6970 toUpstreamMessages had
+  no guard and returned 3 rows -> `toEqual` 2 fails -> RED.
+D2-c upstreamMessages.test.ts:403-413 "keeps a pending assistant turn the
+  committed window does not contain" passes before and after on purpose;
+  it is the anti-over-drop counter-test, not a red test.
+
+No test asserts only that a helper was called; each red path asserts the
+observable failure (500/key still present, or duplicate assistant in the
+captured upstream body).
+
+-----------------------------------------------------
+4. GATES RE-RUN FROM THE WORKTREE
+-----------------------------------------------------
+yarn test server/routes/api/ai/
+  Test Files  9 passed (9)
+  Tests      161 passed (161)
+  Exit       0        (69.77s, TZ=UTC config)
+yarn tsc --incremental false
+  Exit       0        (no output)
+
+-----------------------------------------------------
+5. REGRESSION SPOT-CHECKS
+-----------------------------------------------------
+- Error taxonomy: app/utils/aiChat.ts:130-200 `toAiChatError` unchanged;
+  refusal/busy still keyed only off X-AI-Chat-Kind, abort/truncated/network/
+  malformed/stream ordering intact; app/utils/aiChat.test.ts passes.
+- SSE wire shape: server emits `data:` frames only (ai.ts:300 synthetic
+  frames; TanStack re-frames the answer). No `event:` name and no `[DONE]`
+  in ai.ts. Terminal RUN_FINISHED / RUN_ERROR asserted in the streaming and
+  stateless tests; RUN_ERROR message is sanitized at ai.ts:640-652.
+- Panel: one headless ChatClient per turn at AIChatPanel.tsx:510-556,
+  disposed in the finally (:609-614); store merge unchanged.
+- Terminal exits: the four status tests (completed, aborted, error,
+  truncated) still assert rows + lock release and all pass. Busy, refusal,
+  abort and upstream-error release tests are included in the 161.
+
+-----------------------------------------------------
+6. OUT-OF-SCOPE OBSERVATION (not a row 26/27 finding)
+-----------------------------------------------------
+The older round-1 F2 report's D3 is unchanged at
+app/components/AIChat/AIChatPanel.tsx:593-600: a rejected post-stream
+aiChatMessages.list() is swallowed and `setPending([])` still runs, so a
+failed re-read can drop the just-streamed turn from the UI. It predates this
+round, is untouched by c5a487867, and is not one of rows 26/27; if it is
+still wanted it needs its own row. Not counted against this verdict.
+
+Minor (non-blocking): appendTurn swallows a failed user-row write
+(middleware.ts:105-109) while the caller passes pendingTurn=undefined for a
+user role, so a failed write also drops the question from the upstream
+window. Pre-existing and outside rows 26/27.
+
+-----------------------------------------------------
+7. VERDICT
+-----------------------------------------------------
+D1: every exit after acquisition releases exactly once; handoff transfers
+ownership to the terminal hooks; release is idempotent and compare-and-delete.
+D2: the assistant-last duplicate is dropped at the shared resolver; user
+turns still append; cap and regeneration are intact. Each new red test fails
+at df22f6970 for the defect, not for an incidental reason. Gates: 161/161
+server AI tests, tsc exit 0.
+
+F2 VERDICT: APPROVE

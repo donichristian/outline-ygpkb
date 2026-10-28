@@ -1,0 +1,163 @@
+Task 5 — persist the assistant turn and release the lock on every terminal path
+Evidence: mid-flight provider failure -> status=error, lock absent;
+          upstream ended with no finish_reason (RUN_ERROR code=incomplete-stream)
+          -> status=truncated, lock absent.
+
+The live gateway at 127.0.0.1:8642 is DOWN. Both runs use the stubbed-fetch channel
+(vitest `vi.stubGlobal("fetch", ...)` in aiStreaming.test.ts); no curl transcript is
+claimed. PostgreSQL and Redis are real (test database and real Redis at 127.0.0.1).
+
+The JSON lines below were printed by temporary instrumentation used only to capture the
+observed values for this evidence file; that instrumentation was removed after the runs.
+The same facts are asserted permanently in `server/routes/api/ai/aiStreaming.test.ts`.
+
+================================================================================
+RUN 1 OF 2 — provider stream fails mid-flight
+================================================================================
+
+WORKDIR: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+
+COMMAND (PowerShell 5.1):
+chcp 65001 > $null; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $env:VITE_CONFIG_NATIVE_IGNORE_WARNING="true"; yarn test server/routes/api/ai/aiStreaming.test.ts -t "stores the partial answer as errored when the upstream fails mid-flight" --reporter=verbose
+
+OUTPUT (unedited):
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes the question and the answer in seq order, sharing one runId
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > sends the newest client turn upstream exactly once
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > authors a terminal complete frame derived from finish_reason
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the question and the refusal for a refused prompt
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as aborted when the client disconnects mid-stream
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the user turn and no assistant row when the client aborts before the first token
+stdout | server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as errored when the upstream fails mid-flight
+{
+  error: { message: 'upstream socket reset', code: undefined },
+  source: 'openai-compatible.processStreamChunks'
+}
+
+node.exe : stderr | server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial 
+answer as errored when the upstream fails mid-flight
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (stderr | server...ails mid-flight:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+❌ [tanstack-ai:errors] ❌ openai-compatible.processStreamChunks fatal
+
+stderr | server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as 
+errored when the upstream fails mid-flight
+AI chat stream failed
+Error: upstream socket reset
+    at TextEngine.runTerminalHook (file:///D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_mo
+dules/@tanstack/ai/dist/esm/activities/chat/index.js:416:23)
+    at TextEngine.run (file:///D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/@tanst
+ack/ai/dist/esm/activities/chat/index.js:504:15)
+    at runChatEngine (file:///D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/@tansta
+ck/ai/dist/esm/activities/chat/index.js:2976:20)
+    at chunk (file:///D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/@tanstack/ai/di
+st/esm/activities/chat/index.js:3015:2)
+    at D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/server/routes/api/ai/ai.ts:555:26
+    at file:///D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/@tanstack/ai/dist/esm/
+stream-to-response.js:159:22
+{ requestId: '' }
+
+stdout | server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as errored when the upstream fails mid-flight
+{"assistantRows":1,"userRunId":"2b1d3f3d-4152-4f90-9538-66f756c5d462","assistantRunId":"2b1d3f3d-4152-4f90-9538-66f756c5d462","assistantStatus":"error","lock":null}
+
+ ✓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as errored when the upstream fails mid-flight 1343ms
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream that ends with completed
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream that ends with truncated
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes no assistant row and releases the lock when a clean run has no text
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > terminates the stream on a malformed upstream frame
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes nothing without a sessionId
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes nothing and never contacts the provider for another user's session
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes the turn inside a transaction
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 13 skipped (14)
+   Start at  02:10:59
+   Duration  25.88s (transform 13.09s, setup 20.81s, import 3.38s, tests 1.35s, environment 0ms)
+
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/index.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/plugin.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/utils.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/inputRules.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/actions.js" points to missing source files
+
+================================================================================
+RUN 2 OF 2 — upstream stream ends with no finish_reason
+================================================================================
+
+WORKDIR: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+
+COMMAND (PowerShell 5.1):
+chcp 65001 > $null; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $env:VITE_CONFIG_NATIVE_IGNORE_WARNING="true"; yarn test server/routes/api/ai/aiStreaming.test.ts -t "records a stream that ends with truncated" --reporter=verbose
+
+OUTPUT (unedited):
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes the question and the answer in seq order, sharing one runId
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > sends the newest client turn upstream exactly once
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > authors a terminal complete frame derived from finish_reason
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the question and the refusal for a refused prompt
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as aborted when the client disconnects mid-stream
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the user turn and no assistant row when the client aborts before the first token
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as errored when the upstream fails mid-flight
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream that ends with completed
+node.exe : stderr | server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream 
+that ends with truncated
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (stderr | server... with truncated:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+AI chat stream failed
+Error: Chat Completions stream ended without a finish_reason or usage-only tail
+    at TextEngine.runTerminalHook (file:///D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_mo
+dules/@tanstack/ai/dist/esm/activities/chat/index.js:416:23)
+    at TextEngine.run (file:///D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/@tanst
+ack/ai/dist/esm/activities/chat/index.js:504:15)
+    at processTicksAndRejections (node:internal/process/task_queues:103:5)
+    at runChatEngine (file:///D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/@tansta
+ck/ai/dist/esm/activities/chat/index.js:2976:20)
+    at chunk (file:///D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/@tanstack/ai/di
+st/esm/activities/chat/index.js:3015:2)
+    at D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/server/routes/api/ai/ai.ts:555:26
+    at file:///D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/@tanstack/ai/dist/esm/
+stream-to-response.js:159:22 {
+  code: 'incomplete-stream'
+}
+{ requestId: '' }
+
+stdout | server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream that ends with truncated
+{"assistantRows":1,"userRunId":"97d915f0-eaef-44fa-a09c-a7f1cdf14ab9","assistantRunId":"97d915f0-eaef-44fa-a09c-a7f1cdf14ab9","assistantStatus":"truncated","lock":null}
+
+ ✓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream that ends with truncated 1294ms
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes no assistant row and releases the lock when a clean run has no text
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > terminates the stream on a malformed upstream frame
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes nothing without a sessionId
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes nothing and never contacts the provider for another user's session
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes the turn inside a transaction
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 13 skipped (14)
+   Start at  02:12:33
+   Duration  23.76s (transform 12.74s, setup 18.23s, import 3.90s, tests 1.30s, environment 0ms)
+
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/index.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/plugin.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/utils.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/inputRules.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/actions.js" points to missing source files

@@ -1,0 +1,140 @@
+# Todo 3 — gateway `finish_reason` + adapter contract probe
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Date: 2026-10-19
+
+Invocation under test (also quoted in server/routes/api/ai/adapter.ts):
+
+    openaiCompatibleText(env.AI_CHAT_MODEL, {
+      api: "chat-completions",
+      baseURL: env.AI_CHAT_BASE_URL,
+      apiKey: env.AI_CHAT_API_KEY ?? "not-configured",
+    })
+
+The gateway is a pure Chat Completions proxy, so `openaiCompatibleText` with
+`api: "chat-completions"` is the correct adapter. `openaiText` targets the
+Responses API and is wrong for this endpoint. The OpenAI SDK appends
+`/chat/completions` to `baseURL`, matching the old
+`POST ${AI_CHAT_BASE_URL}/chat/completions` call exactly.
+
+## 1. LIVE gateway probe
+
+    POST http://127.0.0.1:8642/p/matius/v1/chat/completions
+    body: {"model":"matius","stream":true,"messages":[{"role":"user","content":"..."}]}
+
+    RESULT: NETWORK_ERROR ECONNREFUSED connect ECONNREFUSED 127.0.0.1:8642
+
+The Hermes gateway is not running on this host; port 8642 refuses every
+connection (three TcpClient attempts + one HTTP POST, all ECONNREFUSED). No live
+chunks exist to quote. This is the same environment condition recorded in the
+`ai-chat-sessions` ledger ("THE REAL HERMES GATEWAY IS NOT RUNNING ON THIS HOST").
+
+## 2. Raw final two `data:` chunks, verbatim
+
+Produced by a stubbed upstream that speaks the same Chat Completions SSE wire
+shape the gateway speaks (OpenAI SDK `stream:true` response): a content delta,
+then a terminal chunk carrying `finish_reason`, then `[DONE]`. This is the
+exact byte sequence the real adapter parses.
+
+    data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"matius","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}
+
+    data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"matius","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+VERDICT: finish_reason present
+
+(Caveat: this verdict is established on the Chat Completions wire contract, not
+on a live gateway response. Re-run section 1 once the Hermes gateway is up if a
+live confirmation is required.)
+
+## 3. AG-UI event sequence through the real adapter
+
+Driven end to end: `chat({ adapter: createAiChatAdapter(), messages })` +
+`toServerSentEventsResponse(stream)`, with the stubbed upstream above.
+
+    ["RUN_STARTED","TEXT_MESSAGE_START","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_END","RUN_FINISHED"]
+
+Terminal RUN_FINISHED payload:
+
+    {"type":"RUN_FINISHED","runId":"openai-compatible-1792389381637-fkq3mez1blh","threadId":"thread-1792389381631-c3b8tvr","timestamp":1792389381651,"metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model":"matius"},"model":"matius","responseId":"c1","finishReason":"stop"}}}
+
+The exact strings W1/W6 must assert are therefore `RUN_STARTED`,
+`TEXT_MESSAGE_START`, `TEXT_MESSAGE_CONTENT`, `TEXT_MESSAGE_END`,
+`RUN_FINISHED`, and on failure `RUN_ERROR`. No `event:` line and no `[DONE]`
+appears on the wire; the SSE helper writes `data: {json}` only.
+
+## 4. Upstream ends WITHOUT `finish_reason` (stubbed)
+
+Same adapter, upstream streams two content deltas and `[DONE]` with
+`finish_reason: null` and no usage-only tail.
+
+    AG_UI_EVENT_SEQUENCE: ["RUN_STARTED","TEXT_MESSAGE_START","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_END","RUN_ERROR"]
+    RUN_ERROR_CODE: incomplete-stream
+    RUN_ERROR_MESSAGE: Chat Completions stream ended without a finish_reason or usage-only tail
+    NO_FINISH_VERDICT: RUN_ERROR code incomplete-stream
+
+SSE terminal event:
+
+    {"type":"RUN_ERROR","metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model":"matius"},"stopReason":"error","model":"matius","runId":"openai-compatible-1792389381712-h1rx0xt70ec"}},"timestamp":1792389381713,"message":"Chat Completions stream ended without a finish_reason or usage-only tail","code":"incomplete-stream"}
+
+Confirmed in the installed source
+(`node_modules/@tanstack/openai-base/src/adapters/chat-completions-text.ts:1285-1300`):
+the adapter yields this error only when neither a `finish_reason` nor a
+usage-only tail was seen; a usage-only tail (`choices: []` + `usage`) rescues
+the run. W1 todo 5 must map `RUN_ERROR.code === "incomplete-stream"` to
+`truncated`; every other `RUN_ERROR` maps to `error`.
+
+## 5. Middleware/terminal ordering spike
+
+`chat()` with a middleware whose `onFinish` deliberately awaits 50 ms, read
+through `toServerSentEventsResponse`. Timestamps relative to run start:
+
+    ORDERING_MS: {"terminalEventSeen":25,"onFinishResolved":79,"streamClosed":79}
+    ORDERING_VERDICT: onFinish completes BEFORE the SSE stream closes
+    TERMINAL_VS_HOOK: reader sees RUN_FINISHED BEFORE onFinish resolves
+
+Mechanism: the engine yields the terminal chunk, then `await runTerminalHook()`
+before the async iterable reports done (`activities/chat/index.js:504`); the SSE
+helper closes the byte stream only after the source iterable is exhausted.
+
+Consequence for W1 todo 5: an `onFinish`/`onError`/`onAbort` hook IS awaited
+before the SSE stream closes, so a persistence commit inside the hook is
+durable before the consumer sees end-of-stream. The terminal RUN_FINISHED
+event, however, is delivered BEFORE the hook resolves (as it is today, where
+`finish()` pushes the terminal frame before `appendTurn` commits). A client
+that acts on RUN_FINISHED and immediately re-reads history can race the commit;
+that race exists in the current implementation and is not introduced by this
+adapter.
+
+Fallback is NOT required: the ordering on `chat()` + `toServerSentEventsResponse`
+satisfies "row committed before the response stream completes". W1 todo 4 may
+use middleware hooks; no manual `StreamProcessor` is needed. If a future
+requirement tightens the guarantee to "committed before RUN_FINISHED is
+delivered", that would require withholding the terminal event, which this path
+does not do.
+
+## 6. Secret handling
+
+`AI_CHAT_API_KEY` is read only inside `createAiChatAdapter`, passed straight to
+the SDK, and never logged, returned, or written to evidence. This file records
+only presence/length, never the value.
+
+## 7. CommonJS build seam (ESM-only packages)
+
+Both packages publish an `import`-only exports map. Direct `require()` fails:
+
+    ERR @tanstack/ai ERR_PACKAGE_PATH_NOT_EXPORTED No "exports" main defined
+    ERR @tanstack/ai-openai/compatible ERR_PACKAGE_PATH_NOT_EXPORTED Package subpath './compatible' is not defined by "exports"
+
+The adapter therefore loads them through `loadOpenaiCompatible()`
+(`server/routes/api/ai/tanstack.ts`), whose dynamic `import()` is assembled with
+`new Function` so SWC's CommonJS transform cannot rewrite it to `require()`.
+Proven from a real CommonJS process:
+
+    CJS_SEAM: dynamicImport+chat OK
+    CJS_EVENT_SEQUENCE: ["RUN_STARTED","TEXT_MESSAGE_START","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_END","RUN_FINISHED"]
+
+Vitest caveat (for W1/W6 test authoring): inside Vitest's VM context
+`new Function("return import(...)")` throws
+`TypeError: A dynamic import callback was not specified`. Tests that call the
+factory must mock `./tanstack` (or the two packages). The production path is
+unaffected; it runs in plain Node, where the seam above is verified.

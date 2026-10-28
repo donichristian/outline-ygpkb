@@ -1,0 +1,58 @@
+RED RUN (captured before the AIChatPanel.tsx trim fix) - criterion (d), whitespace-only thinking:
+
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m(!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+ Γ¥» |app| app/components/AIChat/AIChatPanel.test.tsx (29 tests | 1 failed | 27 skipped) 212ms
+     ├ù renders no reasoning disclosure for whitespace-only thinking 45ms
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ» Failed Tests 1 ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»
+
+ FAIL  |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > renders no reasoning disclosure for 
+whitespace-only thinking
+AssertionError: expected <details ΓÇª(2)>ΓÇª(2)</details> to be null
+
+- Expected:
+null
+
++ Received:
+<details
+  class="sc-hmdomO cZIJzK"
+  data-testid="ai-chat-reasoning"
+>
+  <summary>
+    LoadingΓÇª
+  </summary>
+  <div
+    class="sc-bXCLTC cHulEg"
+  >
+       
+  </div>
+</details>
+
+ Γ¥» app/components/AIChat/AIChatPanel.test.tsx:732:42
+    730|       // no empty disclosure is rendered.
+    731|       expect(query("message-assistant")).not.toBeNull();
+    732|       expect(query("ai-chat-reasoning")).toBeNull();
+       |                                          ^
+    733|
+    734|       release();
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[1/1]ΓÄ»
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 1 passed | 27 skipped (29)
+   Start at  07:41:21
+   Duration  5.95s (transform 1.72s, setup 1.97s, import 2.63s, tests 212ms, environment 896ms)
+

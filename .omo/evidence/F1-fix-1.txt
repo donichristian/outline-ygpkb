@@ -1,0 +1,82 @@
+# F1-fix-1 — honest fixture labels in the AG-UI contract test
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Branch: feat/ai-chat-slice2
+Base commit for this fix: 96b671930
+Addresses: F1 FAIL-1 / shortfall 1 (fixture mislabeled as gateway-recorded)
+Scope: comments, helper name, describe/test titles only. No assertion, fixture byte,
+or production code changed.
+
+## 1. What F1 complained about
+
+`.omo/evidence/F1-compliance.txt` FAIL-1 (lines 142-146, 258-266):
+`aiStreaming.test.ts:62-75` claimed the chunks were "recorded from the gateway
+probe ... verbatim", while `.omo/evidence/03-gateway-finish-reason.txt` records
+`ECONNREFUSED 127.0.0.1:8642` (§1) and a stubbed upstream (§2, lines 32-47).
+
+## 2. Diff of the changed comments / names
+
+    @@ -60,14 +60,19 @@
+    - * The terminal two Chat Completions chunks recorded from the gateway probe in
+    - * `.omo/evidence/03-gateway-finish-reason.txt` (todo 3), verbatim. The verdict
+    - * recorded there is `finish_reason present`, which is why the contract test
+    - * below asserts a finished run rather than an incomplete-stream error.
+    + * The terminal two Chat Completions chunks the adapter parses, in the SSE wire
+    + * shape the gateway speaks. They are STUB-produced: the live gateway refused
+    + * every connection (`ECONNREFUSED 127.0.0.1:8642`, §1 of
+    + * `.omo/evidence/03-gateway-finish-reason.txt`), and §2 of that file records
+    + * these bytes as a stubbed-upstream fixture. The probe's `finish_reason
+    + * present` verdict is derived from that Chat Completions wire contract, not
+    + * from live bytes, so these tests prove the adapter's contract against the
+    + * wire shape — not that a real gateway returned them. Plan row `24` (blocked
+    + * on a live gateway) will replay the live bytes when one is reachable.
+       *
+    - * @returns the recorded chunks, in wire order.
+    + * @returns the stub-produced chunks, in wire order.
+       */
+    -function recordedGatewayChunks(): string[] {
+    +function gatewayWireShapeChunks(): string[] {
+
+    @@ -1177,13 +1182,13 @@
+    -describe("AG-UI contract against the recorded gateway bytes", () => {
+    -  it("turns the recorded Chat Completions output into a finished run", async () => {
+    +describe("AG-UI contract against the gateway wire shape (stubbed)", () => {
+    +  it("turns the stubbed Chat Completions output into a finished run", async () => {
+
+    @@ -1214,16 +1219,16 @@
+    -  it("turns the recorded output without a finish_reason into incomplete-stream", async () => {
+    -    // The first recorded chunk is what the gateway sends before terminating;
+    +  it("turns the stubbed output without a finish_reason into incomplete-stream", async () => {
+    +    // The first stub chunk is what the wire sequence carries before terminating;
+         // without the terminal chunk the adapter must report the incomplete stream
+    -    // that todo 5 maps to `truncated`. Only recorded bytes are used here too.
+    +    // that todo 5 maps to `truncated`. Only stub-produced bytes are used here too.
+
+    +18 -13
+
+Call sites updated: `gatewayWireShapeChunks()` at aiStreaming.test.ts:1191 and
+:1231. The two fixture JSON strings are byte-identical to HEAD (only names and
+comments moved).
+
+## 3. Gates
+
+$ yarn test server/routes/api/ai/aiStreaming.test.ts
+    Test Files  1 passed (1)
+         Tests  21 passed (21)
+    EXIT=0
+
+Count is unchanged from HEAD, not reduced: HEAD's copy of the file declares 21
+`it(` blocks and the working copy declares 21 (checked with the same pattern).
+The brief's "20" is stale; nothing was skipped or removed.
+
+$ yarn tsc --incremental false
+    TSC_EXIT=0
+
+$ lsp_diagnostics server/routes/api/ai/aiStreaming.test.ts
+    No diagnostics found.
+
+## 4. What the verdict now claims
+
+`finish_reason present` remains the probe's verdict, but it is attributed to the
+Chat Completions wire contract (§2 of 03-gateway-finish-reason.txt), not to a live
+gateway response. Plan row 24 stays `[~]` (blocked) and owns the live replay.

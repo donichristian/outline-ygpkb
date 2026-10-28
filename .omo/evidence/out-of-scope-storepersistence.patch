@@ -1,0 +1,173 @@
+﻿diff --git a/app/models/base/Model.ts b/app/models/base/Model.ts
+index 0f0c5dbdc..3e535ac71 100644
+--- a/app/models/base/Model.ts
++++ b/app/models/base/Model.ts
+@@ -55,6 +55,10 @@ export default abstract class Model {
+    * discarding any properties that are not declared fields. Records written by
+    * a different version of the app may not match the current model.
+    *
++   * Timestamps are restored alongside the declared fields so that relative
++   * dates and recency ordering survive the round-trip; without them a hydrated
++   * model would carry `undefined` where a date is expected.
++   *
+    * @param record the persisted representation of a model.
+    * @returns the data to construct or update a model with.
+    */
+@@ -62,7 +66,9 @@ export default abstract class Model {
+     record: Record<string, unknown>
+   ): PartialExcept<T, "id"> {
+     const fields = getFieldsForModelClass(this);
+-    return JSON.parse(JSON.stringify(pick(record, ["id", ...fields])));
++    return JSON.parse(
++      JSON.stringify(pick(record, ["id", "createdAt", "updatedAt", ...fields]))
++    );
+   }
+ 
+   @observable
+@@ -298,13 +304,22 @@ export default abstract class Model {
+ 
+   /**
+    * Returns a plain object representation of the model, containing its
+-   * identifier and declared fields only, safe to store outside of memory.
+-   * Internal state and observables are not included.
++   * identifier, timestamps and declared fields only, safe to store outside of
++   * memory. Internal state and observables are not included. Timestamps are
++   * included even though they are not declared fields, as a hydrated model
++   * without them cannot render a relative date or be ordered by recency.
+    *
+    * @returns A plain object representation of the model
+    */
+   toPersisted = (): PartialExcept<Model, "id"> =>
+-    JSON.parse(JSON.stringify({ ...this.toAPI(), id: this.id }));
++    JSON.parse(
++      JSON.stringify({
++        ...this.toAPI(),
++        id: this.id,
++        createdAt: this.createdAt,
++        updatedAt: this.updatedAt,
++      })
++    );
+ 
+   /**
+    * Returns a plain object representation of all the properties on the model
+diff --git a/app/stores/base/StorePersistence.test.ts b/app/stores/base/StorePersistence.test.ts
+index 420197221..2d7457b57 100644
+--- a/app/stores/base/StorePersistence.test.ts
++++ b/app/stores/base/StorePersistence.test.ts
+@@ -6,7 +6,9 @@ import "fake-indexeddb/auto";
+ import "~/stores";
+ import { toJS } from "mobx";
+ import RootStore from "~/stores/RootStore";
+-import StorePersistence from "./StorePersistence";
++import StorePersistence, {
++  SCHEMA_VERSION,
++} from "./StorePersistence";
+ 
+ describe("StorePersistence", () => {
+   it("round-trips models through IndexedDB into a fresh store", async () => {
+@@ -49,6 +51,44 @@ describe("StorePersistence", () => {
+     expect(records).toEqual([{ id: "doc-1", abilities: { read: true } }]);
+   });
+ 
++  it("round-trips timestamps so a hydrated model can render a relative date", async () => {
++    const teamId = "team-12";
++    const source = new RootStore();
++    const persistence = new StorePersistence(source.policies, teamId);
++
++    source.policies.add({
++      id: "doc-1",
++      abilities: { read: true },
++      createdAt: "2024-01-01T00:00:00.000Z",
++      updatedAt: "2024-01-02T00:00:00.000Z",
++    });
++    persistence.persist("doc-1");
++    await persistence.flush();
++
++    const target = new RootStore();
++    const targetPersistence = new StorePersistence(target.policies, teamId);
++    await targetPersistence.hydrate();
++
++    const hydrated = target.policies.get("doc-1");
++    expect(hydrated?.createdAt).toBe("2024-01-01T00:00:00.000Z");
++    expect(hydrated?.updatedAt).toBe("2024-01-02T00:00:00.000Z");
++    expect(Number.isNaN(Date.parse(hydrated!.updatedAt))).toBe(false);
++  });
++
++  it("discards records written at a previous schema version", async () => {
++    const teamId = "team-13";
++    const databaseName = StorePersistence.databaseName("ai.sessions", teamId);
++
++    // A timestamp-less record of the shape version 1 wrote.
++    await writeAll(databaseName, [{ id: "doc-1", abilities: { read: true } }]);
++
++    const target = new RootStore();
++    const targetPersistence = new StorePersistence(target.policies, teamId);
++    await targetPersistence.hydrate();
++
++    expect(target.policies.get("doc-1")).toBeUndefined();
++  });
++
+   it("ignores unknown properties on records written by another version", async () => {
+     const teamId = "team-7";
+     const source = new RootStore();
+@@ -58,13 +98,17 @@ describe("StorePersistence", () => {
+       teamId
+     );
+ 
+-    // A record in the shape an earlier version of this code wrote.
+-    await writeAll(databaseName, [
+-      {
+-        id: "doc-1",
+-        data: { id: "doc-1", initialized: true, abilities: { read: true } },
+-      },
+-    ]);
++    // A record carrying a property that is not a declared field.
++    await writeAll(
++      databaseName,
++      [
++        {
++          id: "doc-1",
++          data: { id: "doc-1", initialized: true, abilities: { read: true } },
++        },
++      ],
++      SCHEMA_VERSION
++    );
+     await persistence.hydrate();
+ 
+     expect(source.policies.get("doc-1")).toBeTruthy();
+@@ -267,9 +311,13 @@ describe("StorePersistence", () => {
+ });
+ 
+ /** Writes raw records into a database, bypassing the store. */
+-function writeAll(databaseName: string, records: unknown[]): Promise<void> {
++function writeAll(
++  databaseName: string,
++  records: unknown[],
++  version = 1
++): Promise<void> {
+   return new Promise((resolve, reject) => {
+-    const request = indexedDB.open(databaseName, 1);
++    const request = indexedDB.open(databaseName, version);
+     request.onerror = () => reject(request.error);
+     request.onupgradeneeded = () =>
+       request.result.createObjectStore("items", { keyPath: "id" });
+diff --git a/app/stores/base/StorePersistence.ts b/app/stores/base/StorePersistence.ts
+index f51016509..a1f6264e8 100644
+--- a/app/stores/base/StorePersistence.ts
++++ b/app/stores/base/StorePersistence.ts
+@@ -3,8 +3,13 @@ import type Model from "~/models/base/Model";
+ import Logger from "~/utils/Logger";
+ import type Store from "./Store";
+ 
+-/** Bump to discard previously persisted data when the format changes. */
+-const SCHEMA_VERSION = 1;
++/**
++ * Bump to discard previously persisted data when the format changes. Version 2
++ * added `createdAt`/`updatedAt` to records; the version 1 records still in
++ * IndexedDB lack them, and a hydrated model without a timestamp cannot render a
++ * relative date.
++ */
++export const SCHEMA_VERSION = 2;
+ 
+ /** Name of the single object store used within each database. */
+ const OBJECT_STORE_NAME = "items";
