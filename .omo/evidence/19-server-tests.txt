@@ -1,0 +1,686 @@
+﻿$ yarn test:server
+# worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+# todo 19 final run (todos 1-18 already landed)
+
+node.exe : [33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m(!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+ Γ¥» |server| server/commands/documentImporter.test.ts (19 tests | 1 failed) 3346ms
+     ├ù should convert frontmatter to yaml codeblock 19ms
+ Γ¥» |server-shared| server/routes/api/revisions/revisions.test.ts (24 tests | 2 failed) 4812ms
+     ├ù should stream a zip when the revision has attachments 112ms
+     ├ù should stream a textpack when TextBundle is requested 92ms
+ Γ¥» |server-shared| server/converters/DocumentConverter.test.ts (65 tests | 3 failed) 5375ms
+         ├ù should convert a pdf to markdown by mime type 156ms
+         ├ù should convert a pdf to markdown by file extension 11ms
+         ├ù should throw for a pdf without extractable text 10ms
+ Γ¥» |server-shared| plugins/storage/server/api/files.test.ts (25 tests | 4 failed) 1234ms
+     ├ù should fail with status 404 if existing file is requested with key 19ms
+     ├ù should fail with status 404 if non-existing file is requested with key 14ms
+     ├ù should succeed with status 200 ok when avatar is requested using key 46ms
+     ├ù should succeed with status 200 ok when avatar is requested using key 40ms
+ Γ¥» |server-shared| server/queues/tasks/ExportTextBundleZipTask.test.ts (5 tests | 3 failed) 436ms
+     ├ù should write attachments into the bundle's assets folder 77ms
+     ├ù should link between documents relative to the text file 98ms
+     ├ù should produce a bundle the TextPack importer can read back 95ms
+stderr | server/routes/api/cron/cron.test.ts > cron period parsing > should accept valid period 'daily'
+Error: Cannot find package '@shared/types' imported from 
+D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1\server\queues\tasks\APIImportTask.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:314:9)
+    at packageResolve (node:internal/modules/esm/resolve:772:81)
+    at moduleResolve (node:internal/modules/esm/resolve:859:18)
+    at defaultResolve (node:internal/modules/esm/resolve:989:11)
+    at ModuleLoader.#cachedDefaultResolve (node:internal/modules/esm/loader:747:20)
+    at ModuleLoader.#resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:783:38)
+    at ModuleLoader.resolveSync (node:internal/modules/esm/loader:806:52)
+    at ModuleLoader.#cachedResolveSync (node:internal/modules/esm/loader:766:25)
+    at ModuleLoader.getModuleJobForRequire (node:internal/modules/esm/loader:469:50)
+    at new ModuleJobSync (node:internal/modules/esm/module_job:392:34) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+
+stderr | server/routes/api/cron/cron.test.ts > cron period parsing > should accept valid period 'hourly'
+Error: Cannot find package '@shared/types' imported from 
+D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1\server\queues\tasks\APIImportTask.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:314:9)
+    at packageResolve (node:internal/modules/esm/resolve:772:81)
+    at moduleResolve (node:internal/modules/esm/resolve:859:18)
+    at defaultResolve (node:internal/modules/esm/resolve:989:11)
+    at ModuleLoader.#cachedDefaultResolve (node:internal/modules/esm/loader:747:20)
+    at ModuleLoader.#resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:783:38)
+    at ModuleLoader.resolveSync (node:internal/modules/esm/loader:806:52)
+    at ModuleLoader.#cachedResolveSync (node:internal/modules/esm/loader:766:25)
+    at ModuleLoader.getModuleJobForRequire (node:internal/modules/esm/loader:469:50)
+    at new ModuleJobSync (node:internal/modules/esm/module_job:392:34) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+
+stderr | server/routes/api/cron/cron.test.ts > cron period parsing > should accept valid period 'minute'
+Error: Cannot find package '@shared/types' imported from 
+D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1\server\queues\tasks\APIImportTask.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:314:9)
+    at packageResolve (node:internal/modules/esm/resolve:772:81)
+    at moduleResolve (node:internal/modules/esm/resolve:859:18)
+    at defaultResolve (node:internal/modules/esm/resolve:989:11)
+    at ModuleLoader.#cachedDefaultResolve (node:internal/modules/esm/loader:747:20)
+    at ModuleLoader.#resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:783:38)
+    at ModuleLoader.resolveSync (node:internal/modules/esm/loader:806:52)
+    at ModuleLoader.#cachedResolveSync (node:internal/modules/esm/loader:766:25)
+    at ModuleLoader.getModuleJobForRequire (node:internal/modules/esm/loader:469:50)
+    at new ModuleJobSync (node:internal/modules/esm/module_job:392:34) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+
+stderr | server/routes/api/cron/cron.test.ts > cron period parsing > should fallback to daily for invalid period
+Error: Cannot find package '@shared/types' imported from 
+D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1\server\queues\tasks\APIImportTask.ts
+    at Object.getPackageJSONURL (node:internal/modules/package_json_reader:314:9)
+    at packageResolve (node:internal/modules/esm/resolve:772:81)
+    at moduleResolve (node:internal/modules/esm/resolve:859:18)
+    at defaultResolve (node:internal/modules/esm/resolve:989:11)
+    at ModuleLoader.#cachedDefaultResolve (node:internal/modules/esm/loader:747:20)
+    at ModuleLoader.#resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:783:38)
+    at ModuleLoader.resolveSync (node:internal/modules/esm/loader:806:52)
+    at ModuleLoader.#cachedResolveSync (node:internal/modules/esm/loader:766:25)
+    at ModuleLoader.getModuleJobForRequire (node:internal/modules/esm/loader:469:50)
+    at new ModuleJobSync (node:internal/modules/esm/module_job:392:34) {
+  code: 'ERR_MODULE_NOT_FOUND'
+}
+
+ Γ¥» |server-shared| server/routes/api/cron/cron.test.ts (16 tests | 4 failed) 1409ms
+     ├ù should accept valid period 'daily' 229ms
+     ├ù should accept valid period 'hourly' 45ms
+     ├ù should accept valid period 'minute' 41ms
+     ├ù should fallback to daily for invalid period 67ms
+ Γ¥» |server-shared| server/queues/tasks/ExportOKFZipTask.test.ts (3 tests | 1 failed) 234ms
+     ├ù should rewrite internal links but keep the resource URL 75ms
+ Γ¥» |server-shared| server/queues/tasks/MarkdownAPIImportTask.test.ts (15 tests | 6 failed) 14ms
+     ├ù matches nested attachments folders 2ms
+     ├ù rewrites a sibling .md link to a placeholder 2ms
+     ├ù rewrites a nested .md link 1ms
+     ├ù decodes encoded path segments before lookup 1ms
+     ├ù rewrites an angle bracketed link to a document with spaces 1ms
+     ├ù rewrites a link carrying a title, keeping the title 1ms
+(node:11072) DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and 
+will be removed in pg@9.0. Use async/await or an external async flow control mechanism instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+ Γ¥» |server-shared| server/routes/api/documents/documents.test.ts (394 tests | 2 failed) 37400ms
+     ├ù should stream a zip when the document has attachments 142ms
+     ├ù should stream a textpack when TextBundle is requested 117ms
+(node:36084) DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and 
+will be removed in pg@9.0. Use async/await or an external async flow control mechanism instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+ Γ¥» |server-shared| server/queues/tasks/ShareSubscriptionNotificationsTask.test.ts (14 tests | 1 failed) 887ms
+     ├ù should send if last notified more than 6 hours ago 46ms
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ» Failed Tests 27 ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»
+
+ FAIL  |server| server/commands/documentImporter.test.ts > documentImporter > should convert frontmatter to yaml 
+codeblock
+AssertionError: expected '---\n\n## title: Test Document date: ΓÇª' to contain '```yaml'
+
+- Expected
++ Received
+
+- ```yaml
++ ---
++
++ ## title: Test Document date: 2024-01-15 tags: [test, markdown] author: John Doe
++
++ # Heading 1
++
++ This is content after frontmatter.
++
++ ## Heading 2
++
++ More content here.
+
+ Γ¥» server/commands/documentImporter.test.ts:348:27
+    346|     );
+    347|
+    348|     expect(response.text).toContain("```yaml");
+       |                           ^
+    349|     expect(response.text).toContain("title: Test Document");
+    350|     expect(response.text).toContain("date: 2024-01-15");
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[1/27]ΓÄ»
+
+ FAIL  |server-shared| server/converters/DocumentConverter.test.ts > DocumentConverter > convert > pdf > should 
+convert a pdf to markdown by mime type
+BadRequestError: There was an error parsing the PDF file: process_pdf: PDF parsing error: couldn't parse input: 
+invalid file trailer
+ Γ¥» FileImportError server/errors.ts:172:10
+    170|
+    171| export function FileImportError(message = "The file could not be imporΓÇª
+    172|   return httpErrors(400, message, {
+       |          ^
+    173|     id: "import_error",
+    174|     isReportable: false,
+ Γ¥» Function.toMarkdown server/converters/PdfConverter.ts:35:13
+ Γ¥» Function.convert server/converters/DocumentConverter.ts:57:24
+ Γ¥» server/converters/DocumentConverter.test.ts:755:24
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[2/27]ΓÄ»
+
+ FAIL  |server-shared| server/converters/DocumentConverter.test.ts > DocumentConverter > convert > pdf > should 
+convert a pdf to markdown by file extension
+BadRequestError: There was an error parsing the PDF file: process_pdf: PDF parsing error: couldn't parse input: 
+invalid file trailer
+ Γ¥» FileImportError server/errors.ts:172:10
+    170|
+    171| export function FileImportError(message = "The file could not be imporΓÇª
+    172|   return httpErrors(400, message, {
+       |          ^
+    173|     id: "import_error",
+    174|     isReportable: false,
+ Γ¥» Function.toMarkdown server/converters/PdfConverter.ts:35:13
+ Γ¥» Function.convert server/converters/DocumentConverter.ts:57:24
+ Γ¥» server/converters/DocumentConverter.test.ts:769:24
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[3/27]ΓÄ»
+
+ FAIL  |server-shared| server/converters/DocumentConverter.test.ts > DocumentConverter > convert > pdf > should throw 
+for a pdf without extractable text
+AssertionError: expected [Function] to throw error matching /no text/ but got 'There was an error parsing the PDF 
+fiΓÇª'
+
+- Expected:
+/no text/
+
++ Received:
+"There was an error parsing the PDF file: process_pdf: PDF parsing error: couldn't parse input: invalid file trailer"
+
+ Γ¥» server/converters/DocumentConverter.test.ts:783:61
+    781|
+    782|         await expect(
+    783|           DocumentConverter.convert(content, "scanned.pdf", "applicatiΓÇª
+       |                                                             ^
+    784|         ).rejects.toThrow(/no text/);
+    785|       });
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[4/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/ExportOKFZipTask.test.ts > ExportOKFZipTask > should rewrite internal links 
+but keep the resource URL
+AssertionError: expected '\n# Source\n\nSee [Target](.%5CTargetΓÇª' to contain '(./Target.md)'
+
+- Expected
++ Received
+
+- (./Target.md)
++
++ # Source
++
++ See [Target](.%5CTarget.md)
+
+ Γ¥» server/queues/tasks/ExportOKFZipTask.test.ts:142:20
+    140|       );
+    141|       expect(frontmatter.resource).toContain(source.path);
+    142|       expect(body).toContain("(./Target.md)");
+       |                    ^
+    143|       expect(body).not.toContain(target.path);
+    144|     } finally {
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[5/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/ExportTextBundleZipTask.test.ts > ExportTextBundleZipTask > should write 
+attachments into the bundle's assets folder
+AssertionError: expected '# Test\n\n![image](assets%5Cafter_cleΓÇª' to contain 'assets/after_clear_cut_grimy.xla'
+
+- Expected
++ Received
+
+- assets/after_clear_cut_grimy.xla
++ # Test
++
++ ![image](assets%5Cafter_clear_cut_grimy.xla)
+
+ Γ¥» server/queues/tasks/ExportTextBundleZipTask.test.ts:121:51
+    119|       );
+    120|       // The spec requires assets to be referenced relative to the texΓÇª
+    121|       expect(contents[`${bundle}/text.markdown`]).toContain(
+       |                                                   ^
+    122|         `assets/${attachment.name}`
+    123|       );
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[6/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/ExportTextBundleZipTask.test.ts > ExportTextBundleZipTask > should link 
+between documents relative to the text file
+AssertionError: expected '# Source\n\nSee [Target](.%5C..%5CTarΓÇª' to contain '../Target.textbundle'
+
+- Expected
++ Received
+
+- ../Target.textbundle
++ # Source
++
++ See [Target](.%5C..%5CTarget.textbundle)
+
+ Γ¥» server/queues/tasks/ExportTextBundleZipTask.test.ts:171:20
+    169|       // The text file sits one level inside the bundle, so a sibling ΓÇª
+    170|       // reached by stepping out of it first.
+    171|       expect(text).toContain("../Target.textbundle");
+       |                    ^
+    172|     } finally {
+    173|       await fs.remove(filePath);
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[7/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/ExportTextBundleZipTask.test.ts > ExportTextBundleZipTask > should produce 
+a bundle the TextPack importer can read back
+AssertionError: expected '![image](assets%5Cphoto.png)' to contain 'data:image/png;base64,'
+
+Expected: "data:image/png;base64,"
+Received: "![image](assets%5Cphoto.png)"
+
+ Γ¥» server/queues/tasks/ExportTextBundleZipTask.test.ts:233:27
+    231|       // The asset resolves through the round trip rather than being lΓÇª
+    232|       // dangling relative reference.
+    233|       expect(result.text).toContain("data:image/png;base64,");
+       |                           ^
+    234|       expect(result.text).not.toContain(`assets/${attachment.name}`);
+    235|     } finally {
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[8/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/MarkdownAPIImportTask.test.ts > rewriteAttachmentPaths > matches nested 
+attachments folders
+AssertionError: expected '![x](./attachments<<att-5>>)' to be '![x](<<att-5>>)' // Object.is equality
+
+Expected: "![x](<<att-5>>)"
+Received: "![x](./attachments<<att-5>>)"
+
+ Γ¥» server/queues/tasks/MarkdownAPIImportTask.test.ts:49:17
+     47|       },
+     48|     ]);
+     49|     expect(out).toBe("![x](<<att-5>>)");
+       |                 ^
+     50|   });
+     51|
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[9/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/MarkdownAPIImportTask.test.ts > rewriteInternalLinks > rewrites a sibling 
+.md link to a placeholder
+AssertionError: expected 'see [other](./other.md)' to be 'see [other](<<doc-1>>)' // Object.is equality
+
+Expected: "see [other](<<doc-1>>)"
+Received: "see [other](./other.md)"
+
+ Γ¥» server/queues/tasks/MarkdownAPIImportTask.test.ts:90:17
+     88|       { "Collection/other.md": "doc-1" }
+     89|     );
+     90|     expect(out).toBe("see [other](<<doc-1>>)");
+       |                 ^
+     91|   });
+     92|
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[10/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/MarkdownAPIImportTask.test.ts > rewriteInternalLinks > rewrites a nested 
+.md link
+AssertionError: expected 'see [child](./sub/child.md)' to be 'see [child](<<doc-2>>)' // Object.is equality
+
+Expected: "see [child](<<doc-2>>)"
+Received: "see [child](./sub/child.md)"
+
+ Γ¥» server/queues/tasks/MarkdownAPIImportTask.test.ts:99:17
+     97|       { "Collection/sub/child.md": "doc-2" }
+     98|     );
+     99|     expect(out).toBe("see [child](<<doc-2>>)");
+       |                 ^
+    100|   });
+    101|
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[11/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/MarkdownAPIImportTask.test.ts > rewriteInternalLinks > decodes encoded path 
+segments before lookup
+AssertionError: expected 'see [other](./My%20Doc.md)' to be 'see [other](<<doc-3>>)' // Object.is equality
+
+Expected: "see [other](<<doc-3>>)"
+Received: "see [other](./My%20Doc.md)"
+
+ Γ¥» server/queues/tasks/MarkdownAPIImportTask.test.ts:126:17
+    124|       { "Collection/My Doc.md": "doc-3" }
+    125|     );
+    126|     expect(out).toBe("see [other](<<doc-3>>)");
+       |                 ^
+    127|   });
+    128|
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[12/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/MarkdownAPIImportTask.test.ts > rewriteInternalLinks > rewrites an angle 
+bracketed link to a document with spaces
+AssertionError: expected 'see [other](<./My Doc.md>)' to be 'see [other](<<doc-4>>)' // Object.is equality
+
+Expected: "see [other](<<doc-4>>)"
+Received: "see [other](<./My Doc.md>)"
+
+ Γ¥» server/queues/tasks/MarkdownAPIImportTask.test.ts:135:17
+    133|       { "Collection/My Doc.md": "doc-4" }
+    134|     );
+    135|     expect(out).toBe("see [other](<<doc-4>>)");
+       |                 ^
+    136|   });
+    137|
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[13/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/MarkdownAPIImportTask.test.ts > rewriteInternalLinks > rewrites a link 
+carrying a title, keeping the title
+AssertionError: expected 'see [other](./other.md "The other oneΓÇª' to be 'see [other](<<doc-5>> "The other one")' // 
+Object.is equality
+
+Expected: "see [other](<<doc-5>> "The other one")"
+Received: "see [other](./other.md "The other one")"
+
+ Γ¥» server/queues/tasks/MarkdownAPIImportTask.test.ts:144:17
+    142|       { "Collection/other.md": "doc-5" }
+    143|     );
+    144|     expect(out).toBe('see [other](<<doc-5>> "The other one")');
+       |                 ^
+    145|   });
+    146| });
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[14/27]ΓÄ»
+
+ FAIL  |server-shared| server/queues/tasks/ShareSubscriptionNotificationsTask.test.ts > 
+ShareSubscriptionNotificationsTask > should send if last notified more than 6 hours ago
+AssertionError: expected "schedule" to be called 1 times, but got 0 times
+ Γ¥» server/queues/tasks/ShareSubscriptionNotificationsTask.test.ts:173:17
+    171|     });
+    172|
+    173|     expect(spy).toHaveBeenCalledTimes(1);
+       |                 ^
+    174|   });
+    175|
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[15/27]ΓÄ»
+
+ FAIL  |server-shared| plugins/storage/server/api/files.test.ts > #files.get > should fail with status 404 if existing 
+file is requested with key
+AssertionError: expected 400 to deeply equal 404
+
+- Expected
++ Received
+
+- 404
++ 400
+
+ Γ¥» plugins/storage/server/api/files.test.ts:311:24
+    309|
+    310|     const res = await server.get(`/api/files.get?key=${key}`);
+    311|     expect(res.status).toEqual(404);
+       |                        ^
+    312|   });
+    313|
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[16/27]ΓÄ»
+
+ FAIL  |server-shared| plugins/storage/server/api/files.test.ts > #files.get > should fail with status 404 if 
+non-existing file is requested with key
+AssertionError: expected 400 to deeply equal 404
+
+- Expected
++ Received
+
+- 404
++ 400
+
+ Γ¥» plugins/storage/server/api/files.test.ts:319:24
+    317|     const key = path.join("uploads", user.id, crypto.randomUUID(), filΓÇª
+    318|     const res = await server.get(`/api/files.get?key=${key}`);
+    319|     expect(res.status).toEqual(404);
+       |                        ^
+    320|   });
+    321|
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[17/27]ΓÄ»
+
+ FAIL  |server-shared| plugins/storage/server/api/files.test.ts > #files.get > should succeed with status 200 ok when 
+avatar is requested using key
+AssertionError: expected 400 to deeply equal 200
+
+- Expected
++ Received
+
+- 200
++ 400
+
+ Γ¥» plugins/storage/server/api/files.test.ts:468:24
+    466|
+    467|     const res = await server.get(`/api/files.get?key=${key}`);
+    468|     expect(res.status).toEqual(200);
+       |                        ^
+    469|     expect(res.headers.get("Content-Disposition")).toEqual("attachmentΓÇª
+    470|   });
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[18/27]ΓÄ»
+
+ FAIL  |server-shared| plugins/storage/server/api/files.test.ts > #files.get > should succeed with status 200 ok when 
+avatar is requested using key
+AssertionError: expected 400 to deeply equal 200
+
+- Expected
++ Received
+
+- 200
++ 400
+
+ Γ¥» plugins/storage/server/api/files.test.ts:493:24
+    491|
+    492|     const res = await server.get(`/api/files.get?key=${key}`);
+    493|     expect(res.status).toEqual(200);
+       |                        ^
+    494|     expect(res.headers.get("Content-Type")).toEqual("image/jpg");
+    495|     expect(res.headers.get("Content-Disposition")).toEqual("attachmentΓÇª
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[19/27]ΓÄ»
+
+ FAIL  |server-shared| server/routes/api/cron/cron.test.ts > cron period parsing > should accept valid period 'daily'
+AssertionError: expected 500 to deeply equal 200
+
+- Expected
++ Received
+
+- 200
++ 500
+
+ Γ¥» server/routes/api/cron/cron.test.ts:122:24
+    120|     });
+    121|     const body = await res.json();
+    122|     expect(res.status).toEqual(200);
+       |                        ^
+    123|     expect(body.success).toBe(true);
+    124|   });
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[20/27]ΓÄ»
+
+
+ FAIL  |server-shared| server/routes/api/cron/cron.test.ts > cron period parsing > should accept valid period 'hourly'
+AssertionError: expected 500 to deeply equal 200
+
+- Expected
++ Received
+
+- 200
++ 500
+
+ Γ¥» server/routes/api/cron/cron.test.ts:133:24
+    131|     });
+    132|     const body = await res.json();
+    133|     expect(res.status).toEqual(200);
+       |                        ^
+    134|     expect(body.success).toBe(true);
+    135|   });
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[21/27]ΓÄ»
+
+ FAIL  |server-shared| server/routes/api/cron/cron.test.ts > cron period parsing > should accept valid period 'minute'
+AssertionError: expected 500 to deeply equal 200
+
+- Expected
++ Received
+
+- 200
++ 500
+
+ Γ¥» server/routes/api/cron/cron.test.ts:144:24
+    142|     });
+    143|     const body = await res.json();
+    144|     expect(res.status).toEqual(200);
+       |                        ^
+    145|     expect(body.success).toBe(true);
+    146|   });
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[22/27]ΓÄ»
+
+ FAIL  |server-shared| server/routes/api/cron/cron.test.ts > cron period parsing > should fallback to daily for 
+invalid period
+AssertionError: expected 500 to deeply equal 200
+
+- Expected
++ Received
+
+- 200
++ 500
+
+ Γ¥» server/routes/api/cron/cron.test.ts:155:24
+    153|     });
+    154|     const body = await res.json();
+    155|     expect(res.status).toEqual(200);
+       |                        ^
+    156|     expect(body.success).toBe(true);
+    157|   });
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[23/27]ΓÄ»
+
+ FAIL  |server-shared| server/routes/api/documents/documents.test.ts > #documents.export > should stream a zip when 
+the document has attachments
+AssertionError: expected '# Export Test\n\n![image](attachmentsΓÇª' to contain 
+'attachments/f4f43395-f778-4a31-a911-aΓÇª'
+
+- Expected
++ Received
+
+- attachments/f4f43395-f778-4a31-a911-adbbb41216ae.png
++ # Export Test
++
++ ![image](attachments\f4f43395-f778-4a31-a911-adbbb41216ae.png)
+
+ Γ¥» server/routes/api/documents/documents.test.ts:769:39
+    767|     expect(Object.keys(entries).sort()).toEqual([location, "export-tesΓÇª
+    768|     expect(entries[location]).toEqual("image-data");
+    769|     expect(entries["export-test.md"]).toContain(location);
+       |                                       ^
+    770|     expect(entries["export-test.md"]).not.toContain(attachment.redirecΓÇª
+    771|   });
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[24/27]ΓÄ»
+
+ FAIL  |server-shared| server/routes/api/documents/documents.test.ts > #documents.export > should stream a textpack 
+when TextBundle is requested
+AssertionError: expected '# Export Test\n\n![image](assets%5CphΓÇª' to contain 'assets/photo.png'
+
+- Expected
++ Received
+
+- assets/photo.png
++ # Export Test
++
++ ![image](assets%5Cphoto.png)
+
+ Γ¥» server/routes/api/documents/documents.test.ts:811:48
+    809|     ]);
+    810|     expect(entries[`${bundle}/assets/photo.png`]).toEqual("image-data"ΓÇª
+    811|     expect(entries[`${bundle}/text.markdown`]).toContain("assets/photoΓÇª
+       |                                                ^
+    812|     expect(JSON.parse(entries[`${bundle}/info.json`]).type).toEqual(
+    813|       "net.daringfireball.markdown"
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[25/27]ΓÄ»
+
+ FAIL  |server-shared| server/routes/api/revisions/revisions.test.ts > #revisions.export > should stream a zip when 
+the revision has attachments
+AssertionError: expected '# Export Test\n\n![image](attachmentsΓÇª' to contain 
+'attachments/b6bfc797-1045-4eff-9a9c-dΓÇª'
+
+- Expected
++ Received
+
+- attachments/b6bfc797-1045-4eff-9a9c-d70f4c844a8a.png
++ # Export Test
++
++ ![image](attachments\b6bfc797-1045-4eff-9a9c-d70f4c844a8a.png)
+
+ Γ¥» server/routes/api/revisions/revisions.test.ts:370:39
+    368|     expect(Object.keys(entries).sort()).toEqual([location, "export-tesΓÇª
+    369|     expect(entries[location]).toEqual("image-data");
+    370|     expect(entries["export-test.md"]).toContain(location);
+       |                                       ^
+    371|     expect(entries["export-test.md"]).not.toContain(attachment.redirecΓÇª
+    372|   });
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[26/27]ΓÄ»
+
+ FAIL  |server-shared| server/routes/api/revisions/revisions.test.ts > #revisions.export > should stream a textpack 
+when TextBundle is requested
+AssertionError: expected '# Export Test\n\n![image](assets%5CphΓÇª' to contain 'assets/photo.png'
+
+- Expected
++ Received
+
+- assets/photo.png
++ # Export Test
++
++ ![image](assets%5Cphoto.png)
+
+ Γ¥» server/routes/api/revisions/revisions.test.ts:416:48
+    414|     ]);
+    415|     expect(entries[`${bundle}/assets/photo.png`]).toEqual("image-data"ΓÇª
+    416|     expect(entries[`${bundle}/text.markdown`]).toContain("assets/photoΓÇª
+       |                                                ^
+    417|
+    418|     // The bundle points back at the revision it was built from, ratheΓÇª
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[27/27]ΓÄ»
+
+ Test Files  10 failed | 230 passed (240)
+      Tests  27 failed | 3841 passed | 6 skipped (3874)
+   Start at  02:35:11
+   Duration  205.67s (transform 74.14s, setup 311.15s, import 44.17s, tests 248.19s, environment 196ms)
+
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/index.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/plugin.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/utils.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/inputRules.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/actions.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/index.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/plugin.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/utils.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/inputRules.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/actions.js" points to missing source files

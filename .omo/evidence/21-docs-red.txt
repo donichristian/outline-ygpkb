@@ -1,0 +1,62 @@
+# Todo 21 - red check: retired claims in the two docs
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Base HEAD: 452ef5145
+Date: 2026-10-21
+
+The check greps both docs for the retired frame claims:
+
+    event: complete
+    event: truncated
+    event: error
+    [DONE]
+    byte-identit
+
+## BEFORE (HEAD:docs/AI-CHAT.md and HEAD:docs/AI-CHAT-DESIGN.md)
+
+Command:
+
+    node C:\Users\Media\AppData\Local\Temp\opencode\vcs.mjs -C "D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1" show HEAD:docs/AI-CHAT.md | Select-String -Pattern "event: complete|event: truncated|event: error|\[DONE\]|byte-identit"
+    node C:\Users\Media\AppData\Local\Temp\opencode\vcs.mjs -C "D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1" show HEAD:docs/AI-CHAT-DESIGN.md | Select-String -Pattern "event: complete|event: truncated|event: error|\[DONE\]|byte-identit"
+
+Unedited output:
+
+    AI-CHAT.md: stream containing one `event: error` frame, so the panel renders it as ordinary
+    AI-CHAT.md: the response is the same shape but ends with an `event: complete` (or
+    AI-CHAT.md: `event: truncated`) terminal frame, and the turn is written to storage.
+    AI-CHAT.md: > `event: error` frame — not an answer. To exercise the streaming path on the
+    AI-CHAT.md: # => event: error
+    AI-CHAT.md: event: complete
+    AI-CHAT.md: or `event: truncated` with `finishReason: null`. The payload is `{ runId,
+    AI-CHAT.md: `data: [DONE]`, which the OpenAI SDK consumes and never forwards. A session-backed
+    AI-CHAT.md: stream that ends without an `event: complete` frame raises
+    AI-CHAT.md: error is interposed as an in-band `event: error` SSE frame rather than a broken
+    AI-CHAT-DESIGN.md: Route-->>Util: "200 SSE, one event: error frame, kind=busy"
+    AI-CHAT-DESIGN.md: Route-->>Util: "200 SSE, one event: error frame (kind=refusal)"
+    AI-CHAT-DESIGN.md: Route-->>Util: "event: error frame pushed into the same stream"
+    AI-CHAT-DESIGN.md: Hermes-->>Route: "last frame carrying finish_reason (data: [DONE] is consumed by the SDK, never forwarded)"
+    AI-CHAT-DESIGN.md: Route->>Route: "author terminal frame {runId, finishReason} as event: complete | truncated"
+    AI-CHAT-DESIGN.md: `event: complete` or `event: truncated` with `{ runId, finishReason }`. It is
+    AI-CHAT-DESIGN.md: never derived from `data: [DONE]` — the OpenAI SDK consumes that sentinel and
+    AI-CHAT-DESIGN.md: 200 `text/event-stream` carrying one `event: error` frame with
+    AI-CHAT-DESIGN.md: | Prompt not grounded | in-band `event: error` frame (`kind: "refusal"`), upstream never called; the refusal is stored as a `completed` assistant turn | refusal rendered as ordinary transcript text |
+    AI-CHAT-DESIGN.md: | Another turn already streaming for this `(user, session)` | Redis `SET … NX` misses → in-band `event: error` frame with `kind: "busy"` | `kind=busy`, "another answer is still being generated" |
+    AI-CHAT-DESIGN.md: | Upstream mid-stream error | `event: error` frame pushed into the same stream | `kind=stream`, provider message |
+    AI-CHAT-DESIGN.md: | Session-backed stream ends with no `event: complete` | socket drop, proxy cut, or terminal frame never read | `kind=truncated`, "the answer stopped before it finished" |
+    AI-CHAT-DESIGN.md: event: complete
+    AI-CHAT-DESIGN.md: event: truncated
+    AI-CHAT-DESIGN.md: **It is never derived from `data: [DONE]`.** The OpenAI SDK consumes that
+    AI-CHAT-DESIGN.md: with `event: error`, and in the aborted case there is no client left to read
+    AI-CHAT-DESIGN.md: to the first frame, 287 incremental deltas, a clean `[DONE]`, 102 s total for a
+
+## AFTER (working tree)
+
+Command:
+
+    Select-String -Path "docs\AI-CHAT.md","docs\AI-CHAT-DESIGN.md" -Pattern "event: complete|event: truncated|event: error|\[DONE\]|byte-identit" -AllMatches
+
+Unedited output:
+
+    (no matches)
+
+    AFTER_RED_COUNT=0

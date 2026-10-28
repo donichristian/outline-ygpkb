@@ -1,0 +1,16 @@
+﻿AUDIT EVIDENCE 23 - accept the AG-UI threadId as the persisted session id (happy path)
+WORKDIR: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+CHANNEL: wire-level stubbed-fetch test (live gateway 127.0.0.1:8642 is DOWN - no curl transcript is possible or fabricated)
+COMMAND: yarn test server/routes/api/ai/aiStreaming.test.ts -t "persists an AG-UI body addressed only by threadId"
+OUTPUT (unedited):
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 16 skipped (17)
+   Start at  03:51:33
+   Duration  22.93s (transform 10.90s, setup 18.13s, import 3.12s, tests 1.35s, environment 0ms)
+
+
+EXIT=0

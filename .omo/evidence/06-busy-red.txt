@@ -1,0 +1,92 @@
+﻿06 - busy refusal framed as one ordinary AG-UI run, first run untouched (wire-level evidence)
+
+The live gateway at 127.0.0.1:8642 is DOWN, so no curl transcript exists and none is
+fabricated. The channel is the wire-level test with the provider fetch stubbed and a
+hand-driven stream, running the real Koa route, PostgreSQL and Redis.
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Command (workdir = worktree):
+  yarn test server/routes/api/ai/zzEvidence.test.ts --reporter=verbose
+
+The probe harness that printed this capture was deleted afterwards; the same assertions
+live permanently in server/routes/api/ai/aiInFlightCap.test.ts
+("frames the busy refusal as a complete AG-UI run and leaves the first turn untouched").
+
+Output (unedited):
+ Γ£ô |server| server/routes/api/ai/zzEvidence.test.ts > evidence: refusal run frames 859ms
+stdout | server/routes/api/ai/zzEvidence.test.ts > evidence: busy run while first turn still streams
+=== BUSY ROWS BEFORE SECOND TURN: [
+  {
+    "seq": 1,
+    "role": "user",
+    "status": "completed"
+  }
+]
+
+stdout | server/routes/api/ai/zzEvidence.test.ts > evidence: busy run while first turn still streams
+=== BUSY STATUS: 200
+=== BUSY CONTENT-TYPE: text/event-stream
+=== BUSY X-AI-CHAT-KIND: busy
+=== BUSY BODY START
+data: {"type":"RUN_STARTED","runId":"5b1abe6d-2570-448b-89a7-f2a4a381f9cd","threadId":"f0b4475c-8b2f-4705-bbbb-8c54c95cf9f7","timestamp":1792463922372}
+
+data: {"type":"TEXT_MESSAGE_START","messageId":"391bd955-abf7-49d2-99ed-e573938f71ff","role":"assistant","timestamp":1792463922372}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"391bd955-abf7-49d2-99ed-e573938f71ff","delta":"Another answer for this conversation is still being generated","timestamp":1792463922372}
+
+data: {"type":"TEXT_MESSAGE_END","messageId":"391bd955-abf7-49d2-99ed-e573938f71ff","timestamp":1792463922372}
+
+data: {"type":"RUN_FINISHED","runId":"5b1abe6d-2570-448b-89a7-f2a4a381f9cd","threadId":"f0b4475c-8b2f-4705-bbbb-8c54c95cf9f7","timestamp":1792463922372}
+
+
+=== BUSY BODY END
+
+stdout | server/routes/api/ai/zzEvidence.test.ts > evidence: busy run while first turn still streams
+=== BUSY ROWS WHILE FIRST STREAMS: [
+  {
+    "seq": 1,
+    "role": "user",
+    "status": "completed",
+    "content": "What is the payments deployment runbook?"
+  }
+]
+
+stdout | server/routes/api/ai/zzEvidence.test.ts > evidence: busy run while first turn still streams
+=== FIRST STATUS: 200
+=== FIRST X-AI-CHAT-KIND: null
+=== FIRST BODY START
+data: {"type":"RUN_STARTED","metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model":"test-model"},"model":"test-model"}},"runId":"openai-compatible-1792463922333-49dyonegzig","threadId":"f0b4475c-8b2f-4705-bbbb-8c54c95cf9f7","timestamp":1792463922382}
+
+data: {"type":"TEXT_MESSAGE_START","messageId":"openai-compatible-1792463922333-l8k3910kx7h","timestamp":1792463922384,"role":"assistant","metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model":"test-model"},"model":"test-model"}}}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"openai-compatible-1792463922333-l8k3910kx7h","timestamp":1792463922384,"delta":"Payments.","metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model":"test-model"}}}}
+
+data: {"type":"TEXT_MESSAGE_END","messageId":"openai-compatible-1792463922333-l8k3910kx7h","timestamp":1792463922385,"metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model":"test-model"},"model":"test-model"}}}
+
+data: {"type":"RUN_FINISHED","runId":"openai-compatible-1792463922333-49dyonegzig","threadId":"f0b4475c-8b2f-4705-bbbb-8c54c95cf9f7","timestamp":1792463922387,"metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model":"test-model"},"model":"test-model","finishReason":"stop"}}}
+
+
+=== FIRST BODY END
+
+stdout | server/routes/api/ai/zzEvidence.test.ts > evidence: busy run while first turn still streams
+=== BUSY ROWS AFTER FIRST COMPLETES: [
+  {
+    "seq": 1,
+    "role": "user",
+    "status": "completed",
+    "content": "What is the payments deployment runbook?"
+  },
+  {
+    "seq": 2,
+    "role": "assistant",
+    "status": "completed",
+    "content": "Payments."
+  }
+]
+
+ Γ£ô |server| server/routes/api/ai/zzEvidence.test.ts > evidence: busy run while first turn still streams 1707ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  02:38:13
+   Duration  28.55s (transform 14.78s, setup 21.15s, import 4.55s, tests 2.57s, environment 0ms)

@@ -1,0 +1,59 @@
+Row 26 — in-flight lock leaks on pre-stream throws
+===================================================
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Date: 2026-10-21
+
+RED BEFORE (fix not applied)
+----------------------------
+Command:
+  yarn test server/routes/api/ai/aiInFlightCap.test.ts server/routes/api/ai/aiStreaming.test.ts
+
+New tests, both failing against the unfixed handler:
+
+1) "releases the lock when reading the committed window throws before the stream exists"
+   Forced: AIChatMessage.findAll rejects for the resolver query
+   (attributes include "role"), after Redis NX acquisition.
+   Observed red run:
+     DEBUG 500 application/json; charset=utf-8 null 2
+     AssertionError: expected [ Array(1) ] to deeply equal []
+     - Expected: []
+     + Received: [ "aiChat:inflight:<userId>:<sessionId>" ]
+   The JSON 500 was returned while the key stayed set for the 900s TTL.
+
+2) "releases the lock when the engine loader rejects before the stream exists"
+   Forced: loadTanstack() rejects once, after acquisition (Promise.all path).
+   Observed red run:
+     FAIL ... expected [ Array(1) ] to deeply equal []
+     - Expected: []
+     + Received: [ "aiChat:inflight:f9af4bb4-...:4377c5f7-..." ]
+   The rejection surfaced as a JSON error and stranded the key.
+
+GREEN AFTER (fix applied)
+-------------------------
+Structure: try/finally around everything after acquisition. The refusal path
+returns inside the try, and the stream-creation catch rethrows; both fall
+through the same finally. `streamHandedOff` is set only after `ctx.body` is
+assigned, so the terminal hooks (finish/error/abort) keep exclusive ownership
+once the response is handed off. `releaseInFlightLock` is idempotent and
+compare-and-delete, so the old explicit release at the refusal and the old
+release in the stream catch were removed — one release path, one Redis eval.
+
+Command:
+  yarn test server/routes/api/ai/aiInFlightCap.test.ts server/routes/api/ai/aiStreaming.test.ts server/routes/api/ai/upstreamMessages.test.ts
+Result:
+  Test Files  3 passed (3)
+  Tests       55 passed (55)
+
+Command:
+  yarn test server/routes/api/ai/
+Result:
+  Test Files  9 passed (9)
+  Tests       161 passed (161)   (was 156; +5 new tests)
+
+Terminal exits regression check: finish, upstream error, client abort and
+grounding refusal tests still end in `expectNoInFlightLock(user)` (KEYS scan)
+and all pass. No test was weakened or deleted.
+
+Command:
+  yarn tsc --incremental false
+Result: EXIT=0

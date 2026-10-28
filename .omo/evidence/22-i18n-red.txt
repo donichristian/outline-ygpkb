@@ -1,0 +1,59 @@
+Checkbox 22 — CRLF handling / revert-when-CRLF-only proof
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Date: 2026-10-21
+
+SETUP
+  git config core.autocrlf            => true
+  git ls-files --eol translation.json => i/lf  w/crlf  attr/(none)
+  Working file before extraction: 149362 bytes, 1938 CRLF / 1938 LF (uniform CRLF).
+  Because autocrlf=true, git normalizes CRLF->LF on add, so a uniform CRLF working file
+  produces no line-ending diff. i18next lineEnding="auto" also preserved CRLF.
+
+BEFORE EXTRACTION
+  $ git status --porcelain
+  (clean, no output)
+
+AFTER EXTRACTION (direct i18next run)
+  $ git status --porcelain
+   M shared/i18n/locales/en_US/translation.json
+
+  $ git diff --numstat
+  29  8  shared/i18n/locales/en_US/translation.json
+  $ git diff --ignore-all-space --numstat
+  29  8  shared/i18n/locales/en_US/translation.json
+
+  Not CRLF-only: real keys were added. But the parser re-emitted four multi-line keys read
+  from CRLF source files with literal \r\n escapes inside the JSON string (8 deleted / 4
+  changed keys):
+    - "<em>{{ collectionName }}</em> doesn’t contain any\n ... yet."
+    + same key/value with \r\n
+    - "Create personal API keys ... programatically control\n ..."
+    + same with \r\n
+    - "API keys can be used ... programatically control\n ..."
+    + same with \r\n
+  Those are unintended source-line-ending artifacts, not new copy.
+
+REPAIR (deliberate, limited to embedded escapes in the en_US catalogue)
+  node normalize-i18n.mjs shared/i18n/locales/en_US/translation.json
+    embedded CRLF escaped sequences normalized: true
+    catalogue parses
+
+AFTER REPAIR
+  $ git diff --numstat
+  29  6  shared/i18n/locales/en_US/translation.json
+  $ git diff --ignore-all-space --numstat
+  29  6  shared/i18n/locales/en_US/translation.json
+  embedded "\r\n" escape sequences remaining in catalogue: 0
+  Diff now consists only of added keys plus the extractor moving five pre-existing keys
+  ("Done", "Cancel", "Loading", "Toggle fullscreen", "Failed") into the AIChat block and
+  de-duplicating the grounding disclosure. No line-ending-only change remains.
+
+REVERT DECISION
+  Whole-file revert was NOT applicable: the diff was never CRLF-only, so reverting would
+  have discarded the new keys. Only the four embedded \r\n escapes were normalized.
+  No `git checkout --` of translation.json was performed.
+
+VERIFICATION
+  yarn tsc --incremental false           => EXIT=0
+  yarn test AIChatPanel.test.tsx AIChatHistory.test.tsx => 2 files, 48 tests passed
+  node check-i18n.mjs                    => scanned 5 files, missing 0

@@ -1,0 +1,85 @@
+# 02-cjs-boot.txt — HAPPY PATH: @tanstack/ai* load in the CommonJS server build
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Node: v22.23.3  (require(esm) enabled: process.features.require_module === true)
+Method: dynamic `import()` via a `new Function` indirection (swc cannot rewrite it), kept in
+server/routes/api/ai/tanstack.ts. Static ESM import is impossible (see -red.txt).
+
+------------------------------------------------------------
+COMMAND 1 — inspect the installed exports maps and Node capability
+------------------------------------------------------------
+$ node -e "const p=['@tanstack/ai','@tanstack/ai-client','@tanstack/ai-openai','@tanstack/ai-react']; for(const n of p){const j=require('./node_modules/'+n+'/package.json'); console.log('=== '+n+' ==='); console.log('type:',j.type,'main:',j.main,'module:',j.module); console.log('exports:',JSON.stringify(j.exports,null,1));}"
+
+OUTPUT (abridged — every package identical in shape):
+=== @tanstack/ai ===
+type: module main: undefined module: ./dist/esm/index.js
+exports: { ".": { "types": "./dist/esm/index.d.ts", "import": "./dist/esm/index.js" }, ... }
+=== @tanstack/ai-openai ===
+type: module main: undefined module: ./dist/esm/index.js
+exports: { ".": { "types": "./dist/esm/index.d.ts", "import": "./dist/esm/index.js" },
+           "./compatible": { "types": "./dist/esm/compatible/index.d.ts", "import": "./dist/esm/compatible/index.js" }, ... }
+=> "type":"module", no "main", exports carry ONLY an "import" condition (no "require", no "default").
+
+------------------------------------------------------------
+COMMAND 2 — top-level-await scan of the installed ESM graphs
+------------------------------------------------------------
+$ node -e "walk @tanstack/ai/dist/esm + @tanstack/ai-openai/dist/esm; count lines matching /^await\b/"
+OUTPUT:
+TOP-LEVEL AWAIT occurrences (col-0 `await`): 0
+=> No top-level await in the ESM graphs (irrelevant here: resolution fails before load).
+
+------------------------------------------------------------
+COMMAND 3 — final build with the kept loader present (probe already removed)
+------------------------------------------------------------
+$ yarn build:server
+Clean previous build…
+Compiling…
+Copying static files…
+Done!
+EXITCODE=0
+
+------------------------------------------------------------
+COMMAND 4 — the compiled loader: no static require of the packages
+------------------------------------------------------------
+$ node ./node_modules/@swc/cli/bin/swc.js … (compiled by build.js)
+$ Select-String build\server\routes\api\ai\tanstack.js -Pattern 'require|import'
+OUTPUT (functional lines only; the doc-comment mentions are elided):
+const dynamicImport = new Function("specifier", "return import(specifier);");
+tanstackPromise ?? (tanstackPromise = dynamicImport("@tanstack/ai"));
+openaiCompatiblePromise ?? (openaiCompatiblePromise = dynamicImport("@tanstack/ai-openai/compatible"));
+=> the emitted module contains NO `require("@tanstack/...")`.
+
+------------------------------------------------------------
+COMMAND 5 — runtime proof: require the compiled CJS module, call the loaders
+------------------------------------------------------------
+$ node -e "const t=require('./build/server/routes/api/ai/tanstack.js'); const p=t.loadTanstack(); console.log('memoized:',p===t.loadTanstack()); Promise.all([p,t.loadOpenaiCompatible()]).then(([a,o])=>{console.log('ai:',['chat','toServerSentEventsResponse','chatParamsFromRequestBody'].map(k=>k+'='+typeof a[k]).join(' ')); console.log('compatible:',typeof o.openaiCompatible);})"
+OUTPUT:
+module exports: [ 'loadOpenaiCompatible', 'loadTanstack' ]
+memoized (same promise): true
+compatible memoized: true
+@tanstack/ai exports: chat,chatParamsFromRequestBody,toServerSentEventsResponse
+@tanstack/ai-openai/compatible exports: OpenAICompatibleChatAdapter,OpenAICompatibleResponsesAdapter,openaiCompatible,openaiCompatibleText
+types: function function function function
+EXITCODE=0
+
+------------------------------------------------------------
+COMMAND 6 — real boot of the compiled server (web service), 20s cap
+------------------------------------------------------------
+$ $env:NODE_ENV='development'; Start-Process node ./build/server/index.js --services=web ; sleep 20 ; Kill
+OUTPUT:
+KILLED_AFTER_20s
+===STDOUT===
+… injected env (0) from .env … dotenvx@1.75.1
+warn: Running Outline in development mode. To run Outline in production mode set the NODE_ENV env variable to "production"
+info: [email] SMTP_USERNAME not provided, generating test account…
+  … (3 duplicate lines)
+===STDERR===
+===ESM ERROR SCAN===
+NO_ESM_ERROR
+=> The compiled server stays up for the full 20s; no ERR_REQUIRE_ESM / ERR_REQUIRE_ASYNC_MODULE /
+   `require() of ES Module` anywhere.
+
+DECISION: Dynamic `await import()` is REQUIRED. The `@tanstack/ai*` packages expose only an
+`import` exports condition, so any static ESM import compiled to `require()` dies with
+ERR_PACKAGE_PATH_NOT_EXPORTED. Load them through the kept, memoized loaders
+`loadTanstack()` / `loadOpenaiCompatible()` in server/routes/api/ai/tanstack.ts.

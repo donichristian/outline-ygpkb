@@ -1,0 +1,23 @@
+Plan row 28 — AIChatPanel: keep the streamed turn when the history re-read fails
+
+RED (before fix) — new test fails because the assistant bubble is dropped:
+$ yarn test app/components/AIChat/ --project app
+ ❯ |app| app/components/AIChat/AIChatPanel.test.tsx (37 tests | 1 failed) 2548ms
+     × keeps the streamed turn when the history re-read fails 47ms
+ FAIL  |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > keeps the streamed turn when the history re-read fails
+ AssertionError: the given combination of arguments (undefined and string) is invalid for this assertion.
+ ❯ app/components/AIChat/AIChatPanel.test.tsx:682:53
+    682|     expect(query("message-assistant")?.textContent).toContain("The ans…")
+ Test Files  1 failed | 3 passed (4)
+      Tests  1 failed | 58 passed (59)
+
+GREEN (after fix) — pending cleared only on a successful list():
+$ yarn test app/components/AIChat/ --project app
+ Test Files  4 passed (4)
+      Tests  59 passed (59)
+
+Typecheck:
+$ yarn tsc --incremental false
+EXIT=0
+
+lsp_diagnostics on app/components/AIChat/AIChatPanel.tsx: No diagnostics found

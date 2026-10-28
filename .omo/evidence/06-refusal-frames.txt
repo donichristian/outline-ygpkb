@@ -1,0 +1,57 @@
+﻿06 - refusal framed as one ordinary AG-UI run (wire-level evidence)
+
+The live gateway at 127.0.0.1:8642 is DOWN, so no curl transcript exists and none is
+fabricated. The channel is the wire-level test with the provider fetch stubbed, running
+the real Koa route, PostgreSQL and Redis.
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Command (workdir = worktree):
+  yarn test server/routes/api/ai/zzEvidence.test.ts --reporter=verbose
+
+The probe harness that printed this capture was deleted afterwards; the same assertions
+live permanently in server/routes/api/ai/ai.test.ts
+("persists the refusal as a completed assistant row before the frames are written").
+
+Output (unedited):
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+stdout | server/routes/api/ai/zzEvidence.test.ts > evidence: refusal run frames
+=== REFUSAL STATUS: 200
+=== REFUSAL CONTENT-TYPE: text/event-stream
+=== REFUSAL X-AI-CHAT-KIND: refusal
+=== REFUSAL BODY START
+data: {"type":"RUN_STARTED","runId":"149cde5a-3b38-4358-bc21-7daf2c580658","threadId":"ebdff27a-89eb-470f-b27b-44c5d795526f","timestamp":1792463920631}
+
+data: {"type":"TEXT_MESSAGE_START","messageId":"e389f197-d7b2-4e47-baf4-f0ca8888f604","role":"assistant","timestamp":1792463920631}
+
+data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"e389f197-d7b2-4e47-baf4-f0ca8888f604","delta":"This assistant only answers from this workspaceΓÇÖs knowledge base","timestamp":1792463920631}
+
+data: {"type":"TEXT_MESSAGE_END","messageId":"e389f197-d7b2-4e47-baf4-f0ca8888f604","timestamp":1792463920631}
+
+data: {"type":"RUN_FINISHED","runId":"149cde5a-3b38-4358-bc21-7daf2c580658","threadId":"ebdff27a-89eb-470f-b27b-44c5d795526f","timestamp":1792463920631}
+
+
+=== REFUSAL BODY END
+=== REFUSAL ROWS: [
+  {
+    "seq": 1,
+    "role": "user",
+    "status": "completed",
+    "content": "How do I rotate the Kubernetes signing keys?",
+    "runId": "149cde5a-3b38-4358-bc21-7daf2c580658"
+  },
+  {
+    "seq": 2,
+    "role": "assistant",
+    "status": "completed",
+    "content": "This assistant only answers from this workspaceΓÇÖs knowledge base",
+    "runId": "149cde5a-3b38-4358-bc21-7daf2c580658"
+  }
+]
+
+ Γ£ô |server| server/routes/api/ai/zzEvidence.test.ts > evidence: refusal run frames 859ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  02:38:13
+   Duration  28.55s (transform 14.78s, setup 21.15s, import 4.55s, tests 2.57s, environment 0ms)

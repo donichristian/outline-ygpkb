@@ -1,0 +1,75 @@
+﻿node.exe : [33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m(!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+ Γ¥» |server| server/routes/api/ai/aiStreaming.test.ts (21 tests | 1 failed) 2528ms
+     ├ù records a stream that ends with a finish_reason as completed 91ms
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ» Failed Tests 1 ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»
+
+ FAIL  |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream that 
+ends with a finish_reason as completed
+AssertionError: expected 'data: {"type":"RUN_STARTED","metadataΓÇª' to contain 'event: complete'
+
+- Expected
++ Received
+
+- event: complete
++ data: {"type":"RUN_STARTED","metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completion
+s","model":"test-model"},"model":"test-model"}},"runId":"openai-compatible-1792550026257-5l976hu2c","threadId":"4720371
+8-2d2f-431f-a737-50f93b75567b","timestamp":1792550026258}
++
++ data: {"type":"TEXT_MESSAGE_START","messageId":"openai-compatible-1792550026257-jfwf38rom3f","timestamp":179255002625
+8,"role":"assistant","metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model
+":"test-model"},"model":"test-model"}}}
++
++ data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"openai-compatible-1792550026257-jfwf38rom3f","timestamp":1792550026
+258,"delta":"Done.","metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model"
+:"test-model"}}}}
++
++ data: {"type":"TEXT_MESSAGE_END","messageId":"openai-compatible-1792550026257-jfwf38rom3f","timestamp":1792550026258,
+"metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model":"test-model"},"mode
+l":"test-model"}}}
++
++ data: {"type":"RUN_FINISHED","runId":"openai-compatible-1792550026257-5l976hu2c","threadId":"47203718-2d2f-431f-a737-
+50f93b75567b","timestamp":1792550026259,"metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-
+completions","model":"test-model"},"model":"test-model","finishReason":"stop"}}}
++
++
+
+ Γ¥» server/routes/api/ai/aiStreaming.test.ts:797:18
+    795|
+    796|     expect(text).toContain('"type":"RUN_FINISHED"');
+    797|     expect(text).toContain("event: complete");
+       |                  ^
+    798|     expect(text).not.toContain('"type":"RUN_ERROR"');
+    799|
+
+ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»ΓÄ»[1/1]ΓÄ»
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 20 passed (21)
+   Start at  02:33:26
+   Duration  20.56s (transform 9.55s, setup 14.68s, import 3.09s, tests 2.53s, environment 0ms)
+
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/index.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/plugin.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/utils.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/inputRules.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/actions.js" points to missing source files

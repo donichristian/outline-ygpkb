@@ -1,0 +1,19 @@
+AUDIT EVIDENCE 15 - reasoning passthrough (unconfigured -> NO reasoning field)
+WORKDIR: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+CHANNEL: same stubbed provider boundary as 15-reasoning.txt. AI_CHAT_REASONING is unset, so the
+         route must omit the key entirely and the gateway must never see a reasoning parameter.
+
+ASSERTION UNDER TEST (aiReasoning.test.ts):
+  expect(reasoningKeys(bodies[0])).toEqual([]);   // no /reasoning/i key on the provider body
+
+COMMAND: yarn test server/routes/api/ai/aiReasoning.test.ts -t "sends no reasoning field" --reporter=verbose
+OUTPUT (unedited RUN block):
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+ Test Files  1 passed (1)
+      Tests  1 passed | 3 skipped (4)
+   Start at  07:19:35
+   Duration  22.78s (transform 11.89s, setup 17.09s, import 3.81s, tests 1.51s, environment 0ms)
+
+RELATED NEGATIVE: "ignores a reasoning level supplied in the request body" sets AI_CHAT_REASONING=high
+while the request body carries reasoning:"low" and reasoning_effort:"minimal"; the outgoing body is
+asserted to carry reasoning_effort:"high" only. Passes in the full-suite run.

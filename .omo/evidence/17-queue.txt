@@ -1,0 +1,132 @@
+TODO 17 — Add the `whenBusy` message queue
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+
+=====================================================================
+1. LIBRARY FINDING (does the installed TanStack client give us a queue?)
+=====================================================================
+Command:
+  Select-String -Path node_modules\@tanstack\ai-client\dist\esm\chat-client.js `
+    -Pattern "whenBusy:|drain:|onOverflow:|cancelQueued\(id\)|flushQueue\(\)|discardPendingSends\(\)"
+
+Output (chat-client.js):
+  44: whenBusy: "queue",
+  45: drain: "fifo",
+  46: onOverflow: "reject"
+  51: whenBusy: option
+  62: whenBusy: option.whenBusy ?? "queue",
+  63: drain: option.drain ?? "fifo",
+  64: onOverflow: option.onOverflow ?? "reject",
+  227: * Set by `whenBusy: 'interrupt'` so an in-progress FIFO drain loop stops
+  1275: * await client.sendMessage('Urgent', undefined, { whenBusy: 'interrupt' })
+  1573: } else this.flushQueue();
+  1599: this.discardPendingSends();
+  1613: this.discardPendingSends();
+  1626: this.discardPendingSends();
+
+Additional API surface found in the same file:
+  1939: async drainQueue()            -> drains only after a successful settle
+  1970: discardPendingSends()        -> stop / error / clear flushes the queue
+  1991: cancelQueued(id)              -> removes one queued message by id
+  2002: flushQueue()                  -> discards every queued message
+
+VERDICT: the installed @tanstack/ai-client DOES expose a usable queue
+(`queue: { whenBusy, drain, onOverflow, maxSize }` + `cancelQueued(id)`).
+BUT the queue is INSTANCE state on a `ChatClient`, and this panel builds a NEW
+headless `ChatClient` for EVERY turn (`sendTurn` -> `new ChatClient(...)`,
+threadId fixed at construction). A per-turn client cannot carry its queue across
+the turn boundary, so the library queue is unusable here.
+=> The queue is implemented as PANEL STATE: an ordered `queued: QueuedTurn[]`
+   (`{ id, content }`), authoritative copy in `queueRef` for the async drain,
+   rendered copy in `queued` state. Semantics mirror the library exactly:
+   FIFO, drain after a settled turn, flush on stop/error, per-item cancel.
+
+=====================================================================
+2. WHERE `whenBusy` LIVES
+=====================================================================
+- Type: `AiChatWhenBusy = "queue" | "drop" | "interrupt"` in
+  `app/utils/aiChat.ts` (exported next to `AiChatKind`).
+- Option: `AIChatPanel` props — `whenBusy?: AiChatWhenBusy`, default `"queue"`
+  (`const AIChatPanel = observer(function AIChatPanel({ onClose, whenBusy = "queue" }: Props)`).
+- Queue lifetime: panel React state only. Never persisted, never written to a
+  stored row, discarded on stop / interrupt / new chat / session switch /
+  unmount.
+
+=====================================================================
+3. CRITERIA -> TESTS (app/components/AIChat/AIChatPanel.test.tsx)
+=====================================================================
+(a) queued by default and sent after the first turn settles
+    "queues a mid-stream send and sends it once the turn settles"
+    - queue region shows "follow-up"; composer cleared; transcript untouched
+    - 0 store rows while queued; 1 run while queued
+    - after release: runs length 2, drained run's user message is "follow-up"
+    - 4 stored rows afterwards (both turns actually sent)
+(b) whenBusy:"drop" ignores the send and adds nothing
+    'ignores a mid-stream send when whenBusy is "drop"'
+    - no queue region, input stays "dropped", still 1 run
+    - after settle: 2 stored rows (only the first turn)
+(c) whenBusy:"interrupt" aborts the current turn and sends the new message
+    'aborts the in-flight turn and sends at once when whenBusy is "interrupt"'
+    - runs[0].signal.aborted === true, runs length 2, no queue region
+    - the interrupted turn wrote no row: stored = ["urgent", "The answer"]
+(d) cancelQueued(id) removes a waiting item
+    "cancels one queued message before it drains"
+    - queue ["first","second"] -> ["second"] after cancelling the first
+    - the drained run's message is "second" (the cancelled one never reaches
+      the connection)
+(e) queue NEVER merges into the persisted transcript
+    covered by (a): 0 store rows while queued -> 4 only after both sends
+(f) abort/error flushes the queue
+    "discards queued messages when the in-flight turn is stopped"
+    - queue region gone after Stop, 1 run, 0 stored rows after settling
+
+=====================================================================
+4. GATES
+=====================================================================
+COMMAND: yarn test app/components/AIChat/AIChatPanel.test.tsx
+node.exe : [33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m(!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  34 passed (34)
+   Start at  08:06:35
+   Duration  11.88s (transform 2.77s, setup 4.24s, import 3.75s, tests 2.17s, environment 1.36s)
+
+
+COMMAND: yarn test app/components/AIChat/
+
+node.exe : [33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m(!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  4 passed (4)
+      Tests  56 passed (56)
+   Start at  08:07:07
+   Duration  11.57s (transform 4.40s, setup 9.96s, import 8.78s, tests 4.19s, environment 4.73s)
+
+
+COMMAND: yarn tsc --incremental false
+EXIT=0
+
