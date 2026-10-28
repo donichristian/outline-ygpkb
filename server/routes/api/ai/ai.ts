@@ -304,6 +304,22 @@ function refuseWithAgUiRun({
 }
 
 /**
+ * The instructions every chat run starts with.
+ *
+ * Without them the model has tools it was never told about: a summarization or
+ * procedure question was answered from the model's own priors instead of the
+ * workspace, and a document read was never requested. These four rules are the
+ * smallest set that makes the read-only allowlist discoverable and makes an
+ * ungrounded answer visible rather than plausible.
+ */
+const SystemPrompt = [
+  "You answer questions about this workspace’s own documents.",
+  "Call search_workspace before answering any question that could be about workspace content. Never answer such a question from general knowledge.",
+  "Call read_document when the answer needs a document’s actual text — summaries, procedures, step lists, quotes — and page with offset while truncated is true.",
+  "Cite each document you rely on by its link. If the workspace has nothing relevant, say so plainly instead of guessing.",
+].join("\n");
+
+/**
  * Streams an assistant answer as AG-UI over SSE, with optional turn storage.
  *
  * The response is an AG-UI wrap around the provider's stream, **not** a
@@ -609,6 +625,9 @@ router.post(
           // The allowlist is static and read-only. It is the only source of
           // tools on this path; the request body contributes none.
           tools: serverTools,
+          // The tool descriptions say what each tool does; this says when to
+          // reach for one, which is what keeps an answer grounded.
+          systemPrompts: [SystemPrompt],
           // Server tools receive the requesting user through this context, so
           // no tool closes over a request-scoped value.
           context: { user },
