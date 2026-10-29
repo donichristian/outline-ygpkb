@@ -555,9 +555,13 @@ incidental.
   so a client that reloads history the moment the run finishes cannot race the
   insert.
 - **Tools are the server's own, read-only.** `server/routes/api/ai/tools.ts`
-  exports one frozen allowlist — `search_workspace` — passed to `chat({ tools })`
-  as-is. The request body is never read for tools, and `forwardedProps` is
-  never spread into the run, so a client cannot add a tool.
+  exports a frozen allowlist — `search_workspace` and `read_document` — passed to
+  `chat({ tools })` as-is. The request body is never read for tools, and
+  `forwardedProps` is never spread into the run, so a client cannot add a tool.
+  `read_document` converts one document to Markdown through
+  `DocumentHelper.toMarkdown` and slices it to 24k characters so a long document
+  can be paged with `offset`; it authorizes with the requesting user's own read
+  ability, so a guessed id cannot read a document the caller cannot open.
 - **The in-flight lock is bounded and released on every exit.** The Redis key
   `aiChat:inflight:{userId}:{sessionId}` is taken with `SET … EX 900 NX` and
   released by compare-and-delete on finish, error, abort and refusal. The TTL is
@@ -565,6 +569,15 @@ incidental.
   (roughly 5 rounds × (120s model + 5s tool) ≈ 625s worst case); a lock that
   expired mid-stream would silently defeat the cap, so the cost is pushed into
   the crash case.
+- **The tool loop is bounded by the engine, not by this route.** No
+  `agentLoopStrategy` is passed, so `@tanstack/ai` applies its default
+  `combineStrategies([maxIterations(5), untilFinishReason(["length"])])` — five
+  model turns, then a final answer. That default is what the lock TTL above is
+  sized against; changing it means re-deriving the TTL.
+- **Token usage is logged, not stored or enforced.** `RUN_FINISHED.usage` is
+  captured by the persistence middleware's `onChunk` and logged with
+  `requestId`/`sessionId`/`runId`/`status`. The value is provider-shaped, so it
+  is passed through opaque; there is no spend cap and no per-message column.
 - **Reasoning is an operator decision.** `AI_CHAT_REASONING` sets the Chat
   Completions `reasoning_effort` through `modelOptions`; the request body never
   carries a reasoning level, and an unconfigured value omits the field entirely.
@@ -685,7 +698,7 @@ It is implemented and shipped; what follows is the boundary of that work.
   mints its own `runId`, and ignores any client-supplied `runId`, `tools` or
   `forwardedProps`.
 - A frozen, read-only server tool allowlist
-  (`server/routes/api/ai/tools.ts`, `search_workspace`) passed to
+  (`server/routes/api/ai/tools.ts`, `search_workspace` + `read_document`) passed to
   `chat({ tools })`; client-supplied tools are ignored.
 - Reasoning through `AI_CHAT_REASONING` → `modelOptions.reasoning_effort`, with
   thinking rendered live-only as a collapsed disclosure.

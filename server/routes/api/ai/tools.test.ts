@@ -154,16 +154,58 @@ afterEach(() => {
 });
 
 describe("loadServerTools", () => {
-  it("returns a frozen array whose only member is a read-only server tool", async () => {
+  it("returns a frozen array of read-only server tools", async () => {
     const tools = await loadServerTools();
 
     expect(Object.isFrozen(tools)).toBe(true);
-    expect(tools).toHaveLength(1);
-    const [tool] = tools;
-    expect(tool.name).toEqual("search_workspace");
-    expect(typeof tool.description).toEqual("string");
-    expect(tool.inputSchema).toBeDefined();
-    expect(typeof tool.execute).toEqual("function");
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "search_workspace",
+      "read_document",
+    ]);
+    for (const tool of tools) {
+      expect(typeof tool.description).toEqual("string");
+      expect(tool.inputSchema).toBeDefined();
+      expect(typeof tool.execute).toEqual("function");
+    }
+  });
+
+  it("scrolls a document read so long documents can be summarized in slices", async () => {
+    const user = await buildUser();
+    const document = await seedReadableDocument(user);
+    const tools = await loadServerTools();
+
+    // The allowlist is a union of tool shapes, so the test narrows the member
+    // it wants to drive rather than widening every tool's execute signature.
+    const readDocument = tools.find((tool) => tool.name === "read_document") as
+      | undefined as
+      | {
+          execute: (
+            input: { documentId: string; offset?: number },
+            ctx: never
+          ) => Promise<{ markdown: string; offset: number; truncated: boolean }>;
+        }
+      | undefined;
+
+    if (!readDocument) {
+      throw new Error("read_document is not registered");
+    }
+
+    const context = { context: { user } };
+    const first = await readDocument.execute(
+      { documentId: document.id, offset: 0 },
+      context as never
+    );
+
+    expect(first.markdown.length).toBeGreaterThan(0);
+    expect(first.offset).toEqual(0);
+
+    const middle = await readDocument.execute(
+      { documentId: document.id, offset: 10 },
+      context as never
+    );
+
+    expect(middle.offset).toEqual(10);
+    expect(middle.markdown).toEqual(first.markdown.slice(10));
   });
 });
 

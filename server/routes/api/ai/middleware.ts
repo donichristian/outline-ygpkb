@@ -156,6 +156,11 @@ export function createPersistenceMiddleware({
   releaseInFlightLock,
 }: PersistenceMiddlewareProps): ChatMiddleware {
   let content = "";
+  // Token counts ride the terminal `RUN_FINISHED` chunk as a provider-shaped
+  // value (`usage[]` per the AG-UI spec, or a TanStack object), so it is kept
+  // opaque here and only logged. Shape is provider-defined; nothing branches on
+  // it.
+  let tokenUsage: unknown;
 
   /**
    * Persists the accumulated assistant text, then frees the lock. The release
@@ -175,6 +180,19 @@ export function createPersistenceMiddleware({
       ctx,
       requestId,
     });
+
+    // Deliberate: cost is observable but not enforced. Nothing caps spend yet,
+    // so the numbers are logged for an operator to read rather than stored.
+    if (tokenUsage) {
+      Logger.info("http", "AI chat token usage", {
+        requestId,
+        sessionId,
+        runId,
+        status,
+        usage: tokenUsage,
+      });
+    }
+
     await releaseInFlightLock();
   };
 
@@ -183,6 +201,10 @@ export function createPersistenceMiddleware({
     onChunk(_hookCtx, chunk) {
       if (chunk.type === "TEXT_MESSAGE_CONTENT") {
         content += chunk.delta;
+      }
+
+      if (chunk.type === "RUN_FINISHED") {
+        tokenUsage = chunk.usage;
       }
     },
     async onFinish(_hookCtx, info) {
