@@ -49,13 +49,20 @@ function streamingResponse(chunks: string[]): Response {
 }
 
 /**
- * A raw agent turn: the model immediately calls the search tool.
+ * A raw agent turn: the model immediately calls the supplied tool.
  *
+ * @param name the tool to call.
+ * @param args the tool arguments.
  * @returns the SSE frames for the tool-call turn.
  */
-function toolCallFrames(): string[] {
+function toolCallFrames(
+  name = "search_workspace",
+  args: Record<string, unknown> = { query: "payments deployment runbook" }
+): string[] {
+  const argsJson = JSON.stringify(args).replace(/"/g, '\\"');
+
   return [
-    'data: {"id":"cmpl-1","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search_workspace","arguments":"{\\"query\\":\\"payments deployment runbook\\"}"}}]}}]}\n\n',
+    `data: {"id":"cmpl-1","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"${name}","arguments":"${argsJson}"}}]}}]}\n\n`,
     'data: {"id":"cmpl-1","object":"chat.completion.chunk","created":0,"model":"test-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
   ];
 }
@@ -77,10 +84,11 @@ function answerFrames(): string[] {
  * route sent to the provider, so a test can assert on what actually crossed
  * the stub boundary.
  *
+ * @param frames the SSE frames for the tool-call turn.
  * @returns the recorded request bodies, in call order.
  */
-function stubProviderTwoTurns() {
-  const toolFrames = toolCallFrames();
+function stubProviderTwoTurns(frames = toolCallFrames()) {
+  const toolFrames = frames;
   const answer = answerFrames();
   const requestBodies: string[] = [];
 
@@ -144,6 +152,45 @@ function parseFrames(text: string) {
     );
 }
 
+interface FetchDocumentInput {
+  documentId?: string;
+  section?: string;
+  offset?: number;
+  limit?: number;
+}
+
+interface FetchDocumentOutput {
+  documentId: string;
+  title: string;
+  url: string;
+  markdown: string;
+  characters: number;
+  truncated: boolean;
+}
+
+type ServerTools = Awaited<ReturnType<typeof loadServerTools>>;
+
+/**
+ * Narrows the allowlist to the `fetch_document` member for direct execution.
+ *
+ * @param tools the loaded server allowlist.
+ * @returns the tool, typed for its input and output.
+ */
+function getFetchDocumentTool(tools: ServerTools) {
+  const tool = tools.find((candidate) => candidate.name === "fetch_document");
+
+  if (!tool) {
+    throw new Error("fetch_document is not registered");
+  }
+
+  return tool as unknown as {
+    execute: (
+      input: FetchDocumentInput,
+      context: never
+    ) => Promise<FetchDocumentOutput>;
+  };
+}
+
 const originalBaseUrl = env.AI_CHAT_BASE_URL;
 const originalModel = env.AI_CHAT_MODEL;
 
@@ -163,8 +210,8 @@ describe("loadServerTools", () => {
     const names = tools.map((tool) => tool.name);
     expect(names).toEqual([
       "search_workspace",
+      "fetch_document",
       "recommend_documents",
-      "read_document",
     ]);
     for (const tool of tools) {
       expect(typeof tool.description).toEqual("string");
@@ -172,44 +219,159 @@ describe("loadServerTools", () => {
       expect(typeof tool.execute).toEqual("function");
     }
   });
+});
 
-  it("scrolls a document read so long documents can be summarized in slices", async () => {
+describe("fetch_document tool", () => {
+  it("returns the real body and canonical link for a document uuid", async () => {
+    const user = await buildUser();
+    const document = await buildDocument({
+      teamId: user.teamId,
+      userId: user.id,
+      title: "Payments runbook",
+      text: "The deployment runbook covers the payments service",
+    });
+    const fetchDocument = getFetchDocumentTool(await loadServerTools());
+
+    const result = await fetchDocument.execute({ documentId: document.id }, {
+      context: { user },
+    } as never);
+
+    expect(result).toEqual({
+      documentId: document.id,
+      title: "Payments runbook",
+      url: document.url,
+      markdown: expect.stringContaining(
+        "The deployment runbook covers the payments service"
+      ),
+      characters: result.markdown.length,
+      truncated: false,
+    });
+  });
+
+  it("accepts a url slug and resolves the same document", async () => {
     const user = await buildUser();
     const document = await seedReadableDocument(user);
-    const tools = await loadServerTools();
+    const fetchDocument = getFetchDocumentTool(await loadServerTools());
+    const context = { context: { user } } as never;
 
-    // The allowlist is a union of tool shapes, so the test narrows the member
-    // it wants to drive rather than widening every tool's execute signature.
-    const readDocument = tools.find((tool) => tool.name === "read_document") as
-      | undefined as
-      | {
-          execute: (
-            input: { documentId: string; offset?: number },
-            ctx: never
-          ) => Promise<{ markdown: string; offset: number; truncated: boolean }>;
-        }
-      | undefined;
-
-    if (!readDocument) {
-      throw new Error("read_document is not registered");
-    }
-
-    const context = { context: { user } };
-    const first = await readDocument.execute(
-      { documentId: document.id, offset: 0 },
-      context as never
+    const byId = await fetchDocument.execute(
+      { documentId: document.id },
+      context
+    );
+    const bySlug = await fetchDocument.execute(
+      { documentId: document.url.split("/").pop() },
+      context
     );
 
-    expect(first.markdown.length).toBeGreaterThan(0);
-    expect(first.offset).toEqual(0);
+    expect(bySlug.documentId).toEqual(byId.documentId);
+    expect(bySlug.url).toEqual(byId.url);
+    expect(bySlug.markdown).toEqual(byId.markdown);
+  });
 
-    const middle = await readDocument.execute(
-      { documentId: document.id, offset: 10 },
-      context as never
+  it("returns only the requested heading section, case-insensitively", async () => {
+    const user = await buildUser();
+    const document = await buildDocument({
+      teamId: user.teamId,
+      userId: user.id,
+      text: "# Deployment\nRun the deployment steps\n\n# Rollback\nRun the rollback steps",
+    });
+    const fetchDocument = getFetchDocumentTool(await loadServerTools());
+
+    const result = await fetchDocument.execute(
+      { documentId: document.id, section: "ROLLBACK" },
+      { context: { user } } as never
     );
 
-    expect(middle.offset).toEqual(10);
-    expect(middle.markdown).toEqual(first.markdown.slice(10));
+    expect(result.markdown).toContain("Run the rollback steps");
+    expect(result.markdown).not.toContain("Run the deployment steps");
+    expect(result.truncated).toBe(false);
+  });
+
+  it("authorizes before returning any body text", async () => {
+    const owner = await buildUser();
+    const intruder = await buildUser();
+    const document = await buildDocument({
+      teamId: owner.teamId,
+      userId: owner.id,
+      text: "CONFIDENTIAL BODY TEXT THAT MUST NOT LEAK",
+    });
+    const fetchDocument = getFetchDocumentTool(await loadServerTools());
+
+    await expect(
+      fetchDocument.execute({ documentId: document.id }, {
+        context: { user: intruder },
+      } as never)
+    ).rejects.toThrow("Authorization error");
+  });
+
+  it("refuses an archived document instead of returning its body", async () => {
+    const user = await buildUser();
+    const document = await buildDocument({
+      teamId: user.teamId,
+      userId: user.id,
+      archivedAt: new Date(),
+      text: "ARCHIVED BODY TEXT",
+    });
+    const fetchDocument = getFetchDocumentTool(await loadServerTools());
+
+    await expect(
+      fetchDocument.execute({ documentId: document.id }, {
+        context: { user },
+      } as never)
+    ).rejects.toThrow(/archived and cannot be read/i);
+  });
+
+  it("refuses a soft-deleted document instead of returning its body", async () => {
+    const user = await buildUser();
+    const document = await buildDocument({
+      teamId: user.teamId,
+      userId: user.id,
+      text: "DELETED BODY TEXT",
+    });
+    await document.destroy();
+    const fetchDocument = getFetchDocumentTool(await loadServerTools());
+
+    await expect(
+      fetchDocument.execute({ documentId: document.id }, {
+        context: { user },
+      } as never)
+    ).rejects.toThrow(/deleted and cannot be read/i);
+  });
+
+  it("truncates a long body and never exceeds the chunk ceiling", async () => {
+    const user = await buildUser();
+    const document = await buildDocument({
+      teamId: user.teamId,
+      userId: user.id,
+      text: "a".repeat(70000),
+    });
+    const fetchDocument = getFetchDocumentTool(await loadServerTools());
+    const context = { context: { user } } as never;
+
+    const defaultSlice = await fetchDocument.execute(
+      { documentId: document.id },
+      context
+    );
+    expect(defaultSlice.characters).toEqual(20000);
+    expect(defaultSlice.markdown).toHaveLength(20000);
+    expect(defaultSlice.truncated).toBe(true);
+
+    const cappedSlice = await fetchDocument.execute(
+      { documentId: document.id, limit: 90000 },
+      context
+    );
+    expect(cappedSlice.characters).toEqual(60000);
+    expect(cappedSlice.markdown.length).toBeLessThanOrEqual(60000);
+    expect(cappedSlice.truncated).toBe(true);
+  });
+
+  it("errors without an identifier instead of reading anything", async () => {
+    const user = await buildUser();
+    const fetchDocument = getFetchDocumentTool(await loadServerTools());
+
+    await expect(
+      fetchDocument.execute({}, { context: { user } } as never)
+    ).rejects.toThrow(/No document identifier was supplied/i);
   });
 });
 
@@ -248,7 +410,7 @@ describe("POST /api/ai.chat server tools", () => {
       firstSent.tools.map(
         (t: { function: { name: string } }) => t.function.name
       )
-    ).toEqual(["search_workspace", "recommend_documents", "read_document"]);
+    ).toEqual(["search_workspace", "fetch_document", "recommend_documents"]);
     expect(JSON.stringify(secondSent.messages)).toContain("Reference notes");
 
     // The stream carries the tool-call lifecycle and a final answer.
@@ -343,12 +505,63 @@ describe("POST /api/ai.chat server tools", () => {
       firstSent.tools.map(
         (t: { function: { name: string } }) => t.function.name
       )
-    ).toEqual(["search_workspace", "recommend_documents", "read_document"]);
+    ).toEqual(["search_workspace", "fetch_document", "recommend_documents"]);
 
     // The injected tool was not merged in one of them later either: the run is
     // the same two-turn loop as the clean path, ending in a real answer.
     const types = parseFrames(text).map((frame) => frame.type);
     expect(types).toContain("TOOL_CALL_RESULT");
     expect(types).toContain("RUN_FINISHED");
+  });
+
+  it("turns another team's document into a tool error without streaming its body", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user);
+
+    const owner = await buildUser();
+    const secret = await buildDocument({
+      teamId: owner.teamId,
+      userId: owner.id,
+      title: "Secret notes",
+      text: "CONFIDENTIAL BODY TEXT THAT MUST NOT LEAK",
+    });
+    const requestBodies = stubProviderTwoTurns(
+      toolCallFrames("fetch_document", { documentId: secret.id })
+    );
+
+    const res = await server.post("/api/ai.chat", user, {
+      body: {
+        messages: [
+          {
+            role: "user",
+            content: "What does the payments deployment runbook cover?",
+          },
+        ],
+      },
+    });
+    const text = await res.text();
+
+    // A tool error is a tool result, never an HTTP failure: the run continues.
+    expect(res.status).toEqual(200);
+    expect(requestBodies.length).toEqual(2);
+
+    const secondSent = JSON.stringify(JSON.parse(requestBodies[1]).messages);
+    const toolMessage = (
+      JSON.parse(requestBodies[1]).messages as Array<{
+        role: string;
+        content: string;
+      }>
+    ).find((message) => message.role === "tool");
+
+    if (!toolMessage) {
+      throw new Error("the tool error was not fed back to the model");
+    }
+
+    // A tool error is fed back as an error result, so the run continues.
+    const toolResult: unknown = JSON.parse(toolMessage.content);
+    expect(toolResult).toEqual({ error: "Authorization error" });
+    expect(secondSent).not.toContain("CONFIDENTIAL BODY TEXT");
+    expect(text).not.toContain("CONFIDENTIAL BODY TEXT");
   });
 });

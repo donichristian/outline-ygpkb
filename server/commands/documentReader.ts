@@ -205,8 +205,7 @@ export async function readDocumentBody(
 /**
  * Reads the body of a document identified by id, authorizing the read through
  * the shared document loader path. This is the entry point for consumers
- * that start from an id rather than an already-loaded document — the new
- * AI `fetch_document` tool (todo 5) will use it.
+ * that start from an id rather than an already-loaded document.
  *
  * A missing row is reported as `NotFoundError` and a trashed row is
  * authorized through the `restore` ability, mirroring `documentLoader.ts`.
@@ -222,7 +221,7 @@ export async function readDocumentBodyById(
   user: User,
   options: ReadDocumentBodyOptions = {}
 ): Promise<ReadDocumentBodyResult> {
-  const document = await loadDocument(id, user);
+  const document = await loadDocumentForRead(id, user);
   return readDocumentBody(document, options);
 }
 
@@ -263,11 +262,19 @@ export function readDocumentSectionByAnchor(
  * a trashed row is authorized through the `restore` ability, and a readable
  * row is authorized through the `read` ability.
  *
- * @param id - the document identifier.
+ * Exported so callers that need the document itself (the AI `fetch_document`
+ * tool needs the title and link) reuse the same authorized load instead of
+ * repeating the lookup and policy check.
+ *
+ * @param id - the document identifier, either a uuid or a url slug.
  * @param user - the user authorizing the load.
  * @returns the loaded, authorized document.
+ * @throws when the document is missing or the user may not read it.
  */
-async function loadDocument(id: string, user: User): Promise<Document> {
+export async function loadDocumentForRead(
+  id: string,
+  user: User
+): Promise<Document> {
   const document = await Document.findByPk(id, {
     userId: user.id,
     paranoid: false,
