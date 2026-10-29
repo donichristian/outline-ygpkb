@@ -1,0 +1,13 @@
+﻿COMMAND: yarn test app/components/AIChat/AIChatHistory.test.tsx --project app -t "keeps a draft typed during a stopped turn"
+[33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 12 skipped (13)
+   Start at  05:39:14
+   Duration  5.54s (transform 1.54s, setup 1.72s, import 2.36s, tests 387ms, environment 840ms)
+

@@ -36,14 +36,14 @@ describe("draft helpers", () => {
     vi.mocked(client.post).mockReset();
   });
 
-  test("should round-trip a draft through storage", () => {
+  it("should round-trip a draft through storage", () => {
     writeDraft("half a question", sessionA);
     flushDrafts();
 
     expect(readDraft(sessionA)).toBe("half a question");
   });
 
-  test("should keep the pre-create draft under its own key", () => {
+  it("should keep the pre-create draft under its own key", () => {
     writeDraft("typed before the session existed", sessionA);
     flushDrafts();
     writeDraft("typed after a reload, no session yet");
@@ -59,7 +59,7 @@ describe("draft helpers", () => {
     expect(readDraft(sessionA)).toBe("typed before the session existed");
   });
 
-  test("should clear the draft on send", () => {
+  it("should clear the draft on send", () => {
     writeDraft("about to be sent", sessionA);
     flushDrafts();
 
@@ -68,7 +68,7 @@ describe("draft helpers", () => {
     expect(readDraft(sessionA)).toBe("");
   });
 
-  test("should clear an emptied composer rather than store an empty draft", () => {
+  it("should clear an emptied composer rather than store an empty draft", () => {
     writeDraft("something", sessionA);
     flushDrafts();
 
@@ -77,7 +77,7 @@ describe("draft helpers", () => {
     expect(readDraft(sessionA)).toBe("");
   });
 
-  test("should not leak one session's draft into another's key", () => {
+  it("should not leak one session's draft into another's key", () => {
     writeDraft("a", sessionA);
     writeDraft("b", sessionB);
     flushDrafts();
@@ -91,7 +91,7 @@ describe("draft helpers", () => {
     expect(readDraft(sessionB)).toBe("b");
   });
 
-  test("should degrade to no draft when storage throws on access", () => {
+  it("should degrade to no draft when storage throws on access", () => {
     const original = Object.getOwnPropertyDescriptor(window, "localStorage");
     Object.defineProperty(window, "localStorage", {
       configurable: true,
@@ -115,7 +115,7 @@ describe("draft helpers", () => {
     }
   });
 
-  test("should degrade to no draft when a storage write throws", () => {
+  it("should degrade to no draft when a storage write throws", () => {
     const original = Object.getOwnPropertyDescriptor(window, "localStorage");
     Object.defineProperty(window, "localStorage", {
       configurable: true,
@@ -149,14 +149,14 @@ describe("draft helpers", () => {
 });
 
 describe("#toAiChatError", () => {
-  test("keeps a rejected response as http with its status", () => {
+  it("keeps a rejected response as http with its status", () => {
     const rejected = new AiChatError("CSRF token invalid", "http", 403);
 
     expect(toAiChatError(rejected)).toBe(rejected);
     expect(toAiChatError(rejected).status).toBe(403);
   });
 
-  test("derives refusal only from the response header", () => {
+  it("derives refusal only from the response header", () => {
     const refusalText = new Error(
       "This assistant only answers from this workspace's knowledge base"
     );
@@ -166,7 +166,7 @@ describe("#toAiChatError", () => {
     expect(toAiChatError(undefined, { kind: "refusal" }).kind).toBe("refusal");
   });
 
-  test("derives busy only from the response header", () => {
+  it("derives busy only from the response header", () => {
     expect(toAiChatError(undefined, { kind: "busy" }).kind).toBe("busy");
     expect(
       toAiChatError(
@@ -175,7 +175,7 @@ describe("#toAiChatError", () => {
     ).toBe("stream");
   });
 
-  test("maps an incomplete terminal RUN_ERROR to truncated", () => {
+  it("maps an incomplete terminal RUN_ERROR to truncated", () => {
     const incomplete = Object.assign(new Error("The run did not finish"), {
       code: "incomplete-stream",
     });
@@ -184,14 +184,14 @@ describe("#toAiChatError", () => {
     expect(toAiChatError(new Error("Stream ended early")).kind).toBe("stream");
   });
 
-  test("maps a user stop to aborted", () => {
+  it("maps a user stop to aborted", () => {
     expect(
       toAiChatError(new DOMException("The operation was aborted", "AbortError"))
         .kind
     ).toBe("aborted");
   });
 
-  test("maps a rejected fetch to network, even when the library wrapped it", () => {
+  it("maps a rejected fetch to network, even when the library wrapped it", () => {
     expect(toAiChatError(new TypeError("fetch failed")).kind).toBe("network");
 
     const wrapped = new Error("Stream response body read failed");
@@ -199,7 +199,7 @@ describe("#toAiChatError", () => {
     expect(toAiChatError(wrapped).kind).toBe("network");
   });
 
-  test("maps any other mid-stream failure to stream", () => {
+  it("maps any other mid-stream failure to stream", () => {
     expect(toAiChatError(new Error("provider exploded")).kind).toBe("stream");
 
     const rejectedUpstream = Object.assign(new Error("rate limited"), {
@@ -208,7 +208,7 @@ describe("#toAiChatError", () => {
     expect(toAiChatError(rejectedUpstream).kind).toBe("stream");
   });
 
-  test("maps an unparseable frame to malformed without throwing", async () => {
+  it("maps an unparseable frame to malformed without throwing", async () => {
     let parseFailure: unknown;
     try {
       parseFailure = JSON.parse("{not json");
@@ -256,7 +256,7 @@ describe("#createAiChatConnection", () => {
     clearCsrfCookie();
   });
 
-  test("should read the CSRF token at send time, not module load", async () => {
+  it("should read the CSRF token at send time, not module load", async () => {
     clearCsrfCookie();
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(sseResponse());
     const connection = createAiChatConnection({ fetchClient: fetchMock });
@@ -278,7 +278,7 @@ describe("#createAiChatConnection", () => {
     expect(headers.get("Content-Type")).toBe("application/json");
   });
 
-  test("should send no client-supplied tools or forwardedProps", async () => {
+  it("should send no client-supplied tools or forwardedProps", async () => {
     document.cookie = "csrfToken=t; path=/";
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(sseResponse());
     const connection = createAiChatConnection({ fetchClient: fetchMock });
@@ -294,7 +294,7 @@ describe("#createAiChatConnection", () => {
     expect(body.threadId).toBe(threadId);
   });
 
-  test("should observe X-AI-Chat-Kind: refusal", async () => {
+  it("should observe X-AI-Chat-Kind: refusal", async () => {
     document.cookie = "csrfToken=t; path=/";
     const kinds: AiChatKind[] = [];
     const connection = createAiChatConnection({
@@ -311,7 +311,7 @@ describe("#createAiChatConnection", () => {
     expect(kinds).toEqual(["refusal"]);
   });
 
-  test("should observe null when the response carries no kind header", async () => {
+  it("should observe null when the response carries no kind header", async () => {
     document.cookie = "csrfToken=t; path=/";
     const kinds: AiChatKind[] = [];
     const connection = createAiChatConnection({
@@ -326,7 +326,7 @@ describe("#createAiChatConnection", () => {
     expect(kinds).toEqual([null]);
   });
 
-  test("should send the AG-UI wire body and never the legacy session body", async () => {
+  it("should send the AG-UI wire body and never the legacy session body", async () => {
     document.cookie = "csrfToken=t; path=/";
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(sseResponse());
     const connection = createAiChatConnection({ fetchClient: fetchMock });
@@ -355,7 +355,7 @@ describe("#createAiChatConnection", () => {
     expect(body.forwardedProps).toEqual({});
   });
 
-  test("should omit the CSRF header and surface a 403 as an http error", async () => {
+  it("should omit the CSRF header and surface a 403 as an http error", async () => {
     clearCsrfCookie();
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(JSON.stringify({ message: "CSRF token invalid" }), {

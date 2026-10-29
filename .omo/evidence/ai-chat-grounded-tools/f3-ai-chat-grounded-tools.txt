@@ -1,0 +1,10 @@
+VERDICT: APPROVE
+
+F3. Agent-executed end-to-end wiring check
+- Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\ai-chat-grounded-tools-w1
+- Plan: .omo/plans/ai-chat-grounded-tools.md
+
+Notes (explicit):
+- Upstream call was mocked, no browser driven.
+
+Wired: ai.ts route (ownership/lock/gate/tools/context/middleware), middleware.ts (tool digest + citationMiss), tools.ts (frozen allowlist with search_workspace,recommend_documents, boundDocumentId), presenter exposes toolCallDigest, app model/types present. Mocked E2E path verified via tests.

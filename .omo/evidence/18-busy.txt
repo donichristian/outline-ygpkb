@@ -1,0 +1,93 @@
+﻿TODO 18 - BUSY REFUSAL NON-DESTRUCTIVE + LOCK RELEASED ON EVERY EXIT
+
+The four terminal exits asserted by server/routes/api/ai/aiInFlightCap.test.ts:
+  finish   -> "acquires and releases the lock across one turn, then allows a sequential turn"
+  ERROR    -> "releases the lock after an upstream stream error"
+  ABORT    -> "releases the lock after a client abort mid-stream"
+  REFUSAL  -> "releases the lock when the grounding gate refuses the turn"
+Each exit now ends with expectNoInFlightLock(), a KEYS scan of
+aiChat:inflight:<userId>:* asserting the user's whole lock space is empty,
+not merely that the one key the turn took was deleted.
+
+TTL: 15 * Minute.seconds (900s). Tool-loop arithmetic recorded in ai.ts:
+  5 rounds x (120s model + 5s tool) = 625s worst case, + one spare round
+  and the terminal flush = 900s.
+
+CLIENT: a busy refusal restores the typed text into the composer AND its
+draft, never enqueues, and keeps the retry-later notice. The guard test
+proves a queued item is not restored alongside the submitted turn.
+
+--- POST-FIX SERVER LOCK TEST (9 passed) ---node.exe : (!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ((!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  9 passed (9)
+   Start at  01:42:10
+   Duration  23.27s (transform 11.46s, setup 17.60s, import 2.93s, tests 2.30s, environment 0ms)
+
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/index.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/plugin.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/utils.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/inputRules.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/actions.js" points to missing source files
+
+--- POST-FIX CLIENT BUSY-RESTORE TEST (1 passed) ---
+node.exe : (!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ((!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 34 skipped (35)
+   Start at  01:51:06
+   Duration  5.42s (transform 1.63s, setup 1.71s, import 2.46s, tests 148ms, environment 855ms)
+
+
+--- POST-FIX CLIENT QUEUED-NO-DOUBLE-RESTORE GUARD (1 passed) ---
+node.exe : (!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ((!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 34 skipped (35)
+   Start at  01:51:51
+   Duration  5.37s (transform 1.66s, setup 1.70s, import 2.46s, tests 165ms, environment 815ms)
+

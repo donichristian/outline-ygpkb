@@ -1,0 +1,59 @@
+# Todo 4 — server transport: RED / refusal / busy evidence
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Date: 2026-10-20
+Gateway: `AI_CHAT_BASE_URL=http://127.0.0.1:8642/p/matius/v1` is DOWN
+(`ECONNREFUSED`). Everything below is produced through the real Koa route with
+a stubbed `fetch`, never a fabricated curl transcript.
+
+Exact command for sections 1–3:
+
+    yarn test server/routes/api/ai/probe04.evidence.test.ts --reporter=verbose
+
+(`probe04.evidence.test.ts` was a temporary capture harness, deleted after this
+run; the production suite is unchanged.)
+
+## 1. Provider-down path — observed status and body
+
+Stub: `fetch` rejects with `TypeError: fetch failed`.
+
+    {"EVIDENCE":"provider-down","status":200,"contentType":"text/event-stream","types":["RUN_STARTED","RUN_ERROR"],"body":"data: {\"type\":\"RUN_STARTED\",\"metadata\":{\"tanstack\":{\"source\":{\"provider\":\"openai-compatible\",\"api\":\"openai-completions\",\"model\":\"test-model\"},\"model\":\"test-model\"}},\"runId\":\"openai-compatible-1792460572646-be86zlq42mi\",\"threadId\":\"thread-1792460572645-n7rg9pr\",\"timestamp\":1792460574079}\n\ndata: {\"type\":\"RUN_ERROR\",\"metadata\":{\"tanstack\":{\"source\":{\"provider\":\"openai-compatible\",\"api\":\"openai-completions\",\"model\":\"test-model\"},\"stopReason\":\"error\",\"model\":\"test-model\",\"threadId\":\"thread-1792460572645-n7rg9pr\",\"runId\":\"openai-compatible-1792460572646-be86zlq42mi\"}},\"timestamp\":1792460574080,\"message\":\"The AI chat stream failed\"}\n\n"}
+
+Observed: HTTP 200, `text/event-stream`, terminal `RUN_ERROR` with the generic
+message. The upstream detail (`fetch failed`) never reaches the wire.
+
+Note on the expected shape: this transport does NOT turn a rejected `fetch` into
+a JSON error. `chat()` returns the stream first; an upstream rejection is an
+in-band AG-UI `RUN_ERROR` on a well-formed 200 stream, which is what the client
+consumes. A JSON error response exists only for failures before a stream exists
+(`ProviderUnavailableError` from adapter construction); with the provider env
+unset the workspace gate returns 404 before reaching it.
+
+## 2. Refusal path
+
+Stub: `fetch` is a bare spy (must not be called). Session-owned prompt with no
+matching document.
+
+    {"EVIDENCE":"refusal","status":200,"kindHeader":"refusal","types":["RUN_STARTED","TEXT_MESSAGE_START","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_END","RUN_FINISHED"],"rows":[{"seq":1,"role":"user","status":"completed","runId":"ec7271b7-dab7-4960-93ba-331aafbf4f5b"},{"seq":2,"role":"assistant","status":"completed","runId":"ec7271b7-dab7-4960-93ba-331aafbf4f5b"}]}
+
+Observed: `X-AI-Chat-Kind: refusal`; exactly the five hand-authored AG-UI
+frames in order; the assistant row persisted with `status = completed` and the
+same `runId` as the user turn; the provider was never called.
+
+## 3. Busy path
+
+Two simultaneous turns on the same session; the first gets a complete grounded
+answer, the second must be refused without touching the first run's row.
+
+    {"EVIDENCE":"busy","secondStatus":200,"secondKindHeader":"busy","streamingKindHeader":null,"secondTypes":["RUN_STARTED","TEXT_MESSAGE_START","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_END","RUN_FINISHED"],"firstTypes":["RUN_STARTED","TEXT_MESSAGE_START","TEXT_MESSAGE_CONTENT","TEXT_MESSAGE_END","RUN_FINISHED"],"rowsAfter":[{"seq":1,"role":"user","status":"completed","runId":"2024d7e4-1d7e-441b-8d5a-701cb8391a55"},{"seq":2,"role":"assistant","status":"completed","runId":"2024d7e4-1d7e-441b-8d5a-701cb8391a55"}],"providerCalls":1}
+
+Observed: `X-AI-Chat-Kind: busy` on the refused turn; the winner streams the
+full sequence with no kind header; the session holds exactly the winner's two
+rows (one run id, one assistant row); exactly one provider call.
+
+## 4. Suite
+
+    > yarn test server/routes/api/ai/
+    TEST_EXIT=0
+     Test Files  7 passed (7)
+          Tests  125 passed (125)

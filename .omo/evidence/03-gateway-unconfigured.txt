@@ -1,0 +1,114 @@
+# Todo 3 — unconfigured-model behaviour
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Date: 2026-10-19
+
+Command (probe test deleted after capture; it is not part of the commit):
+
+    yarn test server/routes/api/ai/__probe_adapter.test.ts
+
+Runtime output:
+
+    NEGATIVE_PROBE: rejected=true message="AI chat provider is not configured" fetchCalls=0 loaderCalls=0
+    POSITIVE_PROBE: model=matius kind=text name=openai-compatible api=chat-completions baseURL=http://127.0.0.1:8642/p/matius/v1 apiKeyMatchesEnv=true
+
+    Test Files  1 passed (1)
+         Tests  2 passed (2)
+
+## Negative result
+
+With `AI_CHAT_MODEL` unset and `AI_CHAT_BASE_URL` set, `createAiChatAdapter()`
+rejects with `Error("AI chat provider is not configured")` before any network
+call (`fetchCalls=0`) and before the ESM loader is invoked (`loaderCalls=0`).
+Nothing is sent to the provider; this is a configuration guard, not an HTTP
+404.
+
+## Positive result
+
+With the model set, the factory awaits `loadOpenaiCompatible()` and invokes
+`openaiCompatibleText("matius", { api: "chat-completions",
+baseURL: "http://127.0.0.1:8642/p/matius/v1", apiKey: <env key> })`. The probe
+asserted the exact config object; `apiKeyMatchesEnv=true` and the key is not
+printed.
+
+## Probe source (for audit)
+
+```ts
+// @vitest-isolate true
+import { vi, describe, it, expect, afterEach } from "vitest";
+
+const mockEnv = vi.hoisted(() => ({
+  AI_CHAT_BASE_URL: "http://127.0.0.1:8642/p/matius/v1",
+  AI_CHAT_API_KEY: "secret-present",
+  AI_CHAT_MODEL: undefined as string | undefined,
+}));
+
+const mockLoad = vi.hoisted(() =>
+  vi.fn(async () => ({
+    openaiCompatibleText: (
+      model: string,
+      config: Record<string, unknown>
+    ) => ({ model, kind: "text", name: "openai-compatible", config }),
+  }))
+);
+
+vi.mock("@server/env", () => ({ default: mockEnv }));
+vi.mock("./tanstack", () => ({ loadOpenaiCompatible: mockLoad }));
+
+import { createAiChatAdapter } from "./adapter";
+
+describe("createAiChatAdapter configuration guard", () => {
+  afterEach(() => {
+    mockEnv.AI_CHAT_MODEL = undefined;
+    mockLoad.mockClear();
+  });
+
+  it("rejects before any network call when AI_CHAT_MODEL is unset", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    let thrown: unknown;
+    try {
+      await createAiChatAdapter();
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as Error).message).toBe("AI chat provider is not configured");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(mockLoad).not.toHaveBeenCalled();
+    process.stdout.write(
+      `NEGATIVE_PROBE: rejected=${thrown instanceof Error} message=${JSON.stringify((thrown as Error).message)} fetchCalls=${fetchSpy.mock.calls.length} loaderCalls=${mockLoad.mock.calls.length}\n`
+    );
+    fetchSpy.mockRestore();
+  });
+
+  it("invokes the Chat Completions adapter with the configured env", async () => {
+    mockEnv.AI_CHAT_MODEL = "matius";
+    const adapter = (await createAiChatAdapter()) as unknown as {
+      model: string;
+      kind: string;
+      name: string;
+      config: Record<string, unknown>;
+    };
+    process.stdout.write(
+      `POSITIVE_PROBE: model=${adapter.model} kind=${adapter.kind} name=${adapter.name} api=${String(adapter.config.api)} baseURL=${String(adapter.config.baseURL)} apiKeyMatchesEnv=${adapter.config.apiKey === mockEnv.AI_CHAT_API_KEY}\n`
+    );
+    expect(adapter.model).toBe("matius");
+    expect(adapter.kind).toBe("text");
+    expect(adapter.config).toEqual({
+      api: "chat-completions",
+      baseURL: mockEnv.AI_CHAT_BASE_URL,
+      apiKey: mockEnv.AI_CHAT_API_KEY,
+    });
+  });
+});
+```
+
+The probe mocks `./tanstack` because the dynamic-import seam's
+`new Function("return import(...)")` throws
+`TypeError: A dynamic import callback was not specified` inside Vitest's VM
+context. The seam itself is proven from a real CommonJS process in
+`03-gateway-finish-reason.txt` section 7. W1 unit tests that call the factory
+must mock `./tanstack` (or the packages) for the same reason.
+
+No secret value is present in this file; `secret-present` is a literal
+placeholder used by the mock.

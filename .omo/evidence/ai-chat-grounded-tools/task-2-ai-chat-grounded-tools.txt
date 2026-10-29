@@ -1,0 +1,81 @@
+Task 2 evidence: record AI retrievals in the search audit table under a new source value
+Branch: feat/ai-chat-grounded-tools (worktree D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\ai-chat-grounded-tools-w1)
+Commit: d4bb8ba9c7 feat(ai-chat): record AI retrievals in the search audit table
+Date: 2026-10-23
+
+Changed files:
+- server/models/SearchQuery.ts (enum: added Ai = "ai")
+- server/migrations/20261023000000-add-ai-to-search-queries-source.js (new)
+- server/routes/api/ai/tools.ts (record call site)
+- server/routes/api/ai/tools.test.ts (new test: audit row with source = "ai")
+- app/models/SearchQuery.ts (client union widened: + "mcp" + "ai")
+
+============================================================
+1. NEW TEST PASSING (server/routes/api/ai/tools.test.ts)
+============================================================
+Command: yarn test server/routes/api/ai/tools.test.ts
+Result:
+  Test Files  1 passed (1)
+       Tests  4 passed (4)
+  (4 tests = 2 pre-existing + 1 pre-existing "ignores tools injected" + new "records the search
+   tool's query in the search audit table under the ai source")
+
+New test asserts: after POST /api/ai.chat whose model calls the search_workspace tool,
+SearchQuery.findAll({ where: { teamId, userId, query: "payments deployment runbook" } })
+returns exactly 1 row with row.source === "ai" and row.query === "payments deployment runbook".
+Test passed.
+
+NOTE: The first run of this test (before applying the migration to the test DB) failed with
+`invalid input value for enum enum_search_queries_source: "ai"` (Postgres code 22P02) — expected,
+proving the test genuinely exercises the new enum value end-to-end against the real test DB.
+
+============================================================
+2. MIGRATION: FORWARD + IDEMPOTENCY + DOWN-THROW
+============================================================
+Migration: server/migrations/20261023000000-add-ai-to-search-queries-source.js
+up:   ALTER TYPE enum_search_queries_source ADD VALUE IF NOT EXISTS 'ai'
+down: throws "Cannot rollback adding enum value to PostgreSQL"
+No transaction: false (matches repo convention; CLI does not wrap in a transaction).
+IF NOT EXISTS = deliberate improvement over the MCP precedent (20260714000000), per the
+idempotent-migration convention of 20260818120000-add-deletedById-to-documents.js.
+PostgreSQL's rule "a new enum value cannot be used inside the transaction that added it" does
+not apply: this migration only adds the value and never issues a second query.
+
+Test DB reachable: postgres://user:pass@127.0.0.1:5432/outline-test (from .env.test).
+
+2a. Forward run (yarn sequelize db:migrate --env test, NODE_ENV=test):
+== 20261023000000-add-ai-to-search-queries-source: migrating =======
+== 20261023000000-add-ai-to-search-queries-source: migrated (0.022s)
+exit 0.
+
+2b. Second forward run (idempotency):
+No migrations were executed, database schema was already up to date.
+exit 0. (The value is already present; a re-run of up would be a no-op via IF NOT EXISTS,
+and Umzug already records it as applied, so the CLI skips it.)
+
+2c. Down (yarn sequelize db:migrate:undo --env test, NODE_ENV=test):
+== 20261023000000-add-ai-to-search-queries-source: reverting =======
+ERROR: Cannot rollback adding enum value to PostgreSQL
+exit 1 — documented throw confirmed (not silent success).
+
+2d. Post-undo re-migrate to restore test-DB state for the test suite:
+No migrations were executed, database schema was already up to date.
+(The value 'ai' remains physically present in Postgres; only the umzug bookkeeping mattered.
+The forward migration is re-confirmed idempotent.)
+
+============================================================
+3. SearchQuery MODEL TEST
+============================================================
+Command: yarn test server/models/SearchQuery.test.ts
+Result:
+  Test Files  1 passed (1)
+       Tests  6 passed (6)
+
+============================================================
+4. LINT + TYPECHECK
+============================================================
+yarn lint: exit 0; only pre-existing baseline warnings (no new warnings/errors in the 5 changed files).
+yarn tsc --incremental false: clean (0 errors). (Note: the worktree had no node_modules; a
+junction to the main checkout's node_modules was created for tooling — not part of the commit.)
+
+Verification order followed: lint -> tsc -> tests.

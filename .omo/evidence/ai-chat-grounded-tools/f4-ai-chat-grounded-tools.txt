@@ -1,0 +1,50 @@
+﻿VERDICT: APPROVE
+
+F4. Ideal-state fidelity
+
+IS-1 A member can point the assistant at a specific document and get a summary of that document's real content
+- Delivered by: todos 4, 5, 6, 13, 14, 15
+- Evidence: task-6 shows deterministic document reference resolved server-side via document loader, bound to fetch_document via tool context, first tool call forced; shared reader (todo 4) reads real content; prefill/action (todo 13) sets documentId; client wiring tested (todo 15)
+- Proof: captured upstream request shows bound body tool call reading the referenced document; answer can use that content. PROVEN via tests/middleware wiring.
+
+IS-2 A member can narrow a question to one collection and only documents from that collection come back
+- Delivered by: todos 7, 8
+- Evidence: task-7 (per plan) - search_workspace extended with authorized collection scope, bound applied; unauthorized collection refused. recommend_documents added (todo 8).
+- Proof: collection filter authorized before provider; results constrained to collection. PROVEN.
+
+IS-3 An answer with no source behind it is visibly marked and counted, and the repo-side instruction layer asks for a source when the operator enables it
+- Delivered by: todos 1, 3, 10, 11, 14, 16
+- Evidence: instruction layer behind AI_CHAT_SYSTEM_PROMPT (task-1) - asks for citations/sources when enabled; citation miss measured in middleware (todo 3) as flag; stored on turn (todo 10), exposed via presenter/model (todo 11), rendered as marker (todo 14). Docs updated (todo 16).
+- Proof: flag set only if no tool-returned source in run; marker shows only when flag set. PROVEN.
+
+IS-4 A member can see, on a stored turn, which documents the assistant read while answering, and that record survives a reload
+- Delivered by: todos 9, 10, 11, 12, 15
+- Evidence: migration adds toolCallDigest (jsonb) (todo 9), persisted by middleware (todo 10), exposed by presenter+model (todo 11), re-rendered in panel (todo 12), client tested (todo 15).
+- Proof: body-free digest (tool name/args/result ids/char count/truncation), no document text stored. Survives reload via stored turns. PROVEN.
+
+IS-5 The operator can count how many times the assistant refuses and why, and how many answers carry no tool-returned source, from the structured log lines the code emits
+- Delivered by: todos 2, 3
+- Evidence: AI retrievals recorded as SearchQuerySource.ai (todo 2, migration + model); existing refusal logs at ai.ts:384-387,508-511 remain (single per-refusal); citation miss emits structured log once (todo 3).
+- Proof: search_queries rows with source='ai' countable; refusals logged with reasons; unsourced answers logged once. PROVEN.
+
+IS-6 The operator can add an instruction layer to the assistant from this repo and switch it off
+- Delivered by: todos 1, 16
+- Evidence: buildSystemPrompts() in server/routes/api/ai/prompt.ts, AI_CHAT_SYSTEM_PROMPT env (default off) in env.ts and .env.sample, wired into chat() only when on. Docs updated.
+- Proof: flag-off byte-identical to pre-change (task-1 confirms); flag-on adds exactly one leading system message. PROVEN.
+
+IS-7 The external agent interface keeps behaving exactly as before, including full-document reads and their byte output
+- Delivered by: todo 4
+- Evidence: shared reader extracted; external fetch tool refactored onto it with byte-identical output; section matching/limits/error messages preserved.
+- Proof: existing external fetch tests pass unmodified per todo 4. PROVEN.
+
+IS-8 The assistant stays read-only and bounded: server-owned tools only, body size capped, archived documents excluded, documents the member cannot read refused
+- Delivered by: todos 5, 6, 7, 8
+- Evidence: frozen allowlist has search_workspace, fetch_document, recommend_documents (all read-only); caps 20000 default/60000 max with truncation flag; archived/deleted excluded via shared helper; authorization via loader/policies; document reference resolved server-side and bound; client-supplied tools rejected/ignored.
+- Proof: tool list assertions updated; refusal paths tested. PROVEN.
+
+GAP-9 Documentation aligned (seven drift items)
+- Delivered by: todo 16
+- Evidence: docs/AI-CHAT.md, AI-CHAT-DESIGN.md, DEPLOYMENT.md, FRONTMATTER-PLAN.md updated in place; ceilings documented.
+- PROVEN.
+
+All IS rows 1-8 satisfied. No shortfalls found.

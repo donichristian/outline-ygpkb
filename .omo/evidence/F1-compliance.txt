@@ -1,0 +1,340 @@
+# F1 — Plan compliance audit (adversarial)
+
+Plan: tanstack-ai-slice2-adoption
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Base: 9253e4f6d (development)  Tip: HEAD of feat/ai-chat-slice2
+Auditor: read-only verifier lane. No product/test/doc/plan edits were made.
+
+============================================================
+0. BRANCH / DIFF SCOPE
+============================================================
+
+$ git -C <wt> log --oneline 9253e4f6d..HEAD
+96b671930 chore(ai-chat): extract the new user-facing strings
+219736fdf docs(ai-chat): document the TanStack AI transport and slice-2 boundary
+452ef5145 test(ai-chat): assert the new client transport, parts, and queue
+cf165eb54 test(ai-chat): assert the AG-UI frame contract on the server
+6ba0f6678 fix(ai-chat): restore composer text on a busy refusal and release the lock on error
+3a2d17b82 feat(ai-chat): add the whenBusy message queue
+76d356601 feat(ai-chat): render thinking parts as a live-only disclosure
+f2ef4a118 feat(ai-chat): pass reasoning through the adapter
+b82f312de feat(ai-chat): render tool-call parts in the transcript
+dfd6369e3 feat(ai-chat): add the read-only server tool allowlist
+be1ae3ef2 fix(ai-chat): preserve drafts and session history under the new transport
+7935a544e feat(ai-chat): map AG-UI outcomes onto the eight-kind error taxonomy
+a4965f72b feat(ai-chat): stream the panel turn through useChat over the store transcript
+2cbe19360 feat(ai-chat): connect the client through a TanStack transport with CSRF headers
+000342603 fix(ai-chat): accept the AG-UI threadId as the persisted session id
+79f6a06ec feat(ai-chat): flatten UIMessage parts to text at the server call sites
+1da0521be feat(ai-chat): keep stateless requests on the TanStack path
+bf2ec14d7 feat(ai-chat): frame refusal and busy as ordinary AG-UI turns
+dc04e1889 feat(ai-chat): persist turns via chat middleware and release the lock on error
+7ac9df0f9 fix(ai-chat): emit hand-authored AG-UI runs for refusal and busy
+229ae6406 chore(ai-chat): verify @tanstack/ai loads in the CommonJS server build
+48324de9d feat(ai-chat): add the TanStack AI adapter factory and probe the gateway
+fe7f814af feat(ai-chat): pin @tanstack/ai deps and fix tsconfig resolution
+
+$ git -C <wt> diff --name-only 9253e4f6d..HEAD
+app/components/AIChat/AIChatHistory.test.tsx
+app/components/AIChat/AIChatPanel.test.tsx
+app/components/AIChat/AIChatPanel.tsx
+app/utils/aiChat.test.ts
+app/utils/aiChat.ts
+docs/AI-CHAT-DESIGN.md
+docs/AI-CHAT.md
+package.json
+server/env.ts
+server/routes/api/ai/adapter.ts
+server/routes/api/ai/ai.test.ts
+server/routes/api/ai/ai.ts
+server/routes/api/ai/aiInFlightCap.test.ts
+server/routes/api/ai/aiReasoning.test.ts
+server/routes/api/ai/aiSessions.test.ts
+server/routes/api/ai/aiStreaming.test.ts
+server/routes/api/ai/messages.ts
+server/routes/api/ai/middleware.ts
+server/routes/api/ai/schema.test.ts
+server/routes/api/ai/schema.ts
+server/routes/api/ai/scope.ts
+server/routes/api/ai/tanstack.ts
+server/routes/api/ai/tools.test.ts
+server/routes/api/ai/tools.ts
+server/routes/api/ai/upstreamMessages.test.ts
+shared/i18n/locales/en_US/translation.json
+tsconfig.json
+yarn.lock
+
+Scope classification: all 28 paths are the AI chat surface (app/components/AIChat,
+app/utils/aiChat*, server/routes/api/ai/*), plus the config/doc/locale files the
+plan authorises: package.json + yarn.lock + tsconfig.json (todo 1 pins/paths),
+server/env.ts (todo 15 AI_CHAT_REASONING, explicitly referenced), docs/AI-CHAT*,
+shared/i18n locale (todo 22). No grading, editor, plugin, or unrelated subsystem.
+PASS.
+
+============================================================
+1. MUST-HAVE ITEMS
+============================================================
+
+MH1 — TanStack server transport (`chat()` + `toServerSentEventsResponse`) with
+grounding gate, in-flight lock, CSRF, persistence, rate limits intact.
+PASS.
+$ Select-String ai.ts -Pattern 'sseFrame|fetch\(' -> 0 hits
+$ Select-String ai.ts -Pattern 'toServerSentEventsResponse' -> 2 hits
+  (line 558 destructured from loadTanstack(), line 637 response builder)
+ai.ts:308 router.post("ai.chat", auth(...), rateLimiter(TenPerMinute), validate(...))
+ai.ts:315 assertAiChatEnabled(user)
+ai.ts:339-345 AIChatSession.findOwned + 404
+ai.ts:358-421 Redis lock acquire/release (compare-and-delete)
+ai.ts:487-532 grounding refusal persisted then framed
+ai.ts:547-551 abort wired to ctx.res "close"
+ai.ts:587-637 chat(...) + toServerSentEventsResponse(...)
+PASS.
+
+MH2 — Client frame source + store-backed transcript merge.
+PASS. The plan's todo 10 explicitly permits "useChat (or its headless ChatClient)".
+Shipping code uses the headless ChatClient:
+  AIChatPanel.tsx:1  import { ChatClient } from "@tanstack/ai-client";
+  AIChatPanel.tsx:510 const chat = new ChatClient({ ... })
+  AIChatPanel.tsx:385-397 storedTurns from aiChatMessages.data, mergeTurns(storedTurns, pending)
+`useChat` itself is not imported; this is the permitted headless variant, not a
+missing feature. DELETE this as a shortfall candidate after reading todo 10.
+
+MH3 — Read-only server tool allowlist; reasoning passthrough; whenBusy queue.
+PASS.
+tools.ts:88  return Object.freeze([searchWorkspace]);
+tools.ts:43-86 toolDefinition({name:"search_workspace", inputSchema, outputSchema}).server(...)
+ai.ts:595   tools: serverTools   (static; request body never read for tools)
+ai.ts:608-614 modelOptions.reasoning_effort only when env.AI_CHAT_REASONING set
+AIChatPanel.tsx:261 whenBusy = "queue"; :657-661 drop/queue policies; :793-796 live thinking
+Tests: aiReasoning.test.ts, tools.test.ts, panel queue cases.
+
+MH4 — Four RPC endpoints unchanged in shape/behaviour.
+PASS. aiSessions.ts has no source diff; only its test changed by 3 lines.
+aiSessions.ts router.post names:
+  "ai.sessions.create", "ai.sessions.list", "ai.sessions.delete", "ai.messages.list"
+Server suite (below) passes all of them.
+
+MH5 — Verified W0 gate: deps require-able from the CJS build AND a gateway
+`finish_reason` probe.
+PARTIAL: CJS half PASS, gateway half FAIL.
+  CJS (PASS):
+    $ yarn build:server -> BUILD_EXIT=0 ("Done!")
+    $ node -e "require('./build/server/routes/api/ai/tanstack.js')..."
+      -> CJS_OK function function function
+  Gateway probe (FAIL):
+    .omo/evidence/03-gateway-finish-reason.txt:25
+      RESULT: NETWORK_ERROR ECONNREFUSED connect ECONNREFUSED 127.0.0.1:8642
+    :32-43 replaces the live probe with a hand-built stub, then records
+      "VERDICT: finish_reason present" and :45-47 admits the caveat.
+    The live gateway was never probed, so the Must-have "gateway finish_reason
+    probe" is unverified. This is not fabricated (the failure is recorded
+    honestly), but it does not satisfy the Must-have.
+
+MH6 — Rewritten tests for every emitted frame + new tests for tools/reasoning/queue.
+PASS for coverage/execution (but see FAIL-1 for the contract-test fixture).
+  server: Test Files 9 passed (9), Tests 156 passed (156), EXIT=0
+  app:    Test Files 38 passed (38), Tests 356 passed (356), EXIT=0
+  EMITTED FRAME ASSERTIONS present: RUN_STARTED, RUN_ERROR, TEXT_MESSAGE_*,
+  RUN_FINISHED, TOOL_CALL_START/ARGS/END/RESULT, thinking parts.
+  (These are JSON `type` assertions, not `event:` names.)
+
+MH7 — Todo 19 contract test replays the gateway's own captured bytes.
+FAIL. aiStreaming.test.ts:62-75 comments claim the chunks are "recorded from the
+gateway probe ... verbatim", but 03-gateway-finish-reason.txt says the gateway
+was ECONNREFUSED and the chunks came from a stub. Plan todo 19: "Either way the
+fixture is the gateway's own output, not a hand-written chunk". The fixture is
+synthetic and mislabeled. See FAIL-1.
+
+============================================================
+2. IS-1 .. IS-9 (plan authority)
+============================================================
+
+IS-1 PASS — chat()/toServerSentEventsResponse on the path; sseFrame/fetch( = 0.
+IS-2 PASS — auth/rate limit/CSRF/ownership/refusal/persistence/status enum all
+  covered by the 156-green server suite; four RPC endpoints still registered.
+IS-3 PASS — UIMessage parts on the wire; server flattens text
+  (messages.ts messageText; ai.ts uses it; stored content unchanged;
+  presenter/model files untouched).
+IS-4 PASS — frozen static tool array; request-supplied tools never read;
+  tools.test.ts asserts injection is ignored; client tests render tool parts.
+IS-5 PASS — env-gated reasoning_effort in modelOptions; thinking rendered only
+  for in-flight turn (AIChatPanel.tsx:793) and never persisted (middleware
+  accumulates TEXT_MESSAGE_CONTENT only).
+IS-6 PASS — whenBusy queue/drop/interrupt + busy text restore; panel tests pass.
+IS-7 PASS — lint 0, tsc 0, build:server 0, test:server 156, test:app 356.
+IS-8 PASS — no sessionId/threadId -> stateless: no lock, persistence middleware
+  appendTurn returns early, stateless tests in aiStreaming.test.ts.
+IS-9 PASS — release on finish/abort/error/refusal; TTL 15*Minute.seconds with
+  rationale comment (ai.ts:196-226); lock tests assert no key survives.
+
+============================================================
+3. MUST-NOT-HAVE SWEEPS
+============================================================
+
+N1 subagents / defineAgent / SUBAGENT_ / subagents:{} — PASS.
+$ git grep -n -i -E "defineAgent|withPersistence|requireApproval|SUBAGENT_|subagents:" HEAD -- app server docs package.json tsconfig.json
+HEAD:docs/AI-CHAT.md:707:- **Subagents and interrupts.** No `defineAgent`, no approval affordance, no
+Only the docs' explicit "still deferred" list. No shipping hit.
+
+N2 resumable streams / Last-Event-ID / durability adapter — PASS.
+$ git grep -n -i -E "resumable|Last-Event-ID|ai-persistence" ...
+HEAD:app/utils/aiChat.ts:3:  type ResumableConnectConnectionAdapter,
+HEAD:app/utils/aiChat.ts:250:): ResumableConnectConnectionAdapter {
+HEAD:docs/AI-CHAT.md:709:- **Resumable streams.** A dropped connection is not resumed; the turn is
+HEAD:server/migrations/20260818120000-add-deletedById-to-documents.js:9 (pre-existing, unrelated)
+HEAD:server/queues/tasks/JSONAPIImportTask.ts:189 (pre-existing, unrelated)
+HEAD:server/queues/tasks/MarkdownAPIImportTask.ts:232 (pre-existing, unrelated)
+The two aiChat.ts hits are the library's return-type name for
+`fetchServerSentEvents`; no Last-Event-ID is sent, no resume handler exists, and
+the docs state a dropped connection is not resumed. No durability adapter.
+
+N3 @tanstack/ai-persistence / withPersistence — PASS (no hits outside the
+docs deferred list above).
+
+N4 client-supplied tools / forwardedProps — PASS.
+ai.ts:553-556 says body tools are never read and forwardedProps never spread.
+app/utils/aiChat.ts sends `tools: []` / `forwardedProps: {}` (library default);
+test asserts it (aiChat.test.ts:281-293, 355).
+
+N5 token usage / finishReason column — PASS.
+$ git grep -i "usage|capture" shipping AI files -> only AIChatPanel.tsx:1021
+  comment "The capture group keeps the ..." (URL regex), not token usage.
+`finishReason` appears only as TanStack event metadata / docs; no DB column.
+$ git diff 9253e4f6d..HEAD -- server/models/AIChatMessage.ts server/models/AIChatSession.ts
+  -> empty.
+
+N6 new migration / changed ai_chat_* shape — PASS.
+$ git diff 9253e4f6d..HEAD -- server/migrations -> empty (0 lines).
+Model diff above is empty.
+
+N7 maxIterations / combineStrategies / toolCallBudget — PASS (zero hits in
+ app/server/docs).
+
+N8 grading/editor/unrelated subsystems — PASS (diff scope section).
+
+============================================================
+4. Readable / event: / [DONE] invariants
+============================================================
+
+ctx.body assignments in server/routes/api/ai/ai.ts:
+:294  ctx.body = body;          where body = new Readable({ read() {} }) (:289)
+:654  ctx.body = Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>);
+No bare web ReadableStream is assigned. A source-scanning test enforces this
+(aiStreaming.test.ts:1164-1177). PASS.
+
+$ git grep -n -E "event: |\[DONE\]" HEAD -- server/routes/api/ai app/components/AIChat app/utils/aiChat.test.ts
+  -> exit 1, no output. PASS (no surviving assertion).
+(The only grep-adjacent false positive class — `dispatchEvent: () => false`
+matchMedia stubs — does not exist in these files; grep is clean.)
+
+============================================================
+5. PLAN CHECKBOXES vs REALITY
+============================================================
+
+Checked implementation todos: 23
+Unchecked implementation todos: 0
+Unchecked final-wave items: 4 (F1-F4, expected)
+Commits on 9253e4f6d..HEAD: 23
+Every checked todo has working behaviour at HEAD. Observation (non-blocking):
+todo 4 ("stream via TanStack chat()") has no commit with its own message; the
+route rewrite landed folded into dc04e1889/7ac9df0f9. Behaviour is present and
+tested; only the one-commit-per-todo convention is imperfect.
+
+============================================================
+6. GATES RE-RUN BY THE AUDITOR
+============================================================
+
+$ yarn lint                    -> LINT_EXIT=0 (baseline warnings only)
+$ yarn tsc --incremental false -> TSC_EXIT=0
+$ yarn build:server            -> BUILD_EXIT=0 ("Done!")
+$ node -e require(compiled tanstack.js) -> CJS_OK function function function
+$ yarn test server/routes/api/ai -> Test Files 9 passed (9), Tests 156 passed (156)
+$ yarn test:app                -> Test Files 38 passed (38), Tests 356 passed (356)
+
+============================================================
+7. VERDICT
+============================================================
+
+FAIL-1 (blocking): W0 gateway `finish_reason` probe was not performed. The live
+gateway at 127.0.0.1:8642 was ECONNREFUSED, the evidence substitutes a stub, and
+the contract test presents the synthetic fixture as "recorded from the gateway
+probe ... verbatim" (aiStreaming.test.ts:62-75), contrary to plan todo 19's
+"the fixture is the gateway's own output". Must-have "A verified W0 gate: ...
+and a gateway finish_reason probe" is therefore unmet. Required new todo: with
+the gateway up, run the raw stream:true probe, capture the final chunks to
+.omo/evidence/03-gateway-finish-reason.txt, replay those exact bytes in the
+contract test, and correct the fixture provenance comment and the docs if needed.
+
+F1 VERDICT: REJECT
+
+Shortfalls:
+1. Live gateway finish_reason probe not run; contract fixture is synthetic and
+   mislabeled as recorded gateway bytes (plan Must-have W0 gate / todo 19).
+
+============================================================
+RE-AUDIT — after commit df22f6970 and plan row 24
+============================================================
+
+Tip now df22f6970 (24 commits on 9253e4f6d..HEAD). The earlier FAIL-1 had two
+parts: (a) fixture provenance mislabeled, (b) live gateway never probed. Both
+were re-checked independently.
+
+$ git -C <wt> show --stat --oneline df22f6970
+df22f6970 test(ai-chat): label the contract fixture as stubbed, not gateway-recorded
+ server/routes/api/ai/aiStreaming.test.ts | 31 ++++++++++++++++++-------------
+ 1 file changed, 18 insertions(+), 13 deletions(-)
+
+(a) PROVENANCE — FIXED. PASS.
+$ git grep -n -i -E "recorded from the gateway|recorded gateway|verbatim" HEAD -- server/routes/api/ai
+HEAD:server/routes/api/ai/ai.ts:605:        // the Chat Completions body verbatim. Unconfigured, the key is
+HEAD:server/routes/api/ai/aiStreaming.test.ts:67: * these bytes as a stubbed-upstream fixture. The probe's `finish_reason
+HEAD:server/routes/api/ai/aiStreaming.test.ts:1185:describe("AG-UI contract against the gateway wire shape (stubbed)", () => {
+HEAD:server/routes/api/ai/aiStreaming.test.ts:1186:  it("turns the stubbed Chat Completions output into a finished run", async () => {
+HEAD:server/routes/api/ai/aiStreaming.test.ts:1222:  it("turns the stubbed output without a finish_reason into incomplete-stream", async () => {
+HEAD:server/routes/api/ai/index.ts:12: * router's layers verbatim when no path is given and only prefixes them when
+The two `verbatim` hits are unrelated prose (provider body wording; router
+layering). Zero hits claim gateway provenance.
+
+New docblock, aiStreaming.test.ts:62-80:
+  "The terminal two Chat Completions chunks the adapter parses, in the SSE wire
+   shape the gateway speaks. They are STUB-produced: the live gateway refused
+   every connection (`ECONNREFUSED 127.0.0.1:8642`, §1 of
+   `.omo/evidence/03-gateway-finish-reason.txt`), and §2 ... records these bytes
+   as a stubbed-upstream fixture. ... Plan row `24` (blocked on a live gateway)
+   will replay the live bytes when one is reachable."
+describe title :1185 "AG-UI contract against the gateway wire shape (stubbed)".
+
+Diff df22f6970^..df22f6970 verified: only docblock/function-name/describe/test
+title/comment lines changed. The two fixture byte strings (:77-78) and every
+assertion (:1208-1219, :1247-1250) are unchanged.
+
+(b) LIVE PROBE — tracked, still blocked by environment. Plan row:
+  - [~] 24. Replay the LIVE gateway bytes through `chat()` + the adapter (opened by F1, FAIL-1)
+    BLOCKED: the Hermes gateway at `127.0.0.1:8642` refuses every connection
+    (`ECONNREFUSED`, ...). ... the plan's "the fixture is the gateway's own
+    output" criterion stays unmet.
+    Unblocks when: an operator starts Hermes and `AI_CHAT_BASE_URL` answers 200.
+    Acceptance: capture the real 200 stream verbatim to
+    `.omo/evidence/24-live-gateway.txt`, replay those bytes ...
+Row is `[~]`, names the blocker and acceptance, and is NOT marked `[x]`.
+Checkbox counts: 23 `[x]`, 1 `[~]` (row 24), 0 unchecked implementation rows.
+This is the required tracked shortfall; no remaining hidden/false claim.
+
+Previously passing items re-run at df22f6970:
+$ yarn test server/routes/api/ai -> Test Files 9 passed (9), Tests 156 passed (156), EXIT=0
+$ yarn test:app                -> Test Files 38 passed (38), Tests 356 passed (356), EXIT=0
+$ yarn tsc --incremental false -> TSC_EXIT=0
+$ git diff --stat 9253e4f6d..HEAD -> 28 files changed, 5423 insertions(+), 2186 deletions(-)
+$ git diff --name-only ... server/migrations server/models/AIChat*.ts -> empty
+Must-NOT-have sweeps unchanged: no defineAgent/withPersistence/SUBAGENT_/
+subagents: in shipping code (docs deferred mention only); no Last-Event-ID or
+durability code (ResumableConnectConnectionAdapter remains the library's
+return-type name); no token usage; no new migration or ai_chat_* shape change;
+no `event: ` / `[DONE]` assertion (grep exit 1); ctx.body still only
+`new Readable` (:294) and `Readable.fromWeb` (:654).
+Working tree clean (`git status --porcelain` empty).
+
+F1 VERDICT: APPROVE
+Caveat: Must-have W0's live gateway half remains unmet and is now honestly
+tracked as blocked row 24; it must be unblocked before the slice is declared
+production-verified. The mislabeling shortfall from pass 1 is fixed.

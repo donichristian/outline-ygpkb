@@ -1,0 +1,71 @@
+TODO 16 — Render thinking as a collapsed, live-only disclosure
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Branch: feat/tanstack-ai-slice2-w1
+
+Acceptance criteria covered by the tests in
+app/components/AIChat/AIChatPanel.test.tsx:
+
+(a) collapsed disclosure with thinking text while streaming
+    "shows model reasoning in a loading disclosure, never as the answer"
+    - query("ai-chat-reasoning") is not null
+    - (disclosure as HTMLDetailsElement).open === false      <- collapsed
+    - textContent contains "Loading" and the thinking text
+(b) no disclosure after the turn finalizes
+    - after release()+flush(): query("ai-chat-reasoning") === null
+(c) thinking text never in the answer text AND never in a stored row
+    - answer span (span[role="status"]) excludes the thinking text while streaming
+    - rootStore.aiChatMessages.orderedData has 0 rows while the turn streams
+    - after the settle re-read: exactly 1 stored assistant row,
+      content === "The answer" and NOT containing the thinking text
+    - the transcript rendered back from the store excludes the thinking text
+(d) empty thinking parts -> no empty <details>
+    "renders no reasoning disclosure for empty thinking"
+    "renders no reasoning disclosure for whitespace-only thinking"
+    - query("ai-chat-reasoning") === null while the turn streams
+    - query("ai-chat-reasoning") === null after the turn finalizes
+
+Production change (minimal fix for criterion d):
+app/components/AIChat/AIChatPanel.tsx
+  - {isStreamingAssistant && reasoning && (   ->   {isStreamingAssistant && reasoning.trim() && (
+  A whitespace-only thinking part rendered a <details> with an empty body; the
+  red run below shows the failure that fix closes.
+
+Test-helper change (no duplicate helper):
+app/components/AIChat/AIChatPanel.test.tsx
+  - fakeConnection: `if (script.reasoning)` -> `if (script.reasoning !== undefined)`
+    so an empty string still replays the REASONING_MESSAGE_* frames and the
+    empty-part case is exercised for real.
+
+=====================================================================
+COMMAND: yarn test app/components/AIChat/AIChatPanel.test.tsx
+=====================================================================
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m(!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  29 passed (29)
+   Start at  07:41:57
+   Duration  8.39s (transform 1.95s, setup 2.35s, import 2.94s, tests 1.68s, environment 1.10s)
+
+
+=====================================================================
+COMMAND: yarn tsc --incremental false
+=====================================================================
+EXIT=0
+
+
+=====================================================================
+COMMAND: yarn test app/components/AIChat/
+=====================================================================
+ Test Files  4 passed (4)
+      Tests  51 passed (51)

@@ -1,0 +1,37 @@
+﻿AUDIT EVIDENCE 13 - read-only server tool allowlist (happy path)
+WORKDIR: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+CHANNEL: wire-level stubbed-fetch test (live gateway 127.0.0.1:8642 is DOWN - no curl transcript is possible or fabricated)
+COMMAND: yarn test server/routes/api/ai/tools.test.ts
+OUTPUT (unedited):
+
+node.exe : [33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m(!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  3 passed (3)
+   Start at  06:36:23
+   Duration  19.84s (transform 9.75s, setup 15.27s, import 3.00s, tests 1.28s, environment 0ms)
+
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/index.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/plugin.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/utils.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/inputRules.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/actions.js" points to missing source files
+EXIT=0

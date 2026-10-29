@@ -1,0 +1,41 @@
+AUDIT EVIDENCE 15 - reasoning passthrough (configured -> expected field captured)
+WORKDIR: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+CHANNEL: stubbed provider fetch at the OpenAI-compatible adapter boundary, driven through the real
+         POST /api/ai.chat route. The test parses the JSON body the SDK hands to fetch and asserts the
+         exact Chat Completions field the adapter emits.
+
+INSTALLED-BEHAVIOUR FINDING (settled from the installed source, not the note):
+- @tanstack/ai-openai/src/compatible/adapter.ts:16-66 - OpenAICompatibleChatAdapter extends
+  OpenAIBaseChatCompletionsTextAdapter and overrides extractReasoning() only. It does NOT override
+  modelReasoning().
+- @tanstack/openai-base/src/adapters/chat-completions-text.ts:1371-1378 - base modelReasoning()
+  returns undefined; :1520-1526 resolveReasoning(undefined, ...) returns undefined, so
+  chat({ reasoning }) emits NO reasoning_effort for string-declared compatible models. The
+  "optimistic defaults" in the research note are type-level only; runtime sends nothing.
+- @tanstack/openai-base/src/adapters/chat-completions-text.ts:1503-1516 - modelOptions is spread
+  into the Chat Completions params verbatim, so the supported request-side route for this adapter
+  is modelOptions.reasoning_effort, gated by config.
+- @tanstack/ai-openai/src/compatible/adapter.ts:52-65 - extractReasoning() reads
+  delta.reasoning_content ?? delta.reasoning ?? delta.reasoning_text, so the response side IS
+  surfaced by the installed adapter (proven by the reasoning-frame test below).
+
+IMPLEMENTATION:
+- server/env.ts: new optional AI_CHAT_REASONING (@IsIn minimal|low|medium|high), defaults unset.
+- server/routes/api/ai/ai.ts: chat({ ..., modelOptions: { reasoning_effort } }) added ONLY when
+  AI_CHAT_REASONING is set. The request body is never read for a reasoning level.
+- Test: server/routes/api/ai/aiReasoning.test.ts.
+
+ASSERTION UNDER TEST (aiReasoning.test.ts):
+  expect(sent.reasoning_effort).toEqual("medium");
+  expect(reasoningKeys(sent)).toEqual(["reasoning_effort"]);   // /reasoning/i over body keys
+
+COMMAND: yarn test server/routes/api/ai/aiReasoning.test.ts -t "sends reasoning_effort" --reporter=verbose
+OUTPUT (unedited RUN block):
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+ Test Files  1 passed (1)
+      Tests  1 passed | 3 skipped (4)
+   Start at  07:19:35
+   Duration  22.60s (transform 11.67s, setup 17.08s, import 3.65s, tests 1.50s, environment 0ms)
+
+FULL SUITE: yarn test server/routes/api/ai/  -> 9 files passed, 151 tests passed (147 baseline + 4 new).
+TYPECHECK: yarn tsc --incremental false -> EXIT=0.

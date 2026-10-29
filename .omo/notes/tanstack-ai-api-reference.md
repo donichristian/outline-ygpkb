@@ -1,0 +1,1193 @@
+# `@tanstack/ai*` API Reference (verified)
+
+Target: rewrite the AI-chat server + client transport of an Outline fork.
+Written: 2026-10-19.
+
+## Versions this reference is verified against (npm `latest` at time of writing)
+
+| Package | Version |
+|---|---|
+| `@tanstack/ai` | **0.69.0** |
+| `@tanstack/ai-openai` | **0.30.0** |
+| `@tanstack/ai-client` | **0.39.3** |
+| `@tanstack/ai-react` | **0.30.4** |
+| `@tanstack/openai-base` (transitive) | 0.14.0 |
+| `@ag-ui/core` (transitive) | 1.0.0 |
+
+> **Correcting the task premise:** the packages are on the **0.x** line, not v1. There is no v1.
+> `@tanstack/ai-openai@0.30.0` peer-requires `@tanstack/ai@^0.69.0`.
+
+## Method / provenance
+
+Every signature below was read from the **published npm tarballs** (the most authoritative source:
+the packages ship both `dist/esm/*.d.ts` and `src/`). Extracted with `npm pack`-equivalent
+(`registry.npmjs.org` tarball download) into a temp dir; read `dist/esm/**/*.d.ts`, `dist/esm/**/*.js`,
+and shipped `src/**/*.ts`.
+
+Citations: npm tarball path as `pkg@version -> dist/...` (exact), and GitHub source
+`https://github.com/TanStack/ai/blob/85c2956c68f3226ef409b3a4e54d5be82198931e/packages/...`
+(`main` HEAD at time of writing). Signatures were confirmed against the **published tarball**;
+the GitHub link is the closest public source and may drift from the pinned npm version.
+
+No package published a `.d.ts` that contradicted its shipped `src`; when a behavior depended on runtime
+code, the `.js`/`.ts` impl was read, not just the types.
+
+---
+# A. SERVER — `@tanstack/ai`
+
+Import root: `import { chat, toServerSentEventsResponse, chatParamsFromRequest, chatParamsFromRequestBody, toolDefinition, maxIterations, untilFinishReason, combineStrategies, StreamProcessor, EventType, runErrorEventToError } from '@tanstack/ai'`
+
+`package.json` `exports` (verbatim, `@tanstack/ai@0.69.0`):
+`.` → `dist/esm/index.d.ts`; `./client`, `./locks`, `./adapters`, `./middlewares`, `./middlewares/otel`,
+`./adapter-internals`, `./testing`, `./byok`, `./byok/server`.
+
+---
+
+## A1. `chat({...})`
+
+Signal (source: `ai@0.69.0 -> dist/esm/activities/chat/index.d.ts` L379; GitHub
+`packages/ai/src/activities/chat/index.ts`):
+
+```ts
+export declare function chat<
+  TAdapter extends AnyTextAdapter,
+  TSchema extends SchemaInput | undefined = undefined,
+  TStream extends boolean = boolean,
+  // ... tool/interrupt/context/middleware/agents type params elided
+>(options: TextActivityOptionsWithContext<...>): TextActivityResult<TSchema, TStream, TTools>;
+```
+
+**Return type** (L316): NOT a `StreamProcessor`. It is a discriminated result:
+
+- default (`stream` unspecified) with no `outputSchema` → **`ChatStream`**
+- `stream: false` (no schema) → `Promise<ChatResult>` ( `{ text: string; chunks: Array<StreamChunk> }` )
+- `outputSchema` present + no explicit `stream:true` → `Promise<InferSchemaType<TSchema>>`
+- `outputSchema` present + `stream: true` → `StructuredOutputStream<T>`
+
+`ChatStream` (source `types.d.ts` L1666):
+```ts
+export type ChatStream = AsyncIterable<Exclude<StreamChunk, CustomEvent> | KnownCustomEvent>;
+```
+So **`chat()` default returns an `AsyncIterable<StreamChunk>`** (AG-UI events). It is lazy: the
+adapter's provider call fires only when the iterable is pulled (`stream-to-response.d.ts` L76-90:
+"the untouched generator is simply GC'd").
+
+### Full option list (`TextActivityOptions`, `activities/chat/index.d.ts` L71-281)
+
+| Option | Type / notes |
+|---|---|
+| `adapter` | `TAdapter` (required). Created by a provider fn, e.g. `openaiText('gpt-5.5')`. |
+| `messages` | `Array<UIMessage \| ModelMessage \| ConstrainedModelMessage<...>>` — the three shapes may be mixed. |
+| `systemPrompts` | `Array<SystemPrompt<TAdapter...>>` (`string` or `{ content, metadata }`). |
+| `tools` | `ReadonlyArray<AnyRuntimeTool \| ProviderTool<...>>`. |
+| `mcp` | `ChatMCPOptions`. |
+| `metadata` | `TextOptions['metadata']` (observability; never sent to provider). |
+| `modelOptions` | `TAdapter['~types']['providerOptions']`. |
+| `reasoning` | `ReasoningOptionFor<AdapterReasoning<TAdapter>>` — a level or `{ level, summary?, budgetTokens? }`. |
+| `abortController` | `AbortController`. |
+| `agentLoopStrategy` | `AgentLoopStrategy`. **Default `combineStrategies([maxIterations(5), untilFinishReason(['length'])])`.** |
+| `toolExecution` | `'parallel'` (default) \| `'sequential'`. |
+| `retry` | `{ maxRetries: number; maxWaitMs?: number }`. Off by default. |
+| `lazyToolsConfig` | `LazyToolsConfig`. |
+| `conversationId` | **deprecated**; use `threadId`. |
+| `threadId` | string. AG-UI thread id; **auto-generated if not provided**. |
+| `toolChoice` | `'auto' \| 'none' \| 'required' \| { type:'tool', name }`. |
+| `promptCache` | `'none' \| 'short'(default) \| 'long'` or `{ retention, key }`. |
+| `wrapFetch` | `FetchWrapper` = `(next: typeof fetch) => typeof fetch`. |
+| `runId` | string. AG-UI run id; auto-generated by adapter if not provided. |
+| `parentRunId` | string. Nested-run correlation. |
+| `subagentRunId` | string. Set when this chat is a child run. |
+| `state` | `unknown` (mirrored in `STATE_SNAPSHOT` before an interrupt terminal). |
+| `resume` | `Array<RunAgentResumeItem>` (AG-UI interrupt resume). |
+| `subagents` | `SubagentsBag<TAgents>`. |
+| `outputSchema` | `SchemaInput` (Standard Schema: Zod v4.2+, ArkType, Valibot, or raw JSON Schema). |
+| `stream` | boolean, **default `true`**. |
+| `middleware` | `Array<ChatMiddleware<TContext>>`. |
+| `interrupts` | `ReadonlyArray<InterruptDefinition<...>>`. |
+| `context` | `TContext` — runtime context to middleware hooks + server tools. |
+| `debug` | `DebugOption`. |
+
+Minimal correct example (verbatim pattern from the JSDoc, L326-340):
+```ts
+import { chat } from '@tanstack/ai'
+import { openaiText } from '@tanstack/ai-openai'
+
+for await (const chunk of chat({
+  adapter: openaiText('gpt-5.5'),
+  messages: [{ role: 'user', content: 'What is the weather?' }],
+  tools: [weatherTool],
+})) {
+  if (chunk.type === 'TEXT_MESSAGE_CONTENT') console.log(chunk.delta)
+}
+```
+
+> Note the `messages` shape in the docstring uses `{ role, content }` (**`ModelMessage`**). A
+> `UIMessage` is `{ id, role, parts: [...] }` (see C3). Both are accepted and may be mixed.
+
+`ChatResult` (`stream-to-response.d.ts` L11-16):
+```ts
+export interface ChatResult { text: string; chunks: Array<StreamChunk> }
+```
+`streamToText(stream): Promise<ChatResult>` reads a `ChatStream` to the end (throws the first
+`RUN_ERROR`). `text` joins `TEXT_MESSAGE_CONTENT` deltas.
+
+---
+
+## A2. `toServerSentEventsResponse(stream, options)`
+
+Source `stream-to-response.d.ts` L127-151:
+
+```ts
+export declare function toServerSentEventsResponse<TOffset extends string = string>(
+  stream: AsyncIterable<StreamChunk>,
+  init?: ResponseInit & {
+    abortController?: AbortController;
+    durability?: {
+      adapter: StreamDurability<TOffset>;
+      batch?: number;      // default 32
+      batchWaitMs?: number; // default 50; 0 = flush every chunk
+    };
+    debug?: DebugOption;
+  },
+): Response;
+```
+
+- `init` **is** `ResponseInit` plus `abortController` / `durability` / `debug`. It also accepts
+  standard `headers`, `status`, `statusText`.
+- Returns a **Web `Response`**. Its `.body` is a **Web `ReadableStream<Uint8Array>`** (`stream-to-response.js` L620-624: `new Response(body, {...})`, `body` built by `toServerSentEventsStream`, declared `ReadableStream<Uint8Array>`).
+- **Content-Type it sets** (`stream-to-response.js` L602-606): `text/event-stream`, plus
+  `Cache-Control: no-cache` and `Connection: keep-alive`. Caller `init.headers` are merged **over**
+  these defaults.
+- Not passed by default: the `RUN_STARTED` is standard, but there is no forced status code.
+
+Minimal (Web-Request host, e.g. Hono/Remix):
+```ts
+import { chat, toServerSentEventsResponse } from '@tanstack/ai'
+import { openaiText } from '@tanstack/ai-openai'
+
+export async function POST(request: Request) {
+  const stream = chat({ adapter: openaiText('gpt-5.5'), messages: [...] })
+  return toServerSentEventsResponse(stream, { abortController: new AbortController() })
+}
+```
+
+Because it returns a plain Web `Response`, **Koa must convert it**: `ctx.type = response.headers.get('content-type')`;
+copy headers; `ctx.body = Readable.fromWeb(response.body)` (Node 18+ `stream/web`). The library has
+no Koa adapter.
+
+Siblings exported from the same module and root (L32): `toServerSentEventsStream(stream, abortController?, getId?)`,
+`toHttpStream` / `toHttpResponse` (NDJSON, `application/x-ndjson`), `toJsonResponse` / `resumeJsonResponse`
+(`application/json`), `resumeServerSentEventsResponse`, `resumeHttpResponse`, `streamToText`,
+`RUN_ACCEPTED_EVENT`.
+
+---
+
+## A3. `chatParamsFromRequestBody(body)` vs `chatParamsFromRequest(req)`
+
+Source `utilities/chat-params.d.ts`:
+
+```ts
+export declare function chatParamsFromRequestBody(body: unknown): Promise<{
+  messages: Array<UIMessage | ModelMessage>;
+  threadId: string;
+  runId: string;
+  parentRunId?: string;
+  tools: Array<{ name: string; description: string; parameters: JSONSchema }>;
+  forwardedProps: Record<string, unknown>;
+  state: unknown;
+  resume?: Array<RunAgentResumeItem>;
+  /** @deprecated Use `aguiContext`. */
+  context: Array<AGUIContext>;
+  aguiContext: Array<AGUIContext>;
+}>;
+
+export declare function chatParamsFromRequest(
+  req: Request,
+): Promise<Awaited<ReturnType<typeof chatParamsFromRequestBody>>>;
+```
+
+- `chatParamsFromRequestBody(body)` accepts **already-parsed** `unknown` (a plain object). It validates
+  structurally against the AG-UI `RunAgentInput` contract with no schema runtime. It throws a
+  migration-pointing `Error` (not a `Response`) on a bad shape.
+- `chatParamsFromRequest(req)` takes a **Web `Request`**, does `req.json()`, then delegates to
+  `chatParamsFromRequestBody`. On malformed JSON / invalid shape it **throws a `Response`** (status 400).
+  Frameworks that auto-handle thrown `Response` (TanStack Start, SolidStart, Remix, React Router 7)
+  return it; **others (Next.js, Hono, raw Node, Koa) must `try/catch` and return the caught Response**.
+
+**Koa (this fork): `koa-body` already parsed `ctx.request.body` into a plain object, NOT a Web
+`Request`. Use `chatParamsFromRequestBody(ctx.request.body)`:**
+
+```ts
+import { chat, chatParamsFromRequestBody, mergeAgentTools } from '@tanstack/ai'
+
+const params = await chatParamsFromRequestBody(ctx.request.body) // plain object in
+// params.messages / threadId / runId / tools / forwardedProps / state / resume
+```
+
+Do **not** synthesize a `Request` to call `chatParamsFromRequest` — you would re-serialize the body.
+`mergeAgentTools(serverTools, params.tools)` merges server tools with the client-declared stubs
+(server wins on name collision; client-only stubs become no-execute entries).
+
+---
+
+## A4. `toolDefinition({...})`
+
+Source `activities/chat/tools/tool-definition.d.ts` L208 + `types.d.ts` L745-854.
+
+```ts
+export declare function toolDefinition<
+  TInput extends SchemaInput | undefined = undefined,
+  TOutput extends SchemaInput | undefined = undefined,
+  TName extends string = string,
+  const TNeedsApproval extends boolean = false,
+  TApprovalSchema extends ApprovalSchemaConfig | undefined = undefined,
+>(config: ToolDefinitionConfig<TInput, TOutput, TName, TNeedsApproval, TApprovalSchema>)
+  : ToolDefinition<TInput, TOutput, TName, TNeedsApproval, TApprovalSchema>;
+
+// ToolDefinitionConfig keys: name, description, inputSchema?, outputSchema?,
+//   lazy?, replay?: 'safe'|'never', metadata?, execution?: 'task',
+//   needsApproval?, approvalSchema?
+```
+
+`ToolDefinition` builder (L141-152):
+```ts
+server: <TContext = unknown>(execute: ToolExecuteFunction<TInput,TOutput,TContext>)
+  => ServerTool<...> & BuiltToolSchemaFields<...>;
+client: <TContext = unknown>(execute?: ToolExecuteFunction<TInput,TOutput,TContext>)
+  => ClientTool<...> & BuiltToolSchemaFields<...>;
+```
+
+**`inputSchema` accepts any Standard Schema / Standard JSON Schema value or a plain `JSONSchema`
+object.** Zod is not a hard dependency — Zod v4.2+ / ArkType / Valibot / raw JSON Schema all work
+(`types.d.ts` `SchemaInput` L84; the JSDoc shows `inputSchema: z.object({...})`). There is no
+zod-specific import from `@tanstack/ai`; pass the schema value directly.
+
+Result flow: `.server(fn)` returns a `ServerTool` whose `execute` is auto-run by the agent loop;
+the returned value is validated against `outputSchema` (if a Standard Schema) and fed back to the
+model as the tool result. Signature `ToolExecuteFunction` (`types.d.ts` L731):
+```ts
+(args: InferSchemaType<TInput>, context?: ToolExecutionContext<TContext>)
+  => Promise<InferSchemaType<TOutput>> | InferSchemaType<TOutput>
+```
+`ToolExecutionContext` gives `toolCallId`, `abortSignal`, `context`, `inputResponse`, `detach?`,
+and `emitCustomEvent(name, value, { batch? })`.
+
+```ts
+import { toolDefinition } from '@tanstack/ai'
+import { z } from 'zod'
+
+const addToCart = toolDefinition({
+  name: 'addToCart',
+  description: 'Add a guitar to the cart',
+  inputSchema: z.object({ guitarId: z.string(), quantity: z.number() }),
+  outputSchema: z.object({ success: z.boolean(), cartId: z.string() }),
+})
+
+const addToCartServer = addToCart.server(async (args, ctx) => {
+  ctx?.emitCustomEvent('progress', { step: 1 })
+  return { success: true, cartId: 'CART_' + Date.now() } // -> model
+})
+
+chat({ adapter, messages, tools: [addToCartServer] })
+```
+
+---
+
+## A5. `toolCallBudget` / `maxIterations` / `combineStrategies` defaults
+
+- **`toolCallBudget` does NOT exist** in `@tanstack/ai@0.69.0`. No export, no type, no option by that
+  name. (conf: `index.d.ts` L1-105 has no such symbol.) A tool-call budget is expressed via middleware
+  `onBeforeToolCall` (per-turn cap) + `onShouldContinue` (cumulative), per the JSDoc in
+  `agent-loop-strategies.d.ts` L5-8 and `types.d.ts` L995-997.
+- `maxIterations(max: number): AgentLoopStrategy` — continues for at most `max` **model turns**
+  (iterations), not tool calls. One iteration may still emit many parallel tool calls.
+- `untilFinishReason(stopReasons: Array<string>): AgentLoopStrategy`.
+- `combineStrategies(strategies: Array<AgentLoopStrategy>): AgentLoopStrategy` — **AND** logic; all
+  must return true to continue. (All three, `agent-loop-strategies.d.ts` L25-65.)
+- **`chat()` default** (`activities/chat/index.d.ts` L129-133 and `src/activities/chat/index.ts` L604):
+  `combineStrategies([maxIterations(5), untilFinishReason(['length'])])`.
+  i.e. max 5 model turns, and stop when `finish_reason === 'length'`.
+- `AgentLoopState` fields (`types.d.ts` L965-984): `iterationCount`, `messages`, `finishReason`,
+  `toolCallCount`, `lastTurnToolCallCount`.
+
+---
+
+## A6. Middleware
+
+Source `activities/chat/middleware/types.d.ts` L503-650. Attach via `chat({ middleware: [mw1, mw2] })`.
+Run in array order. Hook names are **exactly**:
+
+| Hook | Signature (verbatim shape) |
+|---|---|
+| `setup?` | `(ctx) => void \| Promise<void>` — runs FIRST, before `onConfig`. |
+| `onConfig?` | `(ctx, config: ChatMiddlewareConfig) => void \| null \| Partial<ChatMiddlewareConfig> \| Promise<...>` |
+| `onStructuredOutputConfig?` | `(ctx, config: StructuredOutputMiddlewareConfig) => ...` |
+| `onStart?` | `(ctx) => void \| Promise<void>` |
+| `onIteration?` | `(ctx, info: IterationInfo) => void \| Promise<void>` |
+| `onShouldContinue?` | `(ctx, state: AgentLoopState) => boolean \| void \| Promise<boolean \| void>` — `false` stops the loop (does not abort). |
+| `onChunk?` | `(ctx, chunk: StreamChunk) => void \| StreamChunk \| Array<StreamChunk> \| null \| Promise<...>` — return chunk to replace, array to expand, `null` to drop. |
+| `onBeforeToolCall?` | `(ctx, hookCtx: ToolCallHookContext) => BeforeToolCallDecision \| Promise<...>` |
+| `onAfterToolCall?` | `(ctx, info: AfterToolCallInfo) => AfterToolCallDecision \| Promise<...>` |
+| `onToolPhaseComplete?` | `(ctx, info: ToolPhaseCompleteInfo) => void \| Promise<void>` |
+| `onUsage?` | `(ctx, usage: UsageInfo) => void \| Promise<void>` |
+| `onFinish?` | `(ctx, info: FinishInfo) => void \| Promise<void>` |
+| `onAbort?` | `(ctx, info: AbortInfo) => void \| Promise<void>` |
+| `onError?` | `(ctx, info: ErrorInfo) => void \| Promise<void>` |
+| `onInterruptBoundary?` | `(ctx & { phase: InterruptBoundaryPhase }) => InterruptBoundaryResult \| Promise<...>` |
+| `onInterruptResolution?` | `(ctx, resolutions: InterruptResolutionCollection) => InterruptResolutionResult \| Promise<...>` |
+| `sandbox?` | `ChatSandboxHooks` — `onFile`/`onFileCreate`/`onFileChange`/`onFileDelete`. |
+
+**There is NO `onToolCall` hook** (the task's candidate list is wrong). A tool **event** is observed
+via `onChunk` (chunk.type `TOOL_CALL_*`); per-tool lifecycle is `onBeforeToolCall`/`onAfterToolCall`.
+There is no `onReasoning*` hook — reasoning is observed via `onChunk` too.
+
+`FinishInfo` (`types.d.ts` L394-403): `{ finishReason: string | null; duration: number; content: string; usage?: TokenUsage }`.
+`ChatMiddlewareContext` (L85-200) exposes: `requestId`, `streamId`, `runId`, `threadId`,
+`phase`, `iteration`, `chunkIndex`, `signal?`, `abort(reason?)`, `emitCustomEvent(...)`,
+`context`, `defer(promise)`, `provider`, `model`, `messages`, `accumulatedContent`,
+`currentMessageId`, `capabilities`, `get/getOptional/provide`.
+
+### THE DB-WRITE-BEFORE-SSE-CLOSE QUESTION — answered with a quote
+
+Question: "does `onFinish` complete before the response stream ends?"
+
+**Yes — an `await`ed `onFinish` completes before the SSE stream closes.** The library documents this
+ordering explicitly. Verbatim (`ai@0.69.0 -> src/activities/chat/middleware/compose.ts` L656-660,
+GitHub `packages/ai/src/activities/chat/middleware/compose.ts`):
+
+> "What that rethrow can and cannot achieve depends on the transport, because this fan-out is
+> awaited **AFTER the adapter's `RUN_FINISHED` has already been yielded** (`chat()` yields terminal
+> chunks while streaming, then awaits this hook on its way out)."
+
+Mechanism (`src/activities/chat/index.ts`):
+- The engine is an `async function* run()` (L1425). It `yield`s `RUN_FINISHED` to the consumer, then
+  continues. The generator only returns *after* `runTerminalHook()` (L1413-1422) has
+  `await`ed `middlewareRunner.runOnFinish(...)`, and after the `finally` block (L1646-1662) has
+  `await`ed all deferred promises. The SSE `ReadableStream` closes when the generator returns.
+- Therefore: `RUN_FINISHED` reaches the client **before** your DB commit resolves, but the **stream
+  does not close** until the commit resolves.
+
+Two equivalent ways to commit before close:
+
+```ts
+// (a) await inside onFinish — simplest; blocks stream close
+const persistence: ChatMiddleware = {
+  name: 'chat-persist',
+  async onFinish(ctx, info) {
+    await db.saveAssistantTurn({           // <-- awaited; stream closes after this
+      threadId: ctx.threadId,
+      runId: ctx.runId,
+      content: info.content,
+    })
+  },
+}
+chat({ adapter, messages, middleware: [persistence] })
+```
+
+```ts
+// (b) ctx.defer(promise) — also awaited before close, but does not block mid-stream chunking
+onFinish(ctx, info) {
+  ctx.defer(db.saveAssistantTurn({ /* ... */ })) // awaited in the engine's `finally`
+}
+```
+
+`ctx.defer` doc (`types.d.ts` L131-136): "Deferred promises do not block streaming and are awaited
+after the terminal hook (onFinish/onAbort/onError)." The `finally` await is
+`await Promise.allSettled(this.deferredPromises)` (index.ts L1659-1661) — still inside the generator,
+so still before the stream closes.
+
+**Failure semantics** (compose.ts L656-682, read in full): if `onFinish` throws on a **non-durable**
+SSE transport, the throw escapes the generator and the SSE encoder appends a **trailing `RUN_ERROR`**
+("the store's own message and `code`"). On a **durable** transport the terminal was already persisted
+and forwarded, so no second terminal is appended; the failure is logged server-side on the sink's
+`errors` channel and `RUN_FINISHED` stands. Either way the failure is never silently swallowed.
+
+Ordering guarantee caveat: `onFinish` runs **after** `RUN_FINISHED` is *yielded* (client-visible),
+not before. If you need the DB commit to be reflected *inside* a streamed event, you cannot — use a
+custom event before the terminal, or commit in `onChunk` on the last terminal chunk. The only
+guarantee the library gives is **commit-before-stream-close**, not commit-before-`RUN_FINISHED`.
+
+---
+
+## A7. `StreamProcessor` (manual alternative)
+
+Source `activities/chat/stream/processor.d.ts`. Exported from `@tanstack/ai` root and
+`@tanstack/ai/client`. It is a **client-side state machine** that turns a `StreamChunk` iterable into
+a `UIMessage[]` conversation.
+
+Key API:
+```ts
+new StreamProcessor(options?: StreamProcessorOptions) // { chunkStrategy?, events?, jsonParser?, initialMessages?, subagentRunId? }
+.setMessages(messages: Array<UIMessage>): void
+.prependMessages(messages: Array<UIMessage>): void
+.addUserMessage(content, id?, metadata?): UIMessage
+.prepareAssistantMessage(): void
+.getCurrentAssistantMessageId(): string | null
+.addToolResult(toolCallId, output, error?): void
+.addToolApprovalResponse(approvalId, approved): void
+.toModelMessages(): Array<ModelMessage>
+.getMessages(): Array<UIMessage>
+.process(stream: AsyncIterable<any>): Promise<ProcessorResult>
+.processChunk(chunk: StreamChunk): void          // <-- per-chunk; synchronous
+.finalizeStream(): void
+.getState(): ProcessorState
+.reset(): void
+static replay(recording, options?): Promise<ProcessorResult>
+```
+
+`StreamProcessorEvents` (`processor.d.ts` L6-39): `onMessagesChange`, `onStreamStart`,
+`onStreamEnd(message)`, `onError`, `onToolCall`, `onApprovalRequest`, `onCustomEvent`, `onTextUpdate`,
+`onToolCallStateChange`, `onThinkingUpdate`, `onStructuredOutputChange`.
+
+**Withholding the terminal event until a DB write commits:** `StreamProcessor` does **not** own the
+transport — it consumes chunks and calls `finalizeStream()` when the iterable ends
+(`processor.d.ts` L588-597: "Called when the async iterable ends (stream closed)"). To withhold the
+terminal, wrap the `AsyncIterable` **before** handing it to the processor/response helper:
+```ts
+async function* commitBeforeTerminal(src: AsyncIterable<StreamChunk>, write: () => Promise<void>) {
+  for await (const c of src) {
+    if (c.type === 'RUN_FINISHED' || c.type === 'RUN_ERROR') {
+      await write()          // commit, then release the terminal
+    }
+    yield c
+  }
+}
+```
+This is exactly what the middleware `onFinish` already does more cleanly; prefer A6.
+
+---
+
+## A8. Complete AG-UI event `type` literals + SSE body format
+
+`StreamChunk = AGUIEvent` (`types.d.ts` L1803). `EventType` is re-exported from `@ag-ui/core`
+(`types.d.ts` L1258: `export { EventType } from '@ag-ui/core'`), imported from `@tanstack/ai`.
+
+**Complete list of the `type` string values** (verbatim, `@ag-ui/core@1.0.0 ->
+dist/version-*.d.ts` L5-37, enum `EventType`):
+
+```
+TEXT_MESSAGE_START
+TEXT_MESSAGE_CONTENT
+TEXT_MESSAGE_END
+TEXT_MESSAGE_CHUNK
+TOOL_CALL_START
+TOOL_CALL_ARGS
+TOOL_CALL_END
+TOOL_CALL_CHUNK
+TOOL_CALL_RESULT
+STATE_SNAPSHOT
+STATE_DELTA
+MESSAGES_SNAPSHOT
+ACTIVITY_SNAPSHOT
+ACTIVITY_DELTA
+RAW
+CUSTOM
+RUN_STARTED
+RUN_FINISHED
+RUN_ERROR
+STEP_STARTED
+STEP_FINISHED
+REASONING_START
+REASONING_MESSAGE_START
+REASONING_MESSAGE_CONTENT
+REASONING_MESSAGE_END
+REASONING_MESSAGE_CHUNK
+REASONING_END
+REASONING_ENCRYPTED_VALUE
+SUBAGENT_STARTED
+SUBAGENT_FINISHED
+SUBAGENT_ERROR
+```
+
+Note: **there are no `THINKING_*` values** — the reasoning family is `REASONING_*` (the task's
+`THINKING_*` candidate is wrong). `STEP_STARTED`/`STEP_FINISHED` are the legacy thinking pair and
+carry `stepName` (and, for some adapters, `content` on finish).
+
+**SSE body format** (`stream-to-response.js` L300-311, verbatim encoder):
+```js
+encodeChunk: (chunk, index) => {
+  const id = getId?.(chunk, index);
+  const idLine = id === void 0 ? "" : `id: ${id}\n`;
+  const wire = toWireChunk(chunk);
+  return encoder.encode(`${idLine}data: ${JSON.stringify(wire)}\n\n`);
+},
+encodeError: (error) => encoder.encode(`data: ${JSON.stringify(toWireChunk(runErrorChunk(error)))}\n\n`)
+```
+
+- Each event = `data: {json}\n\n`. An optional `id: <offset>\n` line precedes `data:` **only when a
+  durability sink is configured** (`getId` present).
+- **There is NO `event:` line.** (No `event:` literal anywhere in `stream-to-response.js`.)
+- **There is NO `data: [DONE]` sentinel.** The stream simply ends after the terminal event
+  (`RUN_FINISHED`, or `RUN_ERROR`). `RUN_FINISHED` is the terminal event (`stream-to-response.d.ts`
+  L47: "Stream ends when the underlying iterable is exhausted (RUN_FINISHED is the terminal event)").
+  The only `[DONE]` mention in the packages is `openai-base`'s note that the **upstream OpenAI SDK**
+  consumes `[DONE]`; TanStack never re-emits it.
+
+`runErrorEventToError(chunk)` (`utilities/errors.d.ts`) converts a `RUN_ERROR` chunk to the `Error`
+shape exposed to consumers.
+
+---
+
+## A9. The `incomplete-stream` error
+
+**Exact value: `'incomplete-stream'`.** For the **Chat-Completions** adapters it is raised by
+`@tanstack/openai-base` (`chat-completions-text.ts` L1287-1301, GitHub
+`packages/openai-base/src/adapters/chat-completions-text.ts`):
+
+```ts
+// Preserve the historical usage-only tail fallback. The SDK consumes
+// [DONE], so this compatibility path cannot verify that marker.
+if (!pendingFinishReason && !endsWithUsageOnlyChunk) {
+  const message =
+    'Chat Completions stream ended without a finish_reason or usage-only tail'
+  yield {
+    type: EventType.RUN_ERROR,
+    metadata: this.sourceMetadata(options.model),
+    runId: aguiState.runId,
+    model: lastModel || options.model,
+    timestamp: Date.now(),
+    message,
+    code: 'incomplete-stream',
+    error: { message, code: 'incomplete-stream' },
+  }
+  return
+}
+```
+
+**Condition:** the upstream Chat Completions stream ended **without ever producing a
+`finish_reason`** (no chunk had `choice.finish_reason`) **and not as a usage-only tail**
+(`endsWithUsageOnlyChunk === false`). In other words: a stream cut off before the terminating
+`finish_reason` chunk and with no trailing usage-only chunk to treat as a valid tail.
+
+Related codes in the same file: `'max_tokens'` (structuredOutput/structuredOutputStream cut off with
+`finish_reason === 'length'`, L189/L392-395/L627-636). An **unknown** `finish_reason` (not in
+`stop|length|content_filter|tool_calls|function_call`) also emits a `RUN_ERROR` but with **no**
+`code` (message: `Provider finish_reason: <value>`, L1303-1325).
+
+The **Responses** adapter (`responses-text.ts` L984-985, L2510-2511) also emits
+`code: 'incomplete-stream'` for its own terminal-incomplete `response.incomplete`/`response.failed`
+paths.
+---
+
+# B. ADAPTERS — `@tanstack/ai-openai` 0.30.0
+
+`package.json` `exports` (verbatim): `.` → `dist/esm/index.d.ts`; `./byok`, `./compatible`, `./siwc`, `./tools`.
+**`openaiCompatible` / `openaiCompatibleText` are exported ONLY from the `./compatible` subpath** —
+they are NOT re-exported from the package root (`dist/esm/index.d.ts` L1-25 does not mention them).
+
+## B1. `openaiText` (Responses API) vs the Chat-Completions adapters
+
+Two distinct code paths in the same package:
+
+| | Responses API | Chat Completions API |
+|---|---|---|
+| Factory | `openaiText(model, config?)` / `createOpenaiChat(model, apiKey, config?)` | `openaiChatCompletions(model, config?)` / `createOpenaiChatCompletions(model, apiKey, config?)` |
+| Class | `OpenAITextAdapter` | `OpenAIChatCompletionsTextAdapter` |
+| Wire | `POST {baseURL}/responses` | `POST {baseURL}/chat/completions` |
+| Reasoning field | `reasoning: { effort, summary }` | **`reasoning_effort`** |
+| `max_tokens` key | `max_output_tokens` | `max_tokens` |
+| Source | `dist/esm/adapters/text.d.ts` L54, L64 | `dist/esm/adapters/text-chat-completions.d.ts` L31, L35 |
+
+`openaiText` doc (`text.d.ts` L89-113): uses API key from env (`OPENAI_API_KEY` via
+`getOpenAIApiKeyFromEnv`), looks in `process.env` then `window.env`; throws if not found.
+`createOpenaiChat(model, apiKey, config?)` takes the key explicitly.
+
+```ts
+import { openaiText } from '@tanstack/ai-openai'
+const a = openaiText('gpt-5.5')                       // Responses API
+const b = openaiText('gpt-5.5', { baseURL: 'https://gateway.example/v1' })
+
+import { openaiChatCompletions, createOpenaiChatCompletions } from '@tanstack/ai-openai'
+const c = openaiChatCompletions('gpt-4o')             // Chat Completions, key from env
+const d = createOpenaiChatCompletions('gpt-4o', 'sk-...') // Chat Completions, explicit key
+```
+
+## B2. Exact export + import path for a Chat-Completions adapter with a custom `baseURL`
+
+All three candidate names exist, but with different homes:
+
+- `openaiCompatible` — **`import { openaiCompatible } from '@tanstack/ai-openai/compatible'`**. This
+  is the **factory-of-factories**: configure the provider once, select a model per call. It returns
+  either a `OpenAICompatibleResponsesAdapter` or an `OpenAICompatibleChatAdapter` depending on `api`.
+- `openaiCompatibleText` — **`import { openaiCompatibleText } from '@tanstack/ai-openai/compatible'`**.
+  One-shot single-model helper.
+- `createOpenaiChatCompletions` — **`import { createOpenaiChatCompletions } from '@tanstack/ai-openai'`**
+  (root). This is the **native OpenAI** Chat-Completions adapter, **not** the generic compatible one
+  (its `model` is constrained to `(typeof OPENAI_CHAT_MODELS)[number]`; baseURL still settable via
+  `config.baseURL`). Use `openaiCompatible*` for non-OpenAI endpoints with arbitrary model names.
+
+Signatures (`compatible/index.d.ts` L19, L34; `compatible/types.d.ts`; `compatible/adapter.d.ts` L13, L38):
+
+```ts
+import { openaiCompatible, openaiCompatibleText } from '@tanstack/ai-openai/compatible'
+
+export declare function openaiCompatible<const TModels extends ReadonlyArray<CompatibleModelInput>>(
+  config: OpenAICompatibleConfig<TModels>,
+): <TModelName extends ModelNameOf<TModels>>(model: TModelName) =>
+  OpenAICompatibleResponsesAdapter<...> | OpenAICompatibleChatAdapter<...>;
+
+export declare function openaiCompatibleText<const TModelName extends string>(
+  model: TModelName,
+  config: OpenAICompatibleTextConfig,
+): OpenAICompatibleResponsesAdapter<...> | OpenAICompatibleChatAdapter<...>;
+
+export interface OpenAICompatibleConfig<TModels extends ReadonlyArray<CompatibleModelInput>>
+  extends Omit<ClientOptions, 'apiKey' | 'baseURL'>, OpenAIBaseTextAdapterOptions {
+  name?: string;
+  baseURL: string;                       // required
+  apiKey: NonNullable<ClientOptions['apiKey']>;
+  models: TModels;                       // required
+  api?: 'chat-completions' | 'responses'; // which wire the endpoint speaks
+}
+export interface OpenAICompatibleTextConfig
+  extends Omit<ClientOptions, 'apiKey' | 'baseURL'>, OpenAIBaseTextAdapterOptions {
+  name?: string; baseURL: string; apiKey: NonNullable<ClientOptions['apiKey']>;
+  api?: 'chat-completions' | 'responses';
+}
+```
+
+Because both configs extend OpenAI's `ClientOptions` (minus `apiKey`/`baseURL`), all of
+**`defaultHeaders`, `fetch`, `timeout`, `maxRetries`, `organization`, `dangerouslyAllowBrowser`,
+etc. are supported** as pass-through OpenAI-SDK client options. `CompatibleModelInput = string | ExtendedModelDef`.
+
+```ts
+import { openaiCompatible, openaiCompatibleText } from '@tanstack/ai-openai/compatible'
+
+// provider-once, model-per-call
+const local = openaiCompatible({
+  name: 'my-gateway',
+  baseURL: 'https://llm.internal/v1',
+  apiKey: process.env.LLM_KEY!,
+  api: 'chat-completions',
+  models: ['qwen2.5-72b', 'deepseek-chat'],
+  defaultHeaders: { 'X-Tenant': 'outline' },
+  fetch: myInstrumentedFetch,        // typeof fetch
+})
+chat({ adapter: local('deepseek-chat'), messages })
+
+// one-shot, custom baseURL + key
+chat({
+  adapter: openaiCompatibleText('deepseek-chat', {
+    baseURL: 'https://api.deepseek.com/v1',
+    apiKey: process.env.DEEPSEEK_KEY!,
+    defaultHeaders: { 'X-Foo': 'bar' },
+  }),
+  messages,
+})
+```
+
+The compatible Chat Completions class (`compatible/adapter.d.ts` L10-13):
+`new OpenAICompatibleChatAdapter(client: OpenAI, model, name, options?: OpenAIBaseTextAdapterOptions & Pick<ClientOptions,'fetch'>)`;
+it sets `maxTokensKey = 'max_tokens'`.
+
+## B3. How the model string is supplied + declaring `reasoning` for unknown models
+
+**Model string supply:**
+- `openaiCompatible({...})(modelName)` — model is the **argument of the returned selector**.
+- `openaiCompatibleText(modelName, config)` — model is the **first argument**.
+- `openaiChatCompletions(model, config?)` / `createOpenaiChatCompletions(model, apiKey, config?)` —
+  model is the **first argument**.
+
+**Reasoning capability + "optimistic defaults" for unknown models:**
+- For `openaiCompatible`/`openaiCompatibleText`, a **bare-string** model gets `DefaultCompatInput =
+  readonly ['text','image']` and no reasoning capability (`compatible/types.d.ts` L12, L22-26).
+- To declare capabilities for a model the library does not know, pass an `ExtendedModelDef` produced
+  by `createModel()` (from `@tanstack/ai`, `extend-adapter.d.ts` L72-73):
+  ```ts
+  import { createModel } from '@tanstack/ai'
+  import { openaiCompatible } from '@tanstack/ai-openai/compatible'
+
+  const model = createModel('my-reasoner', {
+    input: ['text'],
+    features: ['reasoning', 'structured_outputs'],  // declared features
+    tools: ['web_search'],
+  })
+  const gw = openaiCompatible({ name:'gw', baseURL:'...', apiKey:'...', models:[model] })
+  ```
+- ⚠️ **Gotcha (confirmed in source):** `features` is a *declaration*; it is **not wired into the
+  compatible adapter's reasoning resolution.** The compatible adapter does **not** override
+  `modelReasoning`, and the base default returns `undefined`
+  (`openai-base/src/adapters/chat-completions-text.ts` L1371-1378). Result: for a
+  `openaiCompatible*` model (known or unknown), `chat({ reasoning })` is **ignored on the request
+  body** — no `reasoning_effort` is sent. Only the concrete `openaiChatCompletions` adapter maps
+  reasoning (it returns `OPENAI_MODEL_REASONING[model]`, `ai-openai/src/adapters/text-chat-completions.ts` L21-24).
+  "Optimistic defaults" apply to **input modalities / tool availability**, not to reasoning.
+  **UNCONFIRMED-by-docs** that any supported route lets an unknown model emit `reasoning_effort`
+  without subclassing the adapter. (See UNCONFIRMED section.)
+
+## B4. HTTP body for `reasoning: "high"` on the Chat-Completions adapter
+
+`openai-base -> src/adapters/chat-completions-text.ts` L1517-1526 (verbatim):
+```ts
+// `chat({ reasoning })`: the model's effort for the level. The SDK type
+// does not list every provider's effort values, so the field goes on
+// with Object.assign.
+const reasoning = resolveReasoning(
+  options.reasoning,
+  this.modelReasoning(options.model),
+)
+if (reasoning?.value) {
+  Object.assign(params, { reasoning_effort: reasoning.value })
+}
+```
+
+- **Exact upstream field name: `reasoning_effort`.** Its value is the provider-specific string from
+  the model's reasoning map for the requested level (e.g. `"high"`), not the level itself.
+  (`text-chat-completions.d.ts` L35: "`chat({ reasoning })` goes out as `reasoning_effort`"; the
+  request type lists `reasoning_effort?: ReasoningEffort | null`, L62.)
+- **When `reasoning` is NOT passed:** `options.reasoning` is `undefined` → `resolveReasoning(...)`
+  returns `undefined` → `reasoning?.value` is falsy → **no `reasoning_effort` field is added at all**
+  (the provider default applies). (`resolveReasoning` doc: "`undefined` when there is nothing to
+  send", `reasoning.d.ts` L96-101.)
+- When `reasoning` IS passed but the model has no reasoning data (unknown model), same as above —
+  **no field**.
+
+## B5. How provider `reasoning_content` reaches the client
+
+`OpenAICompatibleChatAdapter.extractReasoning` (`compatible/adapter.d.ts` L26-28, impl
+`compatible/adapter.js` L26-28) reads, in order:
+```
+delta.reasoning_content  ?? delta.reasoning ?? delta.reasoning_text
+```
+(comment L41-44: `reasoning_content` = DeepSeek/Qwen/GLM/Kimi/most vLLM+SGLang; `reasoning` = smaller
+set of gateways; `reasoning_text` = GitHub Copilot).
+
+The base adapter (`openai-base/.../chat-completions-text.ts` L948-982) turns that text into the
+**AG-UI `REASONING_*` events** — not a `THINKING_*` event:
+```
+REASONING_START
+REASONING_MESSAGE_START  (role: 'reasoning')
+REASONING_MESSAGE_CONTENT (delta)
+… then on close: REASONING_MESSAGE_END, REASONING_END
+(plus a legacy STEP_STARTED / STEP_FINISHED pair around it)
+```
+On the client this becomes a **`part.type: 'thinking'`** `ThinkingPart` (a `THINKING_*` event family
+does **not** exist). So: **provider `reasoning_content` → AG-UI `REASONING_MESSAGE_CONTENT` → client
+`ThinkingPart`**. There is no separate AG-UI `thinking` part type name; the part kind is `'thinking'`.
+---
+
+# C. CLIENT — `@tanstack/ai-client` 0.39.3 and `@tanstack/ai-react` 0.30.4
+
+`@tanstack/ai-client` `exports`: `.`, `./devtools`, `./byok`, `./ui`.
+`@tanstack/ai-react` `exports`: `.`, `./mcp-apps`, `./ui`, `./byok`.
+
+## C1. `fetchServerSentEvents(url, optionsOrHeadersFn)`
+
+Source `dist/esm/connection-adapters.d.ts` L324:
+
+```ts
+export declare function fetchServerSentEvents(
+  url: string | (() => string),
+  options?: FetchConnectionOptions | (() => FetchConnectionOptions | Promise<FetchConnectionOptions>),
+): ResumableConnectConnectionAdapter;
+
+export interface FetchConnectionOptions {
+  headers?: Record<string, string> | Headers;
+  credentials?: RequestCredentials;
+  signal?: AbortSignal;
+  body?: Record<string, any>;
+  fetchClient?: typeof globalThis.fetch;
+  reconnect?: ReconnectOptions;   // { maxAttempts?: number (default 5); delayMs?: number (default 250) }
+}
+```
+
+- The second argument is **options-or-a-function**. `options.headers` is itself
+  `Record<string,string> | Headers` — **not a per-request function**. The **whole options object**
+  may be a function (sync or async) evaluated **per connect** (`connection-adapters.js` L651-656:
+  `typeof options === "function" ? await options() : options`). So the "headers function" pattern is:
+  pass a function returning `{ headers: ... }`.
+
+```ts
+import { fetchServerSentEvents } from '@tanstack/ai-client'
+
+// static
+const c1 = fetchServerSentEvents('/api/ai-chat')
+
+// dynamic URL
+const c2 = fetchServerSentEvents(() => `/api/ai-chat?user=${userId}`)
+
+// headers re-evaluated per request (whole options fn)
+const c3 = fetchServerSentEvents('/api/ai-chat', () => ({
+  headers: { Authorization: `Bearer ${getToken()}` },
+}))
+
+// read a custom response header via a wrapped fetchClient
+const c4 = fetchServerSentEvents('/api/ai-chat', {
+  fetchClient: async (input, init) => {
+    const res = await fetch(input, init)
+    const kind = res.headers.get('X-AI-Chat-Kind') // <-- custom response header
+    if (kind) chatKindStore.set(kind)
+    return res
+  },
+})
+```
+
+Exported siblings: `fetchHttpStream` (NDJSON), `fetchJson` (`?pollIntervalMs`), `xhrServerSentEvents`,
+`xhrHttpStream`, `stream`, `rpcStream`, `webSocket`, plus error classes `StreamTruncatedError`,
+`DurableStreamIncompleteError`, `StreamReconnectLimitError`.
+
+## C2. `useChat(connection, options)`
+
+The React hook is `useChat(options)` — a **single options bag**; the connection is one field of it
+(`connection` or `fetcher`, XOR-enforced by `ChatTransport`). Source `ai-react/src/types.d.ts`,
+`dist/esm/use-chat.d.ts` L4.
+
+```ts
+import { useChat } from '@tanstack/ai-react'
+const chat = useChat({ connection: fetchServerSentEvents('/api/ai-chat') })
+```
+
+### Option bag (`UseChatOptions` = `ChatClientOptions` minus React-managed callbacks, plus hook extras)
+
+Omitted from `ChatClientOptions` because React state owns them: `onMessagesChange`,
+`onLoadingChange`, `onErrorChange`, `onStatusChange`, `onSubscriptionChange`,
+`onConnectionStatusChange`, `onSessionGeneratingChange`, `onHydratingChange`, `onQueueChange`,
+`onResumeStateChange`, `onRunIdChange`, `context`, `devtools`, `subagents`.
+
+Accepted (from `ChatClientBaseOptions`, `ai-client/src/types.d.ts` L640-822) — exact names:
+
+- transport: `connection?` **or** `fetcher?`
+- `initialMessages?`, `initialResumeSnapshot?`
+- `forwardedProps?: Record<string, any>` — per-session JSON → AG-UI `RunAgentInput.forwardedProps`.
+- `body?: Record<string, any>` — **deprecated** alias; merged into `forwardedProps` and mirrored
+  under legacy `data`. Prefer `forwardedProps`.
+- `byok?`, `byokProvider?`, `tools?`, `interrupts?`
+- `queue?: QueueOption`
+- `onResponse?: (response?: Response) => void | Promise<void>`
+- `onChunk?: (chunk: StreamChunk) => void`
+- `onFinish?: (message: UIMessage<TTools>) => void`
+- `onError?: (error: Error) => void`
+- `onCustomEvent?`, `onQueueChange?`, `onResumeStateChange?`, `onRunIdChange?`, `onInterruptStateChange?`
+- `streamProcessor?: { chunkStrategy?: ChunkStrategy }`
+- persistence pairing (`ChatPersistenceOptions`): `persistence?: boolean | ChatClientPersistence` and
+  `threadId?: string` — **`persistence: true` OR an adapter REQUIRES `threadId`; otherwise `threadId` optional.**
+  `history?: { pageSize: number }` only with `persistence: true`.
+- hook-only extras: `live?: boolean`, `outputSchema?: TSchema`, `devtools?`, `subagents?`.
+
+### `queue`: `QueueConfig` (`ai-client/src/types.d.ts` L283-305)
+
+```ts
+export interface QueueConfig {
+  whenBusy?: WhenBusy;                  // default 'queue'
+  drain?: 'fifo' | 'batch';             // default 'fifo'
+  maxSize?: number;                     // unlimited when omitted; 0 = never queue
+  onOverflow?: 'reject' | 'drop-oldest';// default 'reject' (silent discard)
+}
+```
+
+**`whenBusy` allowed values** (`WhenBusy`, L262): **`'queue' | 'drop' | 'interrupt'`**.
+`QueueOption` = `WhenBusy | QueueConfig | QueueStrategy`. Default whole config:
+`{ whenBusy: 'queue', drain: 'fifo' }` (`chat-client.d.ts` `NormalizedQueueConfig`, and the
+`queue` option JSDoc).
+
+### Return (`UseChatReturn`, `ai-react/src/types.d.ts`)
+
+```ts
+{
+  messages: Array<UIMessage<TTools, TData, TSubagents>>;
+  subagents: Array<SubagentHandles<TSubagents>>;
+  sendMessage: (content: string | MultimodalContent, options?: SendMessageOptions) => Promise<void>;
+  queue: Array<QueuedMessage>;
+  cancelQueued: (id: string) => void;
+  append: (message: ModelMessage | UIMessage<...>) => Promise<void>;
+  addToolResult: (result: {...}) => Promise<void>;
+  addToolApprovalResponse: (response: { id: string; approved: boolean }) => Promise<void>;
+  runId: string | null;
+  interrupts / pendingInterrupts / interruptErrors / resuming;
+  resolveInterrupts; cancelInterrupts; retryInterrupts; resumeInterruptsUnsafe; resumeInterrupts;
+  reload: () => Promise<void>;
+  stop: () => void;
+  isLoading: boolean;
+  hasOlderMessages: boolean; loadOlderMessages: () => Promise<void>;
+  error: Error | undefined;
+  status: ChatClientState;              // 'ready' | 'submitted' | 'streaming' | 'error'
+  isSubscribed: boolean;
+  connectionStatus: ConnectionStatus;   // 'disconnected' | 'connecting' | 'connected' | 'error'
+  sessionGenerating: boolean;
+  isHydrating: boolean;
+  setMessages: (messages: Array<UIMessage<TTools, TData>>) => void;
+  clear: () => void;
+  // when outputSchema supplied:
+  partial: DeepPartial<InferSchemaType<TSchema>>;
+  final: InferSchemaType<TSchema> | null;
+}
+```
+
+`SendMessageOptions` (`ai-client/src/types.d.ts` L325-338): `{ whenBusy?: WhenBusy; body?: Record<string, any> }`.
+
+`QueuedMessage` (L275-279): `{ id: string; content: string | MultimodalContent; createdAt: number }`
+(rendered separately from `messages`; cancellable via `cancelQueued(id)` until it drains).
+
+## C3. `UIMessage` and `parts` model (exact field names)
+
+Two near-identical declarations exist. `@tanstack/ai-react` re-exports the **`@tanstack/ai-client`** one
+(`use-chat` layer uses `UIMessage` from `@tanstack/ai-client` → `types.d.ts` L506-519). The
+`@tanstack/ai` core copy (`types.d.ts` L606-618) is structurally compatible.
+
+**`@tanstack/ai-client` `UIMessage` (the one `useChat` returns):**
+```ts
+export interface UIMessage<
+  TTools extends ReadonlyArray<{ name: string }> = any,
+  TData = unknown,
+  TSubagents extends ReadonlyArray<SubagentClientAgent> | undefined = undefined,
+> {
+  id: string;
+  role: 'system' | 'user' | 'assistant' | 'activity';
+  name?: string;
+  parts: Array<MessagePart<TTools, TData, TSubagents>>;
+  createdAt?: Date;
+  metadata?: Record<string, any>;
+}
+```
+
+**Parts** (`ai-client/src/types.d.ts` L340-445) — verbatim field names:
+
+```ts
+// text
+{ type: 'text'; content: string }
+
+// thinking  (NOTE: field is `content`, not `text`; client type has no `signature`)
+{ type: 'thinking'; content: string }
+
+// tool-call  (discriminant is `name`)
+{
+  type: 'tool-call';
+  id: string;
+  name: string;
+  arguments: string;      // raw JSON string (may be incomplete while streaming)
+  input?: any;            // parsed input, present once state is 'input-complete'+
+  state: ToolCallState;   // 'awaiting-input' | 'input-streaming' | 'input-complete'
+                          // | 'approval-requested' | 'approval-responded' | 'complete' | 'error'
+  approval?: { id: string; needsApproval: boolean; approved?: boolean };
+  output?: any;
+}
+
+// tool-result
+{
+  type: 'tool-result';
+  id?: string;
+  name?: string;
+  toolCallId: string;
+  content: string | Array<ContentPart>;
+  state: ToolResultState; // 'streaming' | 'complete' | 'error'
+  outcome?: 'cancelled' | 'denied';
+  error?: string;
+  metadata?: Record<string, unknown>;
+  createdAt?: Date;
+}
+```
+
+Plus: `ImagePart`/`AudioPart`/`VideoPart`/`DocumentPart` (`type` = `'image'|'audio'|'video'|'document'`,
+carry `source`), `ActivityPart` (`type:'activity'`), `StructuredOutputPart` (`type:'structured-output'`
+with `status`/`raw`/`partial`/`data`/`reasoning`/`errorMessage`), `UIResourcePart` (`type:'ui-resource'`),
+`SubagentPart` (`type:'subagent'`).
+
+> The task's guessed shape `parts[].type/.text/.name/.input/.output/.state` is **wrong for text**: the
+> text field is **`.content`**. `.name/.input/.output/.state` are correct for `tool-call`. There is no
+> `reasoning` part type — it is **`thinking`**.
+
+The **core** `@tanstack/ai` `TextPart`/`ThinkingPart` are richer (e.g. `ThinkingPart.signature`,
+`ToolCallPart.state` includes more states, `ToolResultPart.outcome`) — see `ai/src/types.d.ts`
+L340-405. On the client the runtime populates the client subset.
+
+## C4. `ChatClient` (headless) vs `useChat`
+
+`import { ChatClient } from '@tanstack/ai-client'` (also re-exported by `@tanstack/ai-react`).
+Source `dist/esm/chat-client.d.ts`.
+
+```ts
+constructor(options: ChatClientOptions<TTools, TContext, TInterrupts>)
+attach(): void                                   // start tailing an in-flight run
+detach(): void                                   // stop tailing, keep state
+sendMessage(content: string | MultimodalContent, body?: Record<string, any>, sendOptions?: SendMessageOptions): Promise<void>
+append(message: UIMessage | ModelMessage): Promise<void>
+stop(): void
+reload(): Promise<void>
+clear(): void
+addToolResult(result: ClientToolResult): Promise<void>
+addToolApprovalResponse(response: { id: string; approved: boolean }): Promise<void>
+getMessages(): Array<UIMessage<TTools>>
+setMessagesManually(messages: Array<UIMessage<TTools>>): void
+getQueue(): Array<QueuedMessage>
+cancelQueued(id: string): void
+getIsLoading(): boolean
+getStatus(): ChatClientState
+getConnectionStatus(): ConnectionStatus
+getSessionGenerating(): boolean
+getIsHydrating(): boolean
+getError(): Error | undefined
+getCurrentRunId(): string | null
+getResumeState(): ChatResumeState | null
+subscribe(options?: { restart?: boolean }): void
+unsubscribe(): void
+updateOptions(options: ChatClientUpdateOptionsWithoutContext<TTools>): void
+dispose(): void
+```
+
+**Subscriptions** are `on*` **constructor options**, not event-emitter `.on()` methods:
+`onChunk`, `onFinish`, `onError`, `onResponse`, `onMessagesChange`, `onLoadingChange`,
+`onErrorChange`, `onStatusChange`, `onSubscriptionChange`, `onConnectionStatusChange`,
+`onSessionGeneratingChange`, `onHydratingChange`, `onQueueChange`, `onResumeStateChange`,
+`onRunIdChange`, `onInterruptStateChange`, `onCustomEvent`. They can be replaced later via
+`updateOptions({ onChunk, onFinish, ... })`.
+
+**Difference from `useChat`:** `ChatClient` is the framework-agnostic engine; `useChat` wraps it and
+mirrors its state into React state (`messages`, `isLoading`, `error`, `status`), exposing
+`setMessages` and camelCase accessors (`isLoading`, `status`, `error`) instead of the getter methods,
+and it omits the `on*Change` callbacks (React owns them). `useChat` also exposes `stop`/`cancelQueued`
+delegating to the client. Both can do `outputSchema` typing; `ChatClient` does not expose `partial`/`final`.
+
+## C5. Outgoing request body shape
+
+Built by `buildRunAgentInputBody` (`ai-client/connection-adapters.js` L632-648, verbatim):
+
+```js
+return {
+  threadId: runContext?.threadId ?? generateRunId("thread"),
+  runId:    runContext?.runId    ?? generateRunId("run"),
+  ...(runContext?.parentRunId !== void 0 && { parentRunId: runContext.parentRunId }),
+  ...(runContext?.resume      !== void 0 && { resume: runContext.resume }),
+  state: {},
+  messages: wireMessages,                       // uiMessagesToWire(messages)
+  tools: runContext?.clientTools ?? [],
+  context: [],
+  forwardedProps,                               // { ...options.body, ...runContext.forwardedProps, ...data }
+  data: { ...forwardedProps },                  // legacy mirror
+};
+```
+
+So **on the wire it is an AG-UI `RunAgentInput`, not `{ messages, threadId, runId }`** and **`messages`
+is the serialized wire form (`uiMessagesToWire`), not raw `UIMessage[]`**. The `ChatFetcher` path
+(`fetcher` option) instead passes `ChatFetcherInput = { messages: Array<UIMessage>, data?, threadId, runId, parentRunId?, resume? }`.
+
+**Can the client set `threadId`/`runId`?**
+- **`threadId` — YES.** Set via `threadId` option (required when persistence is on). `ChatClient`
+  stores `options.threadId` and falls back to a minted `thread-...` (`ensureThreadId`).
+- **`runId` — the client always mints it** per send: `const runId = `run-${Date.now()}-${Math.random()...}``
+  (`chat-client.js` L1462-1463). There is no option to set it; `getCurrentRunId()`/`onRunIdChange`
+  observe it. The **server** also accepts an explicit `runId` on `chat({ runId })` / from the parsed
+  body; the client's minted id is what the server sees in `chatParamsFromRequestBody(...).runId`.
+
+## C6. Observing RESPONSE HEADERS
+
+There are two mechanisms; only one works for the SSE stream path.
+
+1. **`fetchClient` (works — recommended).** `FetchConnectionOptions.fetchClient?: typeof globalThis.fetch`
+   replaces the fetch used for the SSE request (`connection-adapters.js` L664, `fetchEventSource`
+   L421-435 calls `fetchClient(url, {...})` and consumes the returned `Response`). Wrap it and read
+   `response.headers` before returning:
+   ```ts
+   fetchServerSentEvents('/api/ai-chat', {
+     fetchClient: async (input, init) => {
+       const res = await fetch(input, init)
+       const kind = res.headers.get('X-AI-Chat-Kind')
+       // ...observe `kind`...
+       return res
+     },
+   })
+   ```
+   (If you need to read a header on the *connect* request only, this is the place. XHR adapters
+   instead have `xhrFactory`.)
+
+2. **`onResponse` callback (does NOT receive the response in the connection path — a gotcha).**
+   `onResponse?: (response?: Response) => void` exists on `ChatClientOptions`, **but** the connection
+   path invokes it with **no argument**: `await this.callbacksRef.current.onResponse()`
+   (`chat-client.js` L1480). So `response` is `undefined` there; you cannot read headers from it. It is
+   populated only by the `ChatFetcher`/`fetcher` path.
+
+## C7. Per-message error kind + HTTP non-2xx surfacing
+
+- **HTTP non-2xx:** the fetch SSE path calls `assertResponseOk(response)`
+  (`connection-adapters.js` L307-313): if `!response.ok`, a **401 whose JSON body matches
+  `isByokMissingBody`** throws a `ByokMissingError`; otherwise it throws a **plain `Error`** with the
+  exact message `HTTP error! status: ${status} ${statusText}`. XHR path throws
+  `XHR error! status: ${status} ${statusText}` (`errorFromXhrStatus`, L324). `fetchJson` throws its own
+  messages for a non-JSON or wrongly-shaped body (L812-855).
+- **How it surfaces:** the thrown `Error` propagates through the connection → `ChatClient` catches it
+  and calls `setError(error)` + `onError(error)`; `useChat` mirrors it into the `error` field
+  (`error: Error | undefined`) and `status: 'error'`.
+- **Per-message error object with a distinguishable `kind`?** **NO.** `UIMessage` has no `error`
+  field and there are no typed error variants. Errors are a single `Error` (occasionally
+  `ByokMissingError`) at the client level via `error` / `onError`. A `RUN_ERROR` chunk *in-stream*
+  carries `message` + optional `code` (e.g. `'incomplete-stream'`), and `runErrorEventToError(chunk)`
+  (`@tanstack/ai`) turns it into an `Error` — that is the closest thing to a distinguishable kind, but
+  it is not attached to a specific message. Tool-level failures live on the part:
+  `ToolCallPart.state === 'error'` / `ToolResultPart.state === 'error'` (+ `outcome`, `error`).
+---
+
+# UNCONFIRMED / caveats (never guess silently)
+
+1. **"v1 line" does not exist.** Latest published are 0.x (`@tanstack/ai@0.69.0`). All references
+   above are for these exact versions.
+2. **`reasoning_effort` for a custom/unknown model via `openaiCompatible*`** — no code path found
+   that emits it. `features: ['reasoning']` on a `createModel(...)` def is a *declaration* and is not
+   read by the Chat-Completions base's `modelReasoning` (default returns `undefined`). Whether the
+   library intends an override (e.g. a future `extendAdapter` mapping) is **UNCONFIRMED**; as shipped,
+   use `openaiChatCompletions`/`createOpenaiChatCompletions` with a known `OPENAI_CHAT_MODELS` entry,
+   or subclass `OpenAICompatibleChatAdapter` and override `modelReasoning`, to get `reasoning_effort`.
+3. **Koa conversion** of the returned Web `Response` (`Readable.fromWeb`, header copy) is *not* a
+   library feature; the package ships no Koa/Express adapter. The conversion recipe is inferred, not
+   taken from docs. Verify against your Koa version.
+4. **`onResponse` argument** — I confirmed the connection path calls it with **no argument**
+   (`chat-client.js` L1480). I did **not** find any path that passes a real `Response`; treat
+   "`onResponse` receives the response" as **UNCONFIRMED** and prefer `fetchClient` to read headers.
+5. **"withhold terminal until DB commit" via `StreamProcessor`** — no built-in hook. The
+   middleware `onFinish` route is documented to do exactly the required ordering (A6 quote). The
+   async-generator wrapper shown in A7 is a suggestion, not a library API.
+6. **GitHub permalinks** point at `TanStack/ai@85c2956c68f3226ef409b3a4e54d5be82198931e` (`main` HEAD
+   at time of writing). The **authoritative, exact** source for each signature is the published npm
+   tarball at the versions in the table above; `main` may have drifted.
+7. **`toServerSentEventsResponse` status** — it returns Web `Response` and passes `ResponseInit`
+   through, so it is 200 unless the caller sets `init.status`. No library code forces a status.
+   Header exact match: `text/event-stream` (+ `no-cache`, `keep-alive`).
+
+---
+
+# Verification checklist (task A/B/C)
+
+- [x] A1 `chat()` options + return type — from `activities/chat/index.d.ts`, `types.d.ts` `ChatStream`.
+- [x] A2 `toServerSentEventsResponse` signature, `Response`, `.body` Web stream, `text/event-stream` —
+      from `stream-to-response.d.ts` L127-151, `stream-to-response.js` L600-625.
+- [x] A3 `chatParamsFromRequestBody(body: unknown)` (plain object) vs `chatParamsFromRequest(req: Request)`
+      (throws 400 `Response`) — from `utilities/chat-params.d.ts`. Koa uses the former.
+- [x] A4 `toolDefinition` builder, `.server(fn)`, `inputSchema` (Standard Schema / JSON Schema, not
+      zod-only), result flow — `tools/tool-definition.d.ts`, `types.d.ts` L731-854.
+- [x] A5 `toolCallBudget` **absent**; `maxIterations`/`untilFinishReason`/`combineStrategies`
+      semantics; `chat()` default `combineStrategies([maxIterations(5), untilFinishReason(['length'])])`.
+- [x] A6 Middleware hook names/signatures + **onFinish-before-stream-close quote** from
+      `middleware/compose.ts` L656-660; `defer` awaited in `finally` (`index.ts` L1659-1661).
+- [x] A7 `StreamProcessor` full API — `stream/processor.d.ts`.
+- [x] A8 **Complete** `EventType` literal list (no `THINKING_*`); SSE = `data:` (+ optional `id:`),
+      no `event:`, no `[DONE]` — `@ag-ui/core` enum, `stream-to-response.js` L300-311.
+- [x] A9 `incomplete-stream` exact value + condition — `openai-base/src/adapters/chat-completions-text.ts` L1287-1301.
+- [x] B1 `openaiText` (Responses) vs `openaiChatCompletions` — `ai-openai/src/adapters/*`.
+- [x] B2 Exact subpath `@tanstack/ai-openai/compatible` for `openaiCompatible` / `openaiCompatibleText`;
+      `createOpenaiChatCompletions` is root. Config incl. `baseURL`, `apiKey`, `defaultHeaders`, `fetch`, `models`, `api`.
+- [x] B3 Model supply per factory; `createModel` for capability decl; **reasoning not wired for
+      compatible models** (gotcha).
+- [x] B4 `reasoning: "high"` → `reasoning_effort`; absent when `reasoning` not passed — `openai-base/.../chat-completions-text.ts` L1517-1526.
+- [x] B5 `reasoning_content`/`reasoning`/`reasoning_text` → `REASONING_*` events → client `thinking` part — `compatible/adapter.d.ts` L26-28, base L948-982.
+- [x] C1 `fetchServerSentEvents(url, optionsOrFn)` incl. `headers`, `fetchClient`, per-request fn — `connection-adapters.d.ts` L324, `.js` L651-688.
+- [x] C2 `useChat(options)` option bag + `QueueConfig`/`whenBusy` values + return — `ai-react/src/types.d.ts`, `ai-client/src/types.d.ts`.
+- [x] C3 `UIMessage` + every part kind exact fields (`text` part is `.content`, thinking part is
+      `type:'thinking'`) — `ai-client/src/types.d.ts` L340-519.
+- [x] C4 `ChatClient` headless vs `useChat` (callbacks vs React state) — `chat-client.d.ts`.
+- [x] C5 Outgoing body = AG-UI `RunAgentInput`; client sets `threadId` (optional), always mints `runId` — `connection-adapters.js` `buildRunAgentInputBody`, `chat-client.js` L1462.
+- [x] C6 Response-header observation via `fetchClient`; `onResponse` gets no arg (gotcha).
+- [x] C7 non-2xx → `Error('HTTP error! status: ...')` / `ByokMissingError`; surfaced via `error`/`status`; **no per-message error kind**.
+
+---
+
+# Key source paths (for re-verification)
+
+Published tarball paths (exact for the version in the table):
+- `@tanstack/ai/dist/esm/activities/chat/index.d.ts`, `.../tools/tool-definition.d.ts`,
+  `.../stream/processor.d.ts`, `.../middleware/types.d.ts`, `.../agent-loop-strategies.d.ts`,
+  `types.d.ts`, `stream-to-response.d.ts`, `utilities/chat-params.d.ts`, `utilities/errors.d.ts`, `reasoning.d.ts`
+- `@tanstack/ai/src/activities/chat/middleware/compose.ts` (onFinish ordering quote L656-660)
+- `@tanstack/ai/src/activities/chat/index.ts` (run() L1425; finally L1646-1662; terminal hook L1382-1423)
+- `@tanstack/ai-openai/dist/esm/{index,compatible/index,compatible/adapter,compatible/types,adapters/text,adapters/text-chat-completions}.d.ts`
+- `@tanstack/openai-base/src/adapters/chat-completions-text.ts` (reasoning L1517-1526; incomplete-stream L1287-1301; extractReasoning L948-982)
+- `@tanstack/ai-client/dist/esm/{index,types,connection-adapters,chat-client}.d.ts` and `connection-adapters.js`, `chat-client.js`
+- `@tanstack/ai-react/dist/esm/{index,use-chat,types}.d.ts`
+- `@ag-ui/core/dist/version-*.d.ts` (EventType enum L5-37)

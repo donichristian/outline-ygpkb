@@ -1,0 +1,27 @@
+﻿COMMAND: yarn test app/utils/aiChat.test.ts --project app -t "draft helpers"
+[33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  7 passed | 13 skipped (20)
+   Start at  05:39:02
+   Duration  3.07s (transform 273ms, setup 1.80s, import 183ms, tests 9ms, environment 839ms)
+
+
+COMMAND: yarn test app/components/AIChat/AIChatHistory.test.tsx --project app -t "draft"
+[33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  3 passed | 10 skipped (13)
+   Start at  05:39:07
+   Duration  5.78s (transform 1.55s, setup 1.71s, import 2.39s, tests 632ms, environment 820ms)
+

@@ -1,0 +1,58 @@
+Task 5 — persist the assistant turn and release the lock on every terminal path
+Evidence: clean terminal finish -> status=completed, one assistant row, shared runId, lock absent.
+
+The live gateway at 127.0.0.1:8642 is DOWN. This run uses the stubbed-fetch channel
+(vitest `vi.stubGlobal("fetch", ...)` in aiStreaming.test.ts); no curl transcript is
+claimed. PostgreSQL and Redis are real (test database and real Redis at 127.0.0.1).
+
+The JSON line below was printed by temporary instrumentation used only to capture the
+observed values for this evidence file; that instrumentation was removed after the run.
+The same facts are asserted permanently in `server/routes/api/ai/aiStreaming.test.ts`.
+
+WORKDIR: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+
+COMMAND (PowerShell 5.1):
+chcp 65001 > $null; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $env:VITE_CONFIG_NATIVE_IGNORE_WARNING="true"; yarn test server/routes/api/ai/aiStreaming.test.ts -t "writes the question and the answer in seq order, sharing one runId" --reporter=verbose
+
+OUTPUT (unedited):
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+stdout | server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes the question and the answer in seq order, sharing one runId
+{"assistantRows":1,"userRunId":"b195f1a4-1d30-46aa-9c16-03cc3830864c","assistantRunId":"b195f1a4-1d30-46aa-9c16-03cc3830864c","assistantStatus":"completed","lock":null}
+
+ ✓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes the question and the answer in seq order, sharing one runId 1633ms
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > sends the newest client turn upstream exactly once
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > authors a terminal complete frame derived from finish_reason
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the question and the refusal for a refused prompt
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as aborted when the client disconnects mid-stream
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the user turn and no assistant row when the client aborts before the first token
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as errored when the upstream fails mid-flight
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream that ends with completed
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream that ends with truncated
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes no assistant row and releases the lock when a clean run has no text
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > terminates the stream on a malformed upstream frame
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes nothing without a sessionId
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes nothing and never contacts the provider for another user's session
+ ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes the turn inside a transaction
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 13 skipped (14)
+   Start at  02:10:04
+   Duration  30.51s (transform 15.89s, setup 24.32s, import 4.10s, tests 1.64s, environment 0ms)
+
+node.exe : Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror
+-codemark/dist/esm/index.js" points to missing source files
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Sourcemap for "...ng source files:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/plugin.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/utils.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/inputRules.js" points to missing source files
+Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+ist/esm/actions.js" points to missing source files

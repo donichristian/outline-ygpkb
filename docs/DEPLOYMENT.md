@@ -1,9 +1,13 @@
 # Outline YGPKB: Production Deployment Guide
 
 Step-by-step runbook for deploying this Outline fork (`outline-ygpkb`) to a
-Linux server or any Docker host. For local Windows development see
-`docs/TECHNICAL-GUIDE.md`; for the service model see `docs/SERVICES.md` and
-`server/AGENTS.md`.
+Linux server (e.g. DigitalOcean Droplet) or any Docker host. For local Windows
+development see `docs/TECHNICAL-GUIDE.md`; for the service model see
+`docs/SERVICES.md` and `server/AGENTS.md`.
+
+Aligns with the [official Outline self-hosting docs](https://docs.getoutline.com/s/hosting/)
+(Docker recommended). This is the **Outline Knowledge Base**, not the Outline
+VPN Server.
 
 ## Overview
 
@@ -24,11 +28,7 @@ of these services:
 | `admin` | Bull Board at `/admin` | Development only, blocked when `NODE_ENV=production` |
 
 Select services with the `--services=` CLI flag or the `SERVICES` environment
-variable, comma-separated. The flag wins over the variable. Example:
-
-```bash
-node build/server/index.js --services=web,worker
-```
+variable, comma-separated. The flag wins over the variable.
 
 With no flag and no `SERVICES` variable the image runs the default production
 set in a single process: `collaboration,websockets,worker,web` (from
@@ -54,11 +54,10 @@ boots but nobody can sign in.
 | **Docker (recommended)** | Any Docker host, Linux VM, or container platform | Reproducible, matches the shipped `Dockerfile`, healthcheck included |
 | Bare Node on Linux | No Docker available, or you want an uncontainerised systemd service | You own the toolchain, TLS and process supervision |
 
-Docker is recommended. It packages the exact runtime, user, volume and
-healthcheck the fork ships, and it is the only path that works from Windows
-without a POSIX shell. Do not attempt a bare Node production install on Windows:
-`yarn build` (which runs `build:i18n` / `copy:i18n` via `mkdir -p` and `cp`)
-needs a POSIX environment, and Windows is supported for local development only.
+Docker is recommended and matches the [official Docker guide](https://docs.getoutline.com/s/hosting/doc/docker-7pfeLP5a8t).
+Do not attempt a bare Node production install on Windows:
+`yarn build` needs a POSIX environment, and Windows is supported for local
+development only.
 
 ## Prerequisites
 
@@ -68,9 +67,9 @@ needs a POSIX environment, and Windows is supported for local development only.
 | Yarn | 4.18.0 | via `corepack`, pinned in `package.json` |
 | PostgreSQL | 16+ (17+ recommended) | Managed service or your own instance |
 | Redis | 7+ (8+ recommended) | `GETDEL` requires Redis 6.2 or newer |
-| Docker | recent | For Option A; the base image builds `node:26.3.0` |
+| Docker | recent | For Docker deploy; base image builds `node:26.3.0` |
 | Git | any | To clone the fork |
-| Reverse proxy | nginx or Caddy | Provides TLS in front of port 3000 |
+| Reverse proxy | nginx or Caddy | Provides TLS in front of port 3000 (aligns with [SSL guide](https://docs.getoutline.com/s/hosting/doc/ssl-pzk7WO8d1n)) |
 
 Migrations run `CREATE EXTENSION` for `uuid-ossp`, `unaccent`, `pg_trgm` and
 `btree_gin`, so the database role must be allowed to create extensions (a
@@ -78,7 +77,9 @@ superuser, or a role with the equivalent privileges).
 
 ## Option A: Docker (recommended)
 
-Run every command below on the Docker host, in a clone of the fork.
+Run every command below on the Docker host (e.g. a DigitalOcean Droplet running
+Ubuntu 24.04 LTS), in a clone of the fork. Aligns with the
+[official Docker guide](https://docs.getoutline.com/s/hosting/doc/docker-7pfeLP5a8t).
 
 ### 1. Clone the fork
 
@@ -104,12 +105,15 @@ FROM ${BASE_IMAGE} AS base
 The `outlinewiki/outline-base` image published on Docker Hub contains **upstream
 Outline**, not this fork's code. Building the app image against it would ship
 upstream source, not the fork. You must rebuild the base image from the fork
-source locally (or in your own CI), then build the app image against it:
+source locally, then build the app image against it:
 
 ```bash
 docker build -f Dockerfile.base -t outline-base .
 docker build --build-arg BASE_IMAGE=outline-base -t outline-ygpkb .
 ```
+
+Do **not** pull `outlinewiki/outline` directly - it will not contain fork
+changes.
 
 How the two stages work (from `Dockerfile.base` and `Dockerfile`):
 
@@ -130,12 +134,9 @@ The image healthcheck is:
 HEALTHCHECK --interval=1m CMD wget -qO- "http://localhost:${PORT:-3000}/_health" | grep -q "OK" || exit 1
 ```
 
-No upstream CI publishes this fork. The upstream workflow
-`.github/workflows/docker.yml` (triggered on `v*` tags) calls
-`docker-build.yml`, which pushes `outlinewiki/outline` and
-`outlinewiki/outline-base` using the `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`
-secrets. It targets the upstream namespace, so it is **not** the path for a
-fork. Build the two images yourself.
+No upstream CI publishes this fork; build the two images yourself.
+
+No upstream CI publishes this fork; build the two images yourself.
 
 ### 3. Provision PostgreSQL and Redis
 
@@ -255,8 +256,15 @@ is not part of the default set:
 
 ### 7. Put a reverse proxy in front for TLS
 
-Terminate TLS at nginx (or Caddy) and proxy to the container's port 3000. A
-minimal nginx server block:
+Terminate TLS at nginx or Caddy and proxy to the container's port 3000
+([official SSL guide](https://docs.getoutline.com/s/hosting/doc/ssl-pzk7WO8d1n)).
+Caddy can auto-provision Let's Encrypt certificates.
+
+Terminate TLS at nginx or Caddy and proxy to the container's port 3000
+([official SSL guide](https://docs.getoutline.com/s/hosting/doc/ssl-pzk7WO8d1n)).
+Caddy can auto-provision Let's Encrypt certificates.
+
+A minimal nginx server block:
 
 ```nginx
 server {

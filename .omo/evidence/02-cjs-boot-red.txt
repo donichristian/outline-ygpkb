@@ -1,0 +1,79 @@
+# 02-cjs-boot-red.txt — RED: the static-import path in the CommonJS build FAILS
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Node: v22.23.3
+This is the failure genuinely observed when the W0 probe used STATIC imports.
+
+------------------------------------------------------------
+STEP 1 — the temporary probe used static ESM imports (now REMOVED)
+------------------------------------------------------------
+server/routes/api/ai/__cjsProbe.ts (temporary):
+  import { chat, toServerSentEventsResponse, chatParamsFromRequestBody } from "@tanstack/ai";
+  import { openaiCompatible } from "@tanstack/ai-openai/compatible";
+  export function cjsProbe() { return { chat, toServerSentEventsResponse, chatParamsFromRequestBody, openaiCompatible }; }
+
+------------------------------------------------------------
+STEP 2 — `yarn build:server` succeeded; swc turned the static import into require()
+------------------------------------------------------------
+$ yarn build:server
+Clean previous build…
+Compiling…
+Copying static files…
+Done!
+EXITCODE=0
+
+Compiled build/server/routes/api/ai/__cjsProbe.js (verbatim, functional lines):
+  const _ai = require("@tanstack/ai");
+  const _compatible = require("@tanstack/ai-openai/compatible");
+
+------------------------------------------------------------
+STEP 3 — requiring the compiled probe throws
+------------------------------------------------------------
+$ node -e "try { const m = require('./build/server/routes/api/ai/__cjsProbe.js'); console.log('PROBE OK', Object.keys(m)); } catch(e) { console.log('PROBE FAIL', e.code || e.name, '::', String(e.message).split('\n')[0]); }"
+OUTPUT:
+PROBE FAIL ERR_PACKAGE_PATH_NOT_EXPORTED :: No "exports" main defined in D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1\node_modules\@tanstack\ai\package.json
+
+------------------------------------------------------------
+STEP 4 — reproduction without the probe: the package specifier itself
+------------------------------------------------------------
+$ node -e "require('@tanstack/ai')"
+OUTPUT:
+node:internal/modules/cjs/loader:671
+      throw e;
+      ^
+
+Error [ERR_PACKAGE_PATH_NOT_EXPORTED]: No "exports" main defined in
+D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1\node_modules\@tanstack\ai\package.json
+    at exportsNotFound (node:internal/modules/esm/resolve:318:10)
+    at packageExportsResolve (node:internal/modules/esm/resolve:608:13)
+    at resolveExports (node:internal/modules/cjs/loader:664:36)
+    at Function._findPath (node:internal/modules/cjs/loader:731:31)
+    at Function._resolveFilename (node:internal/modules/cjs/loader:1415:27)
+    at defaultResolveImpl (node:internal/modules/cjs/loader:1040:19)
+    at resolveForCJSWithHooks (node:internal/modules/cjs/loader:1045:22)
+    at Function._load (node:internal/modules/cjs/loader:1216:25)
+    at wrapModuleLoad (node:internal/modules/cjs/loader:254:19)
+    at Module.require (node:internal/modules/cjs/loader:1527:12) {
+  code: 'ERR_PACKAGE_PATH_NOT_EXPORTED'
+}
+
+Node.js v22.23.3
+EXITCODE=1
+
+------------------------------------------------------------
+STEP 5 — even a literal dynamic import() is rewritten by swc to require()
+------------------------------------------------------------
+$ node -e "swc.transformSync('export const f = () => import(\"@tanstack/ai\");', {jsc:{parser:{syntax:'typescript'}},module:{type:'commonjs'}})"
+OUTPUT (emitted body):
+  var f = function f() {
+      return Promise.resolve().then(function() {
+          return /*#__PURE__*/ _interop_require_wildcard(require("@tanstack/ai"));
+      });
+  };
+=> A naive `await import("@tanstack/ai")` compiles back to `require("@tanstack/ai")` and fails too.
+   `module.ignoreDynamic:true` keeps the import but changing .swcrc is out of scope (MUST NOT).
+   Workaround used: assemble the import from a string — `new Function("specifier","return import(specifier);")`.
+
+DECISION: Static ESM import (and a plain dynamic import) CANNOT work under the repo's swc
+CommonJS transform. The interop mechanism MUST be a string-assembled dynamic `import()`
+(the kept loaders in server/routes/api/ai/tanstack.ts).

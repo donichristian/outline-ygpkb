@@ -1,0 +1,309 @@
+F3 - REAL MANUAL QA (SCRIPTED) - tanstack-ai-slice2-adoption
+Date: 2026-10-21
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Verifier lane: read-only on product code/tests/docs/plan. The temporary probe
+(server/routes/api/ai/zzF3Evidence.test.ts) was deleted after the run; git
+status --short in the worktree is empty apart from this evidence file.
+
+===============================================================
+0. ENVIRONMENT (recorded BEFORE any probe)
+===============================================================
+
+Listening TCP ports (Get-NetTCPConnection -State Listen):
+
+    LocalAddress LocalPort OwningProcess
+    ::                5432          5848
+    127.0.0.1         6379          6864
+    0.0.0.0           5432          5848
+
+=> PostgreSQL 5432 UP, Redis 6379 UP.
+=> 8642 (Hermes model gateway) NOT listening.
+=> 3050 / 3051 (dev web stack) NOT running; never started, because the gateway
+   is down and no step needed the SPA to advance.
+
+Direct gateway probes (no proxy, no fake):
+
+    PS> $c = New-Object System.Net.Sockets.TcpClient; $c.Connect("127.0.0.1",8642)
+    TCP 8642 ERROR: No connection could be made because the target machine
+    actively refused it 127.0.0.1:8642
+
+    PS> Invoke-WebRequest -Uri "http://127.0.0.1:8642/p/matius/v1/chat/completions" ...
+    HTTP 8642 ERROR: Unable to connect to the remote server
+
+.env.local AI chat settings (secret value not printed):
+
+    AI_CHAT_BASE_URL=http://127.0.0.1:8642/p/matius/v1
+    AI_CHAT_API_KEY=<redacted; present>
+    AI_CHAT_MODEL=matius
+    AI_CHAT_GROUNDING=false
+
+IMPORTANT CONFIG NOTE: .env.local disables the local grounding gate
+(AI_CHAT_GROUNDING=false). On a dev stack loaded with that file the route would
+never emit a refusal; it would forward every prompt to the (dead) gateway. The
+server default in server/env.ts is `environment.AI_CHAT_GROUNDING ?? "true"`, and
+.env.test sets nothing, so the probe enabled the gate explicitly (same code path
+the product ships with default config). This is called out so the PASS below is
+not mistaken for a `.env.local`-as-is run.
+
+Every probe drove the REAL Koa route through server/test/support.ts
+(`getTestServer`), real PostgreSQL database `outline-test`, and real Redis.
+Provider access inside the probe: the adapter module was loaded for real
+(`@tanstack/ai-openai/compatible`), with baseURL/model taken from env at call
+time. Nothing about the HTTP request boundary, auth, zod validation, session
+ownership, persistence, lock, or SSE framing was mocked.
+
+===============================================================
+1. GROUNDED PROMPT -> FULL FRAME SEQUENCE
+===============================================================
+
+Command (workdir = worktree):
+  yarn test server/routes/api/ai/zzF3Evidence.test.ts --reporter=verbose
+
+Setup: user with AI chat enabled, grounding on, a readable document containing
+"payments deployment runbook"/"payments service", a real AIChatSession row, and
+env pointed at the real gateway:
+  AI_CHAT_BASE_URL=http://127.0.0.1:8642/p/matius/v1
+  AI_CHAT_MODEL=matius
+
+Observed (verbatim):
+
+    === F3 STEP 1 STATUS: 200
+    === F3 STEP 1 CONTENT-TYPE: text/event-stream
+    === F3 STEP 1 X-AI-CHAT-KIND: null
+    === F3 STEP 1 FRAMES: [ 'RUN_STARTED', 'RUN_ERROR' ]
+    === F3 STEP 1 BODY START
+    data: {"type":"RUN_STARTED","metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model":"matius"},"model":"matius"}},"runId":"openai-compatible-1792556071880-76ym8w075hh","threadId":"b6e096c6-0316-4d3d-b712-1e02f9af51ca","timestamp":1792556073092}
+
+    data: {"type":"RUN_ERROR","metadata":{"tanstack":{"source":{"provider":"openai-compatible","api":"openai-completions","model":"matius"},"stopReason":"error","model":"matius","threadId":"b6e096c6-0316-4d3d-b712-1e02f9af51ca","runId":"openai-compatible-1792556071880-76ym8w075hh"}},"timestamp":1792556073097,"message":"The AI chat stream failed"}
+
+    === F3 STEP 1 BODY END
+    === F3 STEP 1 ROWS: [{"seq":1,"role":"user","status":"completed","content":"What does the payments deployment runbook cover?"}]
+    === F3 STEP 1 LOCKS: []
+
+The server log recorded the real cause of the sanitized RUN_ERROR:
+
+    { error: { message: 'Connection error.', code: undefined },
+      source: 'openai-compatible.chatStream' }
+    Error: Connection error.
+    AI chat stream failed
+
+DB ASSERTION: only the user turn persisted (seq 1, completed); no assistant row
+was written because the provider stream never started. That is the onError path
+when the first upstream read fails.
+LOCK ASSERTION: `aiChat:inflight:<userId>:*` is empty after the request (the
+error exit released the lock).
+VERDICT: BLOCKED - no model tokens. The gateway refused the connection
+(ECONNREFUSED, quoted above), so a grounded answer and its
+RUN_STARTED/TEXT_MESSAGE_START/TEXT_MESSAGE_CONTENT/TEXT_MESSAGE_END/
+RUN_FINISHED sequence cannot be produced in this environment. Not fabricated.
+
+===============================================================
+2. UNGROUNDABLE PROMPT -> INLINE REFUSAL, PERSISTED
+===============================================================
+
+Same command as step 1 (all four probe tests in one run).
+
+Prompt: "How do I rotate the Kubernetes signing keys?", workspace contains only
+"Unrelated onboarding steps for new starters." Grounding explicitly on.
+
+Observed (verbatim):
+
+    === F3 STEP 2 STATUS: 200
+    === F3 STEP 2 CONTENT-TYPE: text/event-stream
+    === F3 STEP 2 X-AI-CHAT-KIND: refusal
+    === F3 STEP 2 FRAMES: [
+      'RUN_STARTED',
+      'TEXT_MESSAGE_START',
+      'TEXT_MESSAGE_CONTENT',
+      'TEXT_MESSAGE_END',
+      'RUN_FINISHED'
+    ]
+    === F3 STEP 2 BODY START
+    data: {"type":"RUN_STARTED","runId":"005d4f01-9cbe-49f0-8b16-1ebd477313c4","threadId":"e3274faa-4ef1-4527-b448-c89f9e5f5a6b","timestamp":1792556073315}
+
+    data: {"type":"TEXT_MESSAGE_START","messageId":"a0fa74e9-6768-4388-8d79-407622fc8268","role":"assistant","timestamp":1792556073315}
+
+    data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"a0fa74e9-6768-4388-8d79-407622fc8268","delta":"This assistant only answers from this workspace’s knowledge base","timestamp":1792556073315}
+
+    data: {"type":"TEXT_MESSAGE_END","messageId":"a0fa74e9-6768-4388-8d79-407622fc8268","timestamp":1792556073315}
+
+    data: {"type":"RUN_FINISHED","runId":"005d4f01-9cbe-49f0-8b16-1ebd477313c4","threadId":"e3274faa-4ef1-4527-b448-c89f9e5f5a6b","timestamp":1792556073315}
+
+    === F3 STEP 2 BODY END
+    === F3 STEP 2 ROWS: [{"seq":1,"role":"user","status":"completed","content":"How do I rotate the Kubernetes signing keys?"},{"seq":2,"role":"assistant","status":"completed","content":"This assistant only answers from this workspace’s knowledge base"}]
+    === F3 STEP 2 LOCKS BEFORE: []
+    === F3 STEP 2 LOCKS AFTER: []
+
+DB ASSERTIONS: exactly two rows. seq 1 = user, status completed, original
+question. seq 2 = assistant, status completed, refusal text (smart apostrophe
+preserved, identical to the streamed delta). The refusal row exists before the
+frames are read, so reloading history recovers it.
+LOCK ASSERTIONS: no `aiChat:inflight:<userId>:*` key before or after; the
+refusal path explicitly released the lock it took.
+VERDICT: PASS.
+
+===============================================================
+3. SECOND TURN ON THE SAME SESSION -> BUSY
+===============================================================
+
+Same command, then re-run after making the first turn grounded:
+  yarn test server/routes/api/ai/zzF3Evidence.test.ts --reporter=verbose -t "STEP 3"
+
+Method: a readable document grounds the first prompt, so the gate lets it
+through. The installed adapter's upstream HTTP is a deliberately held-open
+Chat Completions SSE stream (stub, clearly not the dead gateway): one content
+chunk is emitted, the stream stays open, the first turn owns the lock, then a
+second POST hits the SAME session. The stub is released only after the second
+response is read, so "busy while streaming" is real concurrency at the route.
+No model tokens are involved in the busy logic itself.
+
+Observed (verbatim):
+
+    === F3 STEP 3 LOCK HELD BY FIRST (runId): 51303908-0dc6-4bab-883a-fa32b8998def
+    === F3 STEP 3 ROWS WHILE FIRST STREAMS: [{"seq":1,"role":"user","status":"completed","content":"What does the payments deployment runbook cover?"}]
+    === F3 STEP 3 SECOND STATUS: 200
+    === F3 STEP 3 SECOND X-AI-CHAT-KIND: busy
+    === F3 STEP 3 SECOND FRAMES: [
+      'RUN_STARTED',
+      'TEXT_MESSAGE_START',
+      'TEXT_MESSAGE_CONTENT',
+      'TEXT_MESSAGE_END',
+      'RUN_FINISHED'
+    ]
+    === F3 STEP 3 SECOND BODY START
+    data: {"type":"RUN_STARTED","runId":"a941caed-0b1d-42a9-8c67-11f45b5b5d3f","threadId":"bd7d6c55-8ab1-4a97-bc69-3f2eac9c4cff","timestamp":1792556174991}
+
+    data: {"type":"TEXT_MESSAGE_START","messageId":"3be6ea6b-4efa-4ab0-8b73-3bb146ee613d","role":"assistant","timestamp":1792556174991}
+
+    data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"3be6ea6b-4efa-4ab0-8b73-3bb146ee613d","delta":"Another answer for this conversation is still being generated","timestamp":1792556174991}
+
+    data: {"type":"TEXT_MESSAGE_END","messageId":"3be6ea6b-4efa-4ab0-8b73-3bb146ee613d","timestamp":1792556174991}
+
+    data: {"type":"RUN_FINISHED","runId":"a941caed-0b1d-42a9-8c67-11f45b5b5d3f","threadId":"bd7d6c55-8ab1-4a97-bc69-3f2eac9c4cff","timestamp":1792556174991}
+
+    === F3 STEP 3 SECOND BODY END
+    === F3 STEP 3 LOCK AFTER SECOND (still first runId): 51303908-0dc6-4bab-883a-fa32b8998def
+    === F3 STEP 3 ROWS AFTER SECOND: [{"seq":1,"role":"user","status":"completed","content":"What does the payments deployment runbook cover?"}]
+
+Then the held stream was released:
+
+    === F3 STEP 3 FIRST STATUS: 200
+    === F3 STEP 3 FIRST FRAMES: [
+      'RUN_STARTED',
+      'TEXT_MESSAGE_START',
+      'TEXT_MESSAGE_CONTENT',
+      'TEXT_MESSAGE_END',
+      'RUN_FINISHED'
+    ]
+    ... TEXT_MESSAGE_CONTENT delta "Partial answer" ...
+    ... RUN_FINISHED ... "finishReason":"stop" ...
+    === F3 STEP 3 ROWS AFTER FIRST SETTLES: [{"seq":1,"role":"user","status":"completed","content":"What does the payments deployment runbook cover?"},{"seq":2,"role":"assistant","status":"completed","content":"Partial answer"}]
+    === F3 STEP 3 LOCKS AFTER FIRST SETTLES: []
+
+DB ASSERTIONS: the busy request wrote NOTHING (still one row while it returned);
+after the first turn settled there are exactly two rows, and the assistant row is
+status completed with the streamed text. The busy turn did not become a third
+row and did not truncate the first turn.
+LOCK ASSERTIONS: the lock value before and after the busy response is the FIRST
+turn's runId (51303908-...), proving the busy response did not steal or release
+another turn's lock. After the first turn finished, the whole user keyspace is
+empty.
+VERDICT: PASS (busy semantics). Caveat: the first turn's upstream was a held
+stub because the real gateway is dead; the busy determination itself is
+provider-independent and used a real lock + real route.
+
+===============================================================
+4. PROMPT THAT TRIGGERS THE ALLOWLISTED TOOL -> TOOL RENDERS
+===============================================================
+
+Not run: the tool can only be emitted by a model turn. Tool selection is the
+provider's job; the route never invents a tool call. With 8642 refusing every
+connection (quoted in section 0), any attempt ends exactly like STEP 1
+(RUN_STARTED + sanitized RUN_ERROR, no TEXT_MESSAGE_CONTENT, no tool parts).
+There is no observed tool render to report.
+VERDICT: BLOCKED - no model tokens (ECONNREFUSED 127.0.0.1:8642).
+
+===============================================================
+5. SEND WHILE STREAMING -> THE QUEUE
+===============================================================
+
+End-to-end step: BLOCKED - a real streaming turn needs model tokens, which the
+dead gateway cannot supply. A live "send while streaming" could not be staged
+against the real provider.
+
+Supporting client-level observation (explicitly NOT a provider run). The queue is
+panel state, not a server feature (see .omo/evidence/17-queue.txt). The existing
+panel test that pins the requested behaviour was executed:
+  yarn test app/components/AIChat/AIChatPanel.test.tsx --reporter=verbose -t "queues a mid-stream send"
+
+Observed (verbatim):
+
+    ✓ |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > queues a mid-stream send and sends it once the turn settles 254ms
+    Test Files  1 passed (1)
+          Tests  1 passed | 34 skipped (35)
+
+What that test asserts (from 17-queue.txt, re-observed green here): a second
+submit during an open stream goes to the panel queue, the composer is cleared,
+the transcript and DB rows are untouched while queued (0 rows, 1 run), and after
+the first turn settles the queued message is sent as a second run (4 rows total).
+VERDICT: BLOCKED (end-to-end). Client-level queue behaviour independently green.
+
+===============================================================
+6. DELETE A SESSION -> ITS DRAFT IS CLEARED
+===============================================================
+
+Server half, real route + DB (same probe command as step 2):
+A session with one persisted message was deleted through
+POST /api/ai.sessions.delete.
+
+Observed (verbatim):
+
+    === F3 STEP 6 STATUS: 200
+    === F3 STEP 6 BODY: {"success":true,"status":200,"ok":true}
+    === F3 STEP 6 SESSION ROW: null
+    === F3 STEP 6 MESSAGE ROWS: []
+    === F3 STEP 6 MESSAGES.LIST STATUS AFTER DELETE: 404
+    === F3 STEP 6 LOCKS: []
+
+DB ASSERTIONS: the session row is gone (sessions are permanently deleted, not
+soft deleted), and its messages were removed by the sessionId foreign key. A
+subsequent ai.messages.list for that id is 404, so no dangling transcript can be
+read. No lock key remains for the user.
+Client half (the draft lives in localStorage, key `aiChat.draft.<sessionId>`),
+executed against the real component:
+  yarn test app/components/AIChat/AIChatHistory.test.tsx --reporter=verbose -t "draft"
+
+Observed (verbatim):
+
+    ✓ |app| app/components/AIChat/AIChatHistory.test.tsx > AIChatPanel — history, status markers, disclosure > garbage-collects the deleted session's draft 661ms
+    ✓ |app| app/components/AIChat/AIChatHistory.test.tsx > AIChatPanel — history, status markers, disclosure > deleting the active session starts a new one and clears its draft 304ms
+    ✓ |app| app/components/AIChat/AIChatHistory.test.tsx > AIChatPanel — history, status markers, disclosure > keeps a draft typed during a stopped turn and re-reads it on the next mount 301ms
+    Test Files  1 passed (1)
+          Tests  3 passed | 10 skipped (13)
+
+The first test writes `aiChat.draft.session-b`, confirms it exists, deletes the
+session through the UI confirmation, and asserts the literal localStorage key is
+null afterwards. The second does the same for the active session and confirms
+the composer falls back to the pending draft. Deletion only clears the draft
+after the RPC succeeds (AIChatHistory.tsx:85-89).
+VERDICT: PASS.
+
+===============================================================
+SUMMARY
+===============================================================
+
+Step 1 grounded frame sequence ........ BLOCKED (gateway ECONNREFUSED)
+Step 2 ungroundable -> refusal ........ PASS
+Step 3 second turn -> busy ............ PASS (held stub upstream; real lock/route)
+Step 4 allowlisted tool renders ....... BLOCKED (gateway ECONNREFUSED)
+Step 5 send while streaming -> queue .. BLOCKED (end-to-end); client-level green
+Step 6 delete session -> draft cleared  PASS
+
+Blocked steps all have the same root cause: nothing is listening on
+127.0.0.1:8642. The failure is recorded as observed, not worked around, and no
+run was relabelled as a gateway run.
+
+F3 VERDICT: PARTIAL - steps 2, 3 and 6 pass; steps 1, 4 and 5 are blocked by the
+dead model gateway at 127.0.0.1:8642 (ECONNREFUSED), which prevents any real
+model token, grounded answer, or model-selected tool call. The blocked steps must
+be re-run once the gateway is up.

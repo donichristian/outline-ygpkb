@@ -1,0 +1,121 @@
+# 07 — stateless (messages-only) requests on the TanStack path
+
+Environment note: the live gateway at 127.0.0.1:8642 is DOWN. Nothing below is
+a curl transcript against a live provider. The channel is the wire-level vitest
+test with `fetch` stubbed by `streamingResponse(...)`, which exercises the real
+route, the real TanStack transport, and the real SSE frames.
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+HEAD: bf2ec14d7 + working tree (todo 7)
+
+## Source proof (line references)
+
+1. No ownership lookup without a sessionId — server/routes/api/ai/ai.ts:291-297
+     const ownedSession = sessionId
+       ? await AIChatSession.findOwned(ctx, sessionId, user)
+       : null;
+     if (sessionId && !ownedSession) { throw NotFoundError(); }
+2. No in-flight lock without an owned session — ai.ts:310-317
+     const inFlightLock = ownedSession ? { key: `aiChat:inflight:...`, ... } : undefined;
+     if (inFlightLock) { /* Redis SET ... NX */ }
+   A stateless request never reaches the Redis SET.
+3. appendTurn is a no-op without a session — server/routes/api/ai/middleware.ts:88-90
+     if (!sessionId) { return; }
+4. resolveUpstreamMessages returns the client array without a sessionId —
+   ai.ts:139-141
+     if (!sessionId) { return ctx.input.body.messages ?? []; }
+5. The stateless request still reaches the adapter factory — ai.ts:548
+     const adapter = await createAiChatAdapter();
+
+## Retired byte-identity claim
+
+Command:
+
+    Select-String -Path server/routes/api/ai/ai.ts -Pattern "byte|identical|passthrough|transparent|proxy"; "SLS_EXIT=$?"
+
+Unedited output:
+
+    server\routes\api\ai\ai.ts:260: * transparent proxy. TanStack re-frames the provider's chunks as `data:`
+    server\routes\api\ai\ai.ts:261: * AG-UI events and appends its own terminal `RUN_FINISHED`, so byte-identity
+    server\routes\api\ai\ai.ts:263: * a wrapping transport cannot reproduce the provider's bytes, and no consumer
+    SLS_EXIT=True
+
+Every match is inside the new RETIRED note at ai.ts:256-266. No surviving
+claim of a transparent or byte-identical provider passthrough remains.
+
+## Command (stateless contract)
+
+    yarn test server/routes/api/ai/aiStreaming.test.ts --reporter=verbose -t "without a sessionId"
+
+Unedited output:
+
+    node.exe : (!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+    to become the default in a future major version of Vite:
+    At C:\Program Files\nodejs\yarn.ps1:16 char:5
+    +     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
+    +     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        + CategoryInfo          : NotSpecified: ((!) Your V...ersion of Vite::String) [], RemoteException
+        + FullyQualifiedErrorId : NativeCommandError
+     
+      - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+    in the closest package.json
+    Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+     RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes the question and the answer in seq order, sharing one runId
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > sends the newest client turn upstream exactly once
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > authors a terminal complete frame derived from finish_reason
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the question and the refusal for a refused prompt
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as aborted when the client disconnects mid-stream
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the user turn and no assistant row when the client aborts before the first token
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > stores the partial answer as errored when the upstream fails mid-flight
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream that ends with completed
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > records a stream that ends with truncated
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes no assistant row and releases the lock when a clean run has no text
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > terminates the stream on a malformed upstream frame
+     ✓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes nothing without a sessionId 4063ms
+     ✓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > rejects a system role without a sessionId and writes nothing 53ms
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes nothing and never contacts the provider for another user's session
+     ↓ |server| server/routes/api/ai/aiStreaming.test.ts > POST /api/ai.chat turn persistence > writes the turn inside a transaction
+
+     Test Files  1 passed (1)
+          Tests  2 passed | 13 skipped (15)
+       Start at  03:09:03
+       Duration  48.06s (transform 10.80s, setup 34.08s, import 9.08s, tests 4.12s, environment 0ms)
+
+    Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+    ist/esm/index.js" points to missing source files
+    Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+    ist/esm/plugin.js" points to missing source files
+    Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+    ist/esm/utils.js" points to missing source files
+    Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+    ist/esm/inputRules.js" points to missing source files
+    Sourcemap for "D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1/node_modules/prosemirror-codemark/d
+    ist/esm/actions.js" points to missing source files
+
+## What the passing stateless case asserts (aiStreaming.test.ts:768-840)
+
+- status 200 and `content-type: text/event-stream`
+- no `event:` line and no `[DONE]`
+- frames parsed from `data:` lines: `frames[0].type === "RUN_STARTED"`,
+  `frames.at(-1).type === "RUN_FINISHED"`, no `RUN_ERROR`
+- `AIChatMessage.count` scoped to the user's sessions is equal before and after
+  (zero rows created) and `AIChatSession.count` for the user is unchanged
+- `Redis.keys("aiChat:inflight:<userId>:*")` is `[]` (no lock key taken)
+
+## Full folder + typecheck
+
+Command: `yarn test server/routes/api/ai/`
+Unedited summary:
+
+     Test Files  7 passed (7)
+          Tests  129 passed (129)
+       Start at  03:04:32
+       Duration  76.01s (transform 63.08s, setup 149.09s, import 16.08s, tests 17.66s, environment 3ms)
+
+Command: `yarn tsc --incremental false`
+Unedited output:
+
+    EXIT=0

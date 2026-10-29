@@ -1,0 +1,135 @@
+# Todo 21 - AI chat documentation
+
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Base HEAD: 452ef5145 (docs uncommitted at capture time)
+Date: 2026-10-21
+
+## 1. Live gateway condition
+
+AI_CHAT_BASE_URL points at http://127.0.0.1:8642/p/matius/v1, which is DOWN on
+this host. No live model output exists, and no live model output is claimed.
+
+## 2. Verified recipe - grounding refusal (provider not needed)
+
+The refusal recipe in docs/AI-CHAT.md was verified against the request boundary
+the test suite already exercises: the real Koa route, real PostgreSQL and Redis,
+and a provider fetch that the refusal path never calls. A temporary wire-level
+probe test was created, run, and deleted (it is not in the commit). The permanent
+assertions live in server/routes/api/ai/ai.test.ts:
+  - "refuses a prompt matching nothing in the knowledge base"
+  - "refuses a general-knowledge probe that matches no document"
+  - "persists the refusal as a completed assistant row before the frames are written"
+
+Exact command:
+
+    yarn test server/routes/api/ai/zzDocsProbe.test.ts --reporter=verbose
+
+Verbatim stdout from the refusal case (console.log, unedited):
+
+    stdout | server/routes/api/ai/zzDocsProbe.test.ts > TMP: docs probe > refusal recipe output (ungrounded prompt)
+    === REFUSAL START ===
+    status: 200
+    content-type: text/event-stream
+    x-ai-chat-kind: refusal
+    body: data: {"type":"RUN_STARTED","runId":"5247869b-fa92-4770-9384-7cad27f189c1","timestamp":1792552763292}
+
+    data: {"type":"TEXT_MESSAGE_START","messageId":"2524fc0d-c6c5-461a-b318-3b7ad95b4cfd","role":"assistant","timestamp":1792552763292}
+
+    data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"2524fc0d-c6c5-461a-b318-3b7ad95b4cfd","delta":"This assistant only answers from this workspace’s knowledge base","timestamp":1792552763292}
+
+    data: {"type":"TEXT_MESSAGE_END","messageId":"2524fc0d-c6c5-461a-b318-3b7ad95b4cfd","timestamp":1792552763292}
+
+    data: {"type":"RUN_FINISHED","runId":"5247869b-fa92-4770-9384-7cad27f189c1","timestamp":1792552763292}
+
+    === REFUSAL END ===
+
+    ✓ |server| server/routes/api/ai/zzDocsProbe.test.ts > TMP: docs probe > refusal recipe output (ungrounded prompt) 770ms
+
+This is the recipe exactly as documented: 200, text/event-stream,
+X-AI-Chat-Kind: refusal, and five `data: {json}` frames (RUN_STARTED,
+TEXT_MESSAGE_START, TEXT_MESSAGE_CONTENT, TEXT_MESSAGE_END, RUN_FINISHED). No
+`event:` field and no provider sentinel appears in the body.
+
+Transparency: the same probe also attempted a stateless happy-path recipe, but
+the seeded workspace could not ground that prompt, so the server correctly
+returned a refusal and the probe's "ordinary answer" assertion failed. That
+branch is NOT claimed as verified; only the refusal recipe above is.
+
+The probe file was deleted before the commit. `git status --short` shows only
+the two docs.
+
+## 3. Retired claims - zero hits after the rewrite
+
+Command:
+
+    Select-String -Path "docs\AI-CHAT.md","docs\AI-CHAT-DESIGN.md" -Pattern "event: complete|event: truncated|event: error|\[DONE\]|byte-identit" -AllMatches
+
+Unedited output:
+
+    (no matches)
+
+    AFTER_RED_COUNT=0
+
+The "before" side of this check (the same grep against HEAD, which shows the
+old claims) is in .omo/evidence/21-docs-red.txt.
+
+## 4. Typecheck
+
+Command:
+
+    yarn tsc --incremental false
+
+Unedited output:
+
+    TSC_EXIT=0
+
+Docs are Markdown only; no imported snippet changed.
+
+## 5. What the docs now assert
+
+- The wire is AG-UI over SSE: `data: {json}` frames, no `event:` field, no
+  provider sentinel, terminal `RUN_FINISHED` or `RUN_ERROR`.
+- `RUN_ERROR` with the adapter code `incomplete-stream` maps to
+  `status: "truncated"`; other errors map to `error`; aborts to `aborted`.
+- Refusal and busy are synthetic five-event runs discriminated only by
+  `X-AI-Chat-Kind: refusal|busy`.
+- `threadId` is the persisted session id; the server resolves
+  `body.sessionId ?? body.threadId` and mints its own `runId`.
+- The frozen read-only `search_workspace` allowlist is the only tool source;
+  client-supplied `tools` and `forwardedProps` are ignored.
+- `AI_CHAT_REASONING` reaches the provider as `reasoning_effort` through
+  `modelOptions`; thinking is live-only in the UI.
+- `whenBusy` (`queue` / `drop` / `interrupt`) lives in panel state, with
+  per-item cancel and busy-text restore.
+- The in-flight lock TTL is 900s, justified by the tool-loop worst case
+  (about 5 rounds x (120s model + 5s tool) = 625s, plus a spare round and the
+  terminal flush).
+- The old stateless verbatim-passthrough guarantee is retired.
+- The Koa route reads `chatParamsFromRequestBody(ctx.request.body)` because
+  `koa-body` already parsed the body.
+- Slice 2 is marked implemented, with the deferred list intact: subagents,
+  resumable streams, TanStack persistence, client tools, token usage.
+
+## 6. Rerunnable permanent assertion for the same recipe
+
+The temporary probe is gone, so the same prompt is also covered by a permanent
+test. Exact command:
+
+    yarn test server/routes/api/ai/ai.test.ts -t "refuses a general-knowledge probe"
+
+Unedited summary:
+
+    RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+     Test Files  1 passed (1)
+          Tests  1 passed | 24 skipped (25)
+       Start at  03:35:11
+       Duration  88.07s (transform 14.22s, setup 76.76s, import 9.45s, tests 950ms, environment 0ms)
+
+    TEST_EXIT=0
+
+That test asserts the exact refusal contract the docs now describe: status 200,
+`text/event-stream`, `X-AI-Chat-Kind: refusal`, the five AG-UI event types in
+order, the refusal text in `TEXT_MESSAGE_CONTENT`, no `CUSTOM` event, and the
+provider fetch never called.
+

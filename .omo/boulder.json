@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "active_work_id": "kb-api-access-1",
+  "works": {
+    "kb-api-access-1": {
+      "work_id": "kb-api-access-1",
+      "active_plan": ".omo/plans/kb-api-access.md",
+      "plan_name": "kb-api-access",
+      "session_ids": [
+        "senpi:current"
+      ],
+      "status": "paused",
+      "worktree_path": null,
+      "session_origins": {},
+      "stale_since": "2026-10-28T02:16:44.613Z",
+      "task_sessions": {}
+    }
+  },
+  "session_ids": [
+    "senpi:current"
+  ],
+  "session_origins": {},
+  "task_sessions": {},
+  "active_plan": ".omo/plans/kb-api-access.md",
+  "plan_name": "kb-api-access",
+  "status": "paused",
+  "worktree_path": null
+}

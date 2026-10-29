@@ -1,0 +1,57 @@
+Row 27 — assistant-last pending turn sent upstream twice
+========================================================
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Date: 2026-10-21
+
+RED BEFORE (fix not applied)
+----------------------------
+Command:
+  yarn test server/routes/api/ai/aiStreaming.test.ts
+
+Test: "sends an assistant-last regeneration turn upstream exactly once"
+Setup: owned session whose committed window already ends with
+  user "What is the payments deployment runbook?"
+  assistant "It is documented."
+Client body ends with the same assistant message. Assertion reads the captured
+provider request body (`fetchMock.mock.calls[0][1].body`).
+
+Observed red run:
+  FAIL ... sends an assistant-last regeneration turn upstream exactly once
+  AssertionError: expected [ { role: 'assistant', …(1) }, …(1) ] to have a
+  length of 1 but got 2
+  at ... expect(
+        sent.filter(message => message.role === "assistant" && message.content === answer)
+      ).toHaveLength(1)
+
+The provider received the assistant message twice: once from the committed
+window, once as `pendingTurn`.
+
+GREEN AFTER (fix applied)
+-------------------------
+Fix: `toUpstreamMessages` refuses to append a pending assistant turn when the
+committed window already ends with the same role/content. The regeneration case
+still forwards the whole conversation (the assistant row is present once, at
+the end), and a genuinely new assistant turn is still appended.
+
+Also pinned at the pure seam in upstreamMessages.test.ts:
+  - drops a pending assistant turn the committed window already ends with
+  - keeps a pending assistant turn the committed window does not contain
+
+Command:
+  yarn test server/routes/api/ai/aiInFlightCap.test.ts server/routes/api/ai/aiStreaming.test.ts server/routes/api/ai/upstreamMessages.test.ts
+Result:
+  Test Files  3 passed (3)
+  Tests       55 passed (55)
+
+Command:
+  yarn test server/routes/api/ai/
+Result:
+  Test Files  9 passed (9)
+  Tests       161 passed (161)
+
+The pre-existing user-turn guard test
+("sends the newest client turn upstream exactly once") still passes unchanged.
+
+Command:
+  yarn tsc --incremental false
+Result: EXIT=0

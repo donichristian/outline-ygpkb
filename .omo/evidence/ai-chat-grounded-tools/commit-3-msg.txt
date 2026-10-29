@@ -1,0 +1,3 @@
+﻿feat(ai-chat): measure answers that carry no tool-returned source
+
+Middleware accumulates TOOL_CALL_RESULT identifiers (documentId + url) and at the terminal hook emits one structured Logger.warn when the accumulated answer contains none of them, threading the citationMiss boolean through appendTurn and aiChatMessageCreator (persisted in todo 10). Measure-and-warn only: never blocks, buffers, or refuses. Refusal half of IS-5 stays as the existing two log lines (grounding + in-flight); no third refusal line added. aiStreaming.test.ts: 25/25 pass including 2 new citation-miss tests.

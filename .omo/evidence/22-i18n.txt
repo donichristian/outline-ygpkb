@@ -1,0 +1,63 @@
+Checkbox 22 — Extract the new user-facing strings
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Date: 2026-10-21
+
+WHY NOT `yarn build:i18n`
+`yarn build:i18n` = `i18next --silent '{shared,app,server,plugins}/**/*.{ts,tsx}' && yarn copy:i18n`.
+On this Windows box the `yarn copy:i18n` half is redundant for extraction and the shell
+wrapper is the part that has historically failed. The extractor was invoked directly:
+
+EXACT EXTRACTION COMMAND
+  yarn i18next --silent "{shared,app,server,plugins}/**/*.{ts,tsx}"
+  EXIT=0
+
+i18next-parser config: i18next-parser.config.js
+  output       = shared/i18n/locales/en_US/translation.json
+  lineEnding   = "auto"   (preserves the existing CRLF working-tree file)
+  keySeparator = false, defaultValue(locale, ns, key) = key
+
+CODE FIX REQUIRED FOR COMPLETENESS
+turnMarker() in app/components/AIChat/AIChatPanel.tsx returned `labelKey` strings that were
+passed to `t(marker.labelKey)`. i18next-parser only sees literal arguments, so
+"Response cut short" and "Stopped" were never extracted. turnMarker now takes `t` and calls
+`t("Response cut short")`, `t("Stopped")`, `t("Failed")` with literals; the rendered label
+is unchanged. `yarn tsc --incremental false` => EXIT=0.
+
+NEW KEYS PRESENT IN shared/i18n/locales/en_US/translation.json
+  "Chat history": "Chat history"
+  "New chat": "New chat"
+  "Your conversations will appear here": "Your conversations will appear here"
+  "Untitled chat": "Untitled chat"
+  "Delete this chat?": "Delete this chat?"
+  "Delete chat": "Delete chat"
+  "Too many requests, try again shortly": "Too many requests, try again shortly"
+  "A network error occurred, try again?": "A network error occurred, try again?"
+  "The AI chat stream failed, try again?": "The AI chat stream failed, try again?"
+  "Another AI chat response is still in progress": "Another AI chat response is still in progress"
+  "The AI chat answer stopped before it finished": "The AI chat answer stopped before it finished"
+  "The AI chat response could not be read": "The AI chat response could not be read"
+  "The AI chat request was declined": "The AI chat request was declined"
+  "The AI chat request was cancelled": "The AI chat request was cancelled"
+  "Queued messages": "Queued messages"
+  "Cancel queued message": "Cancel queued message"
+  "Response cut short": "Response cut short"
+  "Stopped": "Stopped"
+  "Running": "Running"
+  "Input": "Input"
+  "Output": "Output"
+  "Waiting for result…": "Waiting for result…"
+  "Another answer for this conversation is still being generated": "Another answer for this conversation is still being generated"
+
+Already-present keys confirmed unchanged: "AI chat", "Toggle fullscreen", "Loading",
+"Ask anything about your workspace", "Ask a question…", "Message", "Stop", "Send",
+"Done", "Cancel", "Delete", "Deleting", "Failed",
+"AI chat is not enabled for this workspace",
+"Your session has expired, refresh the page to continue",
+"The AI chat request failed, try again?",
+"AI chat is grounded in this workspace, but answers are generated text and may be wrong or out of date — check anything important against the source documents."
+
+COMPLETENESS CHECK
+  node check-i18n.mjs  (scan of every literal t("…") in app/components/AIChat/** + app/utils/aiChat.ts)
+  scanned 5 files, missing 0
+
+Full-file CRLF status: see 22-i18n-red.txt. No CRLF-only revert was needed.

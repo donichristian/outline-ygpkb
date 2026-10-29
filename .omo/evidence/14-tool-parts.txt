@@ -1,0 +1,90 @@
+﻿AUDIT EVIDENCE 14 - render tool-call parts in the transcript (happy path)
+WORKDIR: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+CHANNEL: jsdom DOM-level assertion (vitest, project "app") over a fake AG-UI stream; the test asserts the tool-call card's name, input and output nodes
+COMMAND: yarn test app/components/AIChat/AIChatPanel.test.tsx
+OUTPUT (unedited):
+
+
+node.exe : [33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m(!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+
+ Test Files  1 passed (1)
+      Tests  27 passed (27)
+   Start at  06:52:54
+   Duration  7.59s (transform 1.69s, setup 1.95s, import 2.64s, tests 1.49s, environment 1.22s)
+
+
+
+--- focused happy-path assertion: tool name + input + output rendered (verbose) ---
+COMMAND: yarn test app/components/AIChat/AIChatPanel.test.tsx -t "renders a completed tool call with its name, input, and output" --reporter=verbose
+OUTPUT (unedited):
+
+node.exe : [33m(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned 
+to become the default in a future major version of Vite:
+At C:\Program Files\nodejs\yarn.ps1:16 char:5
++     & "$basedir/node$exe"  "$basedir/node_modules/corepack/dist/yarn. ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([33m(!) Your V...ersion of Vite::String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  - ESM syntax in a file loaded as CommonJS (vitest.config.ts:1:1). Use a `.mjs` extension or set `"type": "module"` 
+in the closest package.json
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.[39m
+
+ RUN  v4.1.11 D:/Work-Project/Outline-YGPKB/outline-ygpkb-wt/tanstack-ai-slice2-w1
+
+stderr | app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > renders a completed tool call with its name, 
+input, and output
+React does not recognize the `borderOnHover` prop on a DOM element. If you intentionally want it to appear in the DOM 
+as a custom attribute, spell it as lowercase `borderonhover` instead. If you accidentally passed it from a parent 
+component, remove it from the DOM element.
+Received `true` for a non-boolean attribute `neutral`.
+
+If you want to write it to the DOM, pass a string instead: neutral="true" or neutral={value.toString()}.
+
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > sends the message when Enter is pressed in the prompt
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > appends assistant text incrementally as deltas arrive
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > renders assistant markdown as plain text with a clickable source link
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > shows model reasoning in a loading disclosure, never as the answer
+ Γ£ô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > renders a completed tool call with its name, input, and output 165ms
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > renders a pending tool call with a running state and no output
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > ignores an unknown part type without crashing
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > toggles the panel into fullscreen and back
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > shows a loading spinner while the response streams, then clears it
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > aborts the in-flight stream when Stop is pressed and shows no error
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > renders a visible error notice when the stream throws AiChatError
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > shows the workspace-disabled message for a 404
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > renders a grounding refusal inline as an assistant turn, not an error
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > shows a retry-later notice for a busy response header
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > shows the session-expired message for a 403
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > restores an unsent draft after the panel is unmounted and remounted
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > restores the active conversation when the panel is closed and reopened
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > leaves the panel on an empty conversation after an explicit New chat
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > restores both turns of a stored conversation from the messages endpoint
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > shows each session's own transcript when switching between sessions
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > creates a session before the first send and addresses it by thread id
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > addresses a stored conversation by its thread id without owning its history
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > surfaces the server's message when it rejects the request
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > keeps the transcript pinned to the latest turn
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > aborts the in-flight stream when the panel unmounts
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > clears the pending turn and aborts when New chat is chosen mid-stream
+ Γåô |app| app/components/AIChat/AIChatPanel.test.tsx > AIChatPanel > clears the pending turn and aborts when another session is selected mid-stream
+
+ Test Files  1 passed (1)
+      Tests  1 passed | 26 skipped (27)
+   Start at  06:54:14
+   Duration  5.91s (transform 1.76s, setup 1.92s, import 2.58s, tests 167ms, environment 985ms)
+
+

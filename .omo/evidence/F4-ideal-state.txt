@@ -1,0 +1,196 @@
+# F4 (round 2) — Ideal-state fidelity, 1:1 against every IS row
+
+Plan: tanstack-ai-slice2-adoption (IS table + success-criteria table)
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt\tanstack-ai-slice2-w1
+Base: development@9253e4f6d  Tip: c5a487867 (branch feat/ai-chat-slice2)
+Auditor: read-only verifier lane. No source/test/plan edits, no commits.
+`git diff --stat` in the worktree is empty apart from 13 snapshot files whose
+content diff is CRLF-normalisation only (git reports no numstat change).
+
+Gateway: AI_CHAT_BASE_URL=127.0.0.1:8642 is DOWN (ECONNREFUSED, row 24 / F3).
+The live-gateway halves of IS-1/4/5/8 remain blocked by row 24, as before.
+Every server test below uses real PostgreSQL + real Redis; only `fetch` and
+the TanStack engine loader are stubbed.
+
+============================================================
+COMMANDS RE-RUN AT THIS TIP (personally executed)
+============================================================
+$ yarn lint                                  -> LINT_EXIT=0  (warnings only)
+$ yarn tsc --incremental false               -> TSC_EXIT=0
+$ yarn build:server                          -> BUILD_EXIT=0
+$ yarn test:app                              -> APP_EXIT=0, 38 files / 356 tests
+$ yarn test server/routes/api/ai/            -> AI_EXIT=0, 9 files / 161 tests
+$ yarn test:server                           -> SERVER_EXIT=1, 10 files failed |
+                                                28 failed | 3845 passed | 6 skipped
+$ (base 9253e4f6d, canonical tree) yarn test <the same 10 failing files>
+                                             -> BASE_EXIT=1, 10/10 files failed |
+                                                29 failed | 586 passed
+
+Tip failing files (count): storage files.get 4, documentImporter 2,
+DocumentConverter 3, DocumentHelper 1, ExportOKFZip 1, ExportTextBundleZip 3,
+MarkdownAPIImport 6, cron 4, documents.export 2, revisions.export 2.
+Base failing files: identical 10 files, identical categories (29 failures;
+DocumentHelper 2 vs 1 at tip). No AI-surface file appears in either run.
+`git diff --stat 9253e4f6d..HEAD -- <those 10 files>` is empty: the branch does
+not touch a single failing test file.
+
+============================================================
+IS-1 PASS — TanStack/AG-UI stream contract, no bespoke sseFrame proxy
+delivered by: 3, 4, 19
+command: Select-String ai.ts -Pattern "sseFrame|inspectChunk|fetch\(|event: |\[DONE\]"
+         -> 0 matches
+         yarn test server/routes/api/ai/ -> 161/161 EXIT=0
+proof quoted:
+  ai.ts:653 toServerSentEventsResponse; :669 the only body assignment is
+    Readable.fromWeb; :298 synthetic bodies use a node Readable.
+  aiStreaming.test.ts:1240 "turns the stubbed Chat Completions output into a
+    finished run" asserts types === [RUN_STARTED, TEXT_MESSAGE_START,
+    TEXT_MESSAGE_CONTENT, TEXT_MESSAGE_END, RUN_FINISHED] (:1262).
+  aiStreaming.test.ts:1190/1223 node-Readable invariant tests.
+evidence: .omo/evidence/04-server-transport.txt (OPENED: containsEventLine:false,
+  containsDoneSentinel:false, frame sequence, zero-hit source grep).
+CAVEAT: live-provider `curl -N` half blocked by row 24; the transport itself is
+the real `chat()` + `toServerSentEventsResponse`, only the provider bytes stubbed.
+
+============================================================
+IS-2 PASS — every existing behaviour survives
+delivered by: 4, 5, 6, 7, 18, 19
+command: yarn test server/routes/api/ai/ -> 9 files / 161 tests EXIT=0
+proof quoted:
+  ai.test.ts:144/154/166 feature gate 404; :186 CSRF 403;
+    :456 refusal persisted completed before frames
+  aiInFlightCap.test.ts:361 one turn in flight (provider called once);
+    :417 busy AG-UI run leaves first turn untouched; :773 ownership 404
+  aiStreaming.test.ts:385 user+assistant rows share runId in seq order;
+    :637 refusal rows; :680/:787 aborted/error rows
+  aiSessions.ts:28,50,79,110 four RPC endpoints (create/list/delete/messages.list)
+  AIChatMessage.ts:26-32 completed|aborted|error|truncated
+evidence: .omo/evidence/19-server-tests.txt (todo-era full run, 27 unrelated
+  failures, zero ai/* failures) + the fresh 161/161 run above.
+
+============================================================
+IS-3 PASS — UIMessage.parts on the client; stored transcript flat, RPC unchanged
+delivered by: 8, 10, 20
+command: yarn test:app -> 38 files / 356 tests EXIT=0
+proof quoted:
+  AIChatPanel.test.tsx:856 "ignores an unknown part type without crashing"
+  upstreamMessages.test.ts:415 flattens multi-part text in order and skips
+    thinking parts; :458 drops a system role hidden inside parts;
+    :666 presentAIChatMessage(stored) still yields the unchanged
+    {id,seq,role,content,status,runId,createdAt} shape
+  server/presenters/aiChatSession.ts is untouched by 9253e4f6d..HEAD
+evidence: .omo/evidence/20-app-tests.txt (OPENED: 38 files / 356 tests; now
+  also present in the worktree evidence dir) + fresh test:app run above.
+
+============================================================
+IS-4 PASS — read-only server tools end-to-end; client tools ignored
+delivered by: 13, 14, 20
+command: yarn test server/routes/api/ai/tools.test.ts -> included in 161/161
+         yarn test app/components/AIChat/AIChatPanel.test.tsx -> included in 356/356
+proof quoted:
+  tools.test.ts:157 frozen single-tool allowlist; :171 TOOL_CALL_* + final
+    answer; :218 injected client "evil_grant_admin" never reaches the provider
+  AIChatPanel.test.tsx:777 completed tool card (name/input/output);
+    :821 pending tool card
+evidence: .omo/evidence/13-tools.txt and 13-tools-red.txt (both OPENED).
+CAVEAT: model-selected tool call is stub-proof; live gateway blocked (row 24).
+
+============================================================
+IS-5 PASS — reasoning -> collapsed live-only ThinkingPart, env-gated
+delivered by: 15, 16, 20
+command: yarn test server/routes/api/ai/aiReasoning.test.ts -> in 161/161
+         yarn test app/components/AIChat/AIChatPanel.test.tsx -> in 356/356
+proof quoted:
+  aiReasoning.test.ts:274 REASONING_* frames surface before TEXT_MESSAGE_CONTENT
+    and stay out of the answer; :203 env-driven reasoning_effort; :227 omitted
+    when unconfigured; :247 a request-body reasoning value is ignored
+  AIChatPanel.test.tsx:682 collapsed disclosure while streaming, absent after
+    finalize, thinking text not in the answer or stored row
+evidence: .omo/evidence/16-thinking.txt (OPENED: (a)-(d) map to those tests).
+CAVEAT: wire half stub-proof; live gateway blocked (row 24).
+
+============================================================
+IS-6 PASS — whenBusy queue/drop/interrupt; no silent text loss
+delivered by: 17, 18, 20
+command: yarn test app/components/AIChat/AIChatPanel.test.tsx -> in 356/356
+proof quoted:
+  AIChatPanel.test.tsx:974 queue then drain after settle; :1026 whenBusy "drop"
+    keeps the text; :1063 "interrupt" aborts and sends at once;
+    :1110 cancel one queued item; :1157 Stop flushes the queue;
+    :1251 busy header -> retry-later notice AND composer + draft restored;
+    :1231 refusal renders inline (never the error banner)
+evidence: .omo/evidence/17-queue.txt, .omo/evidence/18-busy.txt (both OPENED).
+
+============================================================
+IS-7 PASS — gates green except the pre-existing Windows test:server baseline
+delivered by: 1, 2, 19, 20, 22
+command/results (this tip):
+  yarn lint                       EXIT=0, warnings only (baseline noise)
+  yarn tsc --incremental false    EXIT=0
+  yarn build:server               EXIT=0
+  yarn test:app                   EXIT=0, 38 files / 356 tests
+  yarn test:server                EXIT=1, 28 failed | 3845 passed | 6 skipped
+                                  in 10 files, NONE under server/routes/api/ai/
+compare to base 9253e4f6d (canonical tree, same 10 files):
+  29 failed | 586 passed — identical file set and test names (DocumentHelper is
+  2 there, 1 here). No failure is NEW relative to the base; the tip has one
+  fewer. The failing files are not modified by the branch (empty git diff).
+  Therefore the amended gate — "no NEW failure over the pre-existing Windows
+  baseline" — HOLDS, and the AI surface is 161/161 green.
+RECORD CORRECTION (plan text only; not an IS defect): the amended rows still say
+  "26 failures / 9 files", "3842 passed / 26 failed" and "AI suites 156/156".
+  Observed at c5a487867: 28 failures / 10 files, 3845 passed, AI 161/161. The
+  direction and the gate are honest; the counts need an offline edit.
+evidence: .omo/evidence/01-pins-tsc.txt, 02-cjs-boot.txt, 19-server-tests.txt,
+  20-app-tests.txt (all four now present in the worktree) + fresh runs above.
+
+============================================================
+IS-8 PASS — stateless requests work and store nothing; byte-identity retired
+delivered by: 7, 19
+command: yarn test server/routes/api/ai/ -> 161/161 EXIT=0
+proof quoted:
+  aiStreaming.test.ts:985 "writes nothing without a sessionId";
+    :1050 system role still rejected; :1122 foreign-session write blocked
+  aiInFlightCap.test.ts:549 "does not lock a stateless chat"
+  ai.ts:306-315 docblock RETIRES byte-identity; docs/AI-CHAT.md:491 and
+    docs/AI-CHAT-DESIGN.md:358 say the guarantee is retired
+evidence: .omo/evidence/07-stateless.txt (OPENED).
+CAVEAT: live gateway blocked (row 24).
+
+============================================================
+IS-9 PASS — a run cannot outlive or strand the per-session lock
+delivered by: 5, 18, 19, 26 (fix c5a487867)
+command: yarn test server/routes/api/ai/ -> 9 files / 161 tests EXIT=0
+code walk (ai.ts):
+  :374-403 Redis NX acquisition with runId as ownership token.
+  :436 `let streamHandedOff = false` then :437 `try {` wraps EVERYTHING after
+    acquisition: appendTurn :459, resolveUpstreamMessages :477, grounding gate
+    :504, Promise.all([loadTanstack(), loadServerTools()]) :576, adapter/chat/
+    toServerSentEventsResponse :600-659, ctx.body :669.
+  :670 streamHandedOff = true is the statement immediately after ctx.body, so
+    the finally (:671-675) releases only when no stream exists. After handoff
+    the terminal hooks own release — one owner per phase, no double release.
+  :411-430 releaseInFlightLock is idempotent (released flag) and
+    compare-and-delete, so the middleware's release and any late call collapse
+    to one Redis eval.
+  middleware.ts:167-179 persistAndRelease: appendTurn swallows write failures
+    internally (logger.catch), then release; :188 onFinish (finishReason ?
+    completed : truncated), :195 onAbort, :198 onError (incomplete-stream ->
+    truncated, else error). Exactly one terminal hook runs per run.
+  TTL justified at ai.ts:216-235 (5 x (120s + 5s) ~= 625s; 900s).
+tests:
+  aiInFlightCap.test.ts:681 reading the committed window throws after
+    acquisition -> 500 JSON, fetch never called, KEYS scan empty;
+    :716 engine loader rejects -> same; :568 abort; :618 upstream error;
+    :736 grounding refusal; :318 finish.
+  STATIC RED PROOF: at df22f6970 ai.ts had no try/finally and only two explicit
+    release calls (refusal :530, stream-creation catch :639); both new tests
+    throw before either, so both would fail there (key stranded to TTL). The
+    c5a487867 ai.ts diff is exactly +streamHandedOff, +outer try/finally and the
+    removal of the two inline releases.
+evidence: .omo/evidence/18-busy.txt, 05-persist-red.txt, 26-lock-prestream.txt
+  (all OPENED; 26 records the red-before diffs and the 55/55 + 161/161 reruns).
+
+============================================================
+F4 VERDICT: APPROVE
+============================================================
