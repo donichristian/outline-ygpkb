@@ -1,0 +1,29 @@
+Task 13: a document-scoped ask action, through a prefill bridge.
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt-gt-t13
+Branch: wt/gt-t13, based on 49679a3a28 (the task 12 commit)
+
+Changed files (4 files, +193 / -11; measured with `git diff -w`, see the note on churn below):
+- app/components/AIChat/AIChatContext.tsx
+  Adds an optional prefill channel: `openAIChatPanel({ prompt, documentId })` from any caller, plus `consumePendingPrompt()` (one-shot hand-off to the panel) and `restorePendingPrompt()` (puts a prompt back when a send did not happen). The prompt lives in context state, not in the panel, so it survives closing and reopening the panel. The existing context API is unchanged; every addition is optional.
+- app/actions/definitions/documents.tsx
+  Adds `askAIDocument`, an ActiveDocumentSection action named "Ask AI" in the document menu and "Ask AI about this document" elsewhere. It is visible only when the team has the `AIChat` preference on, and it opens the panel with a prompt naming the document and that document's id.
+- app/utils/aiChat.ts
+  `createAiChatConnection`/the transport options gain `documentId`. The fetch wrapper writes it as a TOP-LEVEL key of the JSON request body (`withDocumentId`), never into `forwardedProps`.
+- app/components/AIChat/AIChatPanel.tsx
+  Seeds the composer from a pending prefill on mount and on session change, records the prefill's document in a ref, attaches that document to the request it sends, and calls `restorePendingPrompt` when the send is rejected on the busy path so the user's question is not lost. After the first send the prefill is consumed for good.
+
+Verification that actually ran (grep proofs):
+- prefill: 10 occurrences in AIChatContext.tsx, 21 in AIChatPanel.tsx.
+- documentId: `withDocumentId` merges `{ ...parsed, documentId }` into the top-level body; the comment states it is never written into `forwardedProps`, and no `forwardedProps` write exists in the diff.
+- action: `export const askAIDocument = createAction({ ... openAIChatPanel({ prompt: ..., documentId: document.id }) ... })` with a `TeamPreference.AIChat` visibility guard.
+- busy path: `restoreOnBusy` parameter and a `restorePendingPrompt` call on the rejection branch.
+
+Test gate (Windows-side, via cmd.exe):
+  node_modules\.bin\vitest.cmd run app/components/AIChat/AIChatPanel.test.tsx app/utils/aiChat.test.ts app/components/AIChat/AIChatContext.test.tsx
+  Test Files  3 passed (3)
+       Tests  64 passed (64)
+
+Environment repair needed to run that gate (not part of the change):
+- The worktree's `.git` file pointed at `D:/Work-Project/...`, which WSL git cannot follow; it was repointed at the equivalent `/mnt/d/...` path.
+- The worktree had no `node_modules`; a directory junction to the main checkout's `node_modules` was created so the Windows-side vitest could resolve.
+- `git status` in this worktree reported 2764 files as modified. `git diff -w --ignore-blank-lines` collapses that to the 4 files above, so the rest is line-ending (CRLF/LF) churn from Windows-side tooling, not edits. Only the 4 real files are committed.

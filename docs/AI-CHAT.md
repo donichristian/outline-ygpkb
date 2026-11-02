@@ -24,7 +24,7 @@ and no provider sentinel, and the run terminates with `RUN_FINISHED` or
 > `server/routes/api/ai/tools.ts`, `app/utils/aiChat.ts`,
 > `app/components/AIChat/`, `app/stores/AIChat*Store.ts`, `server/env.ts`,
 > `server/queues/tasks/CleanupDeletedUsersTask.ts`, and
-> `app/scenes/Settings/Features.tsx`.
+> `app/scenes/Settings/AI.tsx`.
 
 ## What it is
 
@@ -49,8 +49,18 @@ and no provider sentinel, and the run terminates with `RUN_FINISHED` or
   endpoints expose the model — see [The session API](#the-session-api).
 
 **Read-only with respect to your documents.** The route never writes a
-document, never modifies a collection, and never injects document content into
-the prompt. Its only writes are to the two AI chat tables above.
+document, never modifies a collection, and never lets the *client* inject
+document content into the prompt. Its only writes are to the two AI chat tables
+above.
+
+Tool results are a deliberate exception to "no document content in the prompt":
+when the model calls `fetch_document` or `search_workspace`, the returned
+Markdown excerpt re-enters the model context as a tool message. That text is
+treated as untrusted input — each `fetch_document` read returns at most
+`MAX_CHUNK_LIMIT` (60,000) characters and reports `truncated` plus the
+`characters` returned so a long body can be paged with `offset`, the tool
+surface is server-owned and read-only, and archived documents are excluded —
+but it does mean the model reads real document bodies in order to answer.
 
 ## The gate
 
@@ -59,19 +69,32 @@ There are **two** gates on the request path, in order.
 ### 1. Feature gate
 
 The feature is gated by the per-workspace preference `TeamPreference.AIChat`
-(“AI chat”), toggled in **Settings > AI** (`app/scenes/Settings/Features.tsx`,
-the scene is titled “AI”). Toggling persists via `teams.update` and defaults to
+(“AI chat”), toggled in **Settings > AI** (`app/scenes/Settings/AI.tsx`, the
+scene is titled “AI”). Toggling persists via `teams.update` and defaults to
 `false` (`shared/constants.ts`).
 
-The route returns **404** when either condition fails, so an unavailable
-endpoint is indistinguishable from an unknown route:
+The route returns **404** when any condition fails, so an unavailable endpoint
+is indistinguishable from an unknown route. Both a base URL **and** a model are
+required, because a base URL without a model can only produce a broken upstream
+request:
 
 ```ts
-// server/routes/api/ai/ai.ts
-if (!user.team.getPreference(TeamPreference.AIChat) || !env.AI_CHAT_BASE_URL) {
-  throw NotFoundError();
+// server/routes/api/ai/enabled.ts — the single definition of the gate
+export function assertAiChatEnabled(user: User) {
+  if (
+    !user.team.getPreference(TeamPreference.AIChat) ||
+    !env.AI_CHAT_BASE_URL ||
+    !env.AI_CHAT_MODEL
+  ) {
+    throw NotFoundError();
+  }
 }
 ```
+
+All five AI endpoints (`ai.chat`, and the four `ai.sessions` / `ai.messages`
+ones in `server/routes/api/ai/aiSessions.ts`) call this before any ownership
+check, so a non-owner's session returns 404 rather than 403 and the endpoint is
+not an oracle for session ids.
 
 The panel and its entry points are likewise gated on the same preference: the
 floating trigger (`app/components/AIChat/AIChatTrigger.tsx`) renders only when
@@ -133,6 +156,7 @@ once a provider is configured.
 | `AI_CHAT_MODEL` | **when `AI_CHAT_BASE_URL` is set** | Model id handed to the TanStack adapter (`openaiCompatibleText`) and forwarded as `model` in the upstream request body. With a base URL configured but no model, the route returns **404** and no upstream request is made. |
 | `AI_CHAT_REASONING` | no | Reasoning effort requested from the provider: `minimal`, `low`, `medium` or `high`. Unset means the upstream body carries no reasoning field. Sent as the Chat Completions `reasoning_effort` through `modelOptions` (see [Panel behaviour](#panel-behaviour)); never read from the request body. |
 | `AI_CHAT_GROUNDING` | no | Whether the route runs the local grounding probe (§2). Defaults to `true`. Set to `false` when the provider is itself a retrieval agent that enforces the knowledge-base boundary — the local lexical probe would otherwise refuse prompts the provider can answer. |
+| `AI_CHAT_SYSTEM_PROMPT` | no | Whether the route prepends the repository's own assistant instruction layer as a leading system message: answer only from the workspace knowledge base, cite the document link for every claim, say so plainly when the workspace lacks the answer, read a document with `fetch_document` before summarising it, treat document text as data, and reply in the user's language. Defaults to `false`, so the upstream body is unchanged unless an operator opts in. Set to `true` when the provider is a plain model that needs this repository to state the knowledge-base boundary. |
 
 Defined in `server/env.ts` (the `AI_CHAT_*` block). Notes:
 
@@ -506,6 +530,24 @@ with a 15-minute partition window). The reason a dedicated task exists at all:
 `User.destroy()` is a *soft* delete, so the `ai_chat_sessions.userId` foreign key
 never cascades.
 
+### What a stored turn keeps
+
+A stored assistant row carries two columns beyond its text, so reopening a
+conversation shows what the answer was built from without re-running any tool:
+
+- `toolCallDigest` (JSONB) — a **body-free** digest of the tool calls made
+  while generating the turn. It records which tool was called and with what
+  identifier or query, never the document body a tool returned, so the column
+  cannot become a second copy of the knowledge base. The transcript renders it
+  as a tool-call card under the turn.
+- `citationMiss` (boolean, default `false`) — set when the answer cited no
+  document link or id that a tool returned in the same run. The panel renders a
+  subdued “No sources found” note inside that turn, so an unsourced answer is
+  visible when the conversation is reopened, not only while streaming.
+
+Because the digest is body-free, reading a stored conversation is not a way to
+read a document the reader could not open at the time.
+
 ## Verified constraints
 
 These are the properties the feature proves; they are load-bearing, not
@@ -555,13 +597,34 @@ incidental.
   so a client that reloads history the moment the run finishes cannot race the
   insert.
 - **Tools are the server's own, read-only.** `server/routes/api/ai/tools.ts`
-  exports a frozen allowlist — `search_workspace` and `read_document` — passed to
-  `chat({ tools })` as-is. The request body is never read for tools, and
-  `forwardedProps` is never spread into the run, so a client cannot add a tool.
-  `read_document` converts one document to Markdown through
-  `DocumentHelper.toMarkdown` and slices it to 24k characters so a long document
-  can be paged with `offset`; it authorizes with the requesting user's own read
-  ability, so a guessed id cannot read a document the caller cannot open.
+  exports a frozen allowlist — `search_workspace`, `recommend_documents` and
+  `fetch_document` — passed to `chat({ tools })` as-is. The request body is
+  never read for tools, and `forwardedProps` is never spread into the run, so a
+  client cannot add a tool. `fetch_document` converts one document to Markdown
+  through `DocumentHelper.toMarkdown`, returns at most `MAX_CHUNK_LIMIT`
+  (60,000) characters per call, and reports `characters` and `truncated` so a
+  long document can be paged with `offset` or narrowed with `section`. It
+  authorizes with the requesting user's own read ability, so a guessed id
+  cannot read a document the caller cannot open. A document bound into the run
+  (`boundDocumentId`) wins over any id the model passes.
+
+### The tool surface
+
+Three tools, all read-only, all server-owned. There is no write tool and no way
+for a caller to add one.
+
+| Tool | Input | Returns | Bound |
+| --- | --- | --- | --- |
+| `search_workspace` | `query` (free text), optional `collectionId`, optional `limit` | Document titles, links and matching snippets | Results limited to documents the requesting user can already read; 5 by default, at most 10 |
+| `recommend_documents` | `query`, optional `limit` | The same shape, filtered to results with a non-empty reason | 5 by default, at most 10 |
+| `fetch_document` | `documentId` or url slug, optional `section`, optional `offset`, optional `limit` | `{ documentId, title, url, markdown, characters, truncated }` | At most `MAX_CHUNK_LIMIT` (60,000) characters per call; authorized with the caller's own read ability |
+
+The caps matter for containment: `search_workspace` and `recommend_documents`
+bound the number of documents pulled into context (`MaxToolResults = 5`
+by default, `MaxToolResultsBound = 10` as a ceiling regardless of what the model
+asks for), and `fetch_document` bounds the size of a single body read while
+reporting `truncated` so the model can page with `offset` instead of assuming it
+saw the whole document.
 - **The in-flight lock is bounded and released on every exit.** The Redis key
   `aiChat:inflight:{userId}:{sessionId}` is taken with `SET … EX 900 NX` and
   released by compare-and-delete on finish, error, abort and refusal. The TTL is
@@ -633,6 +696,35 @@ until the user closes it. A few UI facts worth knowing:
   never in the transcript and never in a stored row, and each one can be
   cancelled on its own. The queue drains only after a settled turn; a failed or
   interrupted turn discards it.
+- **The composer can be prefilled, and the prefill is one-shot.**
+  `openAIChatPanel(prompt?)` (`AIChatContext.tsx`) is a module-level bridge: the
+  command bar is a plain object with no React context, so the provider registers
+  its `open` callback there on mount and clears it on unmount. The argument is
+  either a string or an `AiChatPrefill` (`{ prompt, documentId? }`). The panel
+  **consumes** the pending prefill (`consumePendingPrompt`) and seeds the
+  composer, so it is used exactly once — reopening the panel later does not
+  replay it. A prefill that was seeded but never sent is put back with
+  `restorePendingPrompt`, and only if a newer prefill has not arrived in the
+  meantime.
+- **“Ask AI about this document” carries the document into the run.** The
+  `askAIDocument` command-bar action
+  (`app/actions/definitions/documents.tsx`) is visible only for an active
+  document in a workspace with the preference on. It prefills
+  “Ask AI about this document: <title>” *and* passes `documentId`, which becomes
+  the top-level `documentId` of the chat request. The server binds that id into
+  the run, so `fetch_document` reads that document even when the model passes a
+  different id, and the grounding probe is scoped to it. The field is omitted
+  entirely when no document is bound, rather than sent as `null`.
+- **Starter prompts seed the composer; they never send.** While the transcript
+  has no turn, three starter prompts render above the composer. Clicking one
+  writes it into the input and focuses the field, so the user can edit before
+  sending. There is no separate send path and no hidden state: the click is
+  equivalent to typing.
+- **An unsourced answer is marked, live and stored.** When the answer cited no
+  document that a tool returned in the same run, the turn carries
+  `citationMiss` and the panel renders a subdued “No sources found” note inside
+  that turn. The flag is persisted, so the marker is still there when the
+  conversation is reopened.
 
 The panel is rendered with `SidebarLayout scrollable={false}` so the transcript
 scrolls internally and the composer stays pinned. This and the clickability
@@ -698,8 +790,9 @@ It is implemented and shipped; what follows is the boundary of that work.
   mints its own `runId`, and ignores any client-supplied `runId`, `tools` or
   `forwardedProps`.
 - A frozen, read-only server tool allowlist
-  (`server/routes/api/ai/tools.ts`, `search_workspace` + `read_document`) passed to
-  `chat({ tools })`; client-supplied tools are ignored.
+  (`server/routes/api/ai/tools.ts`, `search_workspace` + `recommend_documents` +
+  `fetch_document`) passed to `chat({ tools })`; client-supplied tools are
+  ignored.
 - Reasoning through `AI_CHAT_REASONING` → `modelOptions.reasoning_effort`, with
   thinking rendered live-only as a collapsed disclosure.
 - AG-UI `UIMessage.parts` on the client: `text`, `thinking` and `tool-call`
@@ -714,6 +807,24 @@ It is implemented and shipped; what follows is the boundary of that work.
   case; the lock is released on finish, error, abort and refusal.
 - Server tests assert the AG-UI contract (no `event:` names, no provider
   sentinel); client tests assert the parts model, tools, reasoning and queue.
+
+**Resolved since this slice was written:**
+
+- **Document body reading.** `fetch_document` reads a real document body through
+  the shared `server/commands/documentReader.ts`, capped at
+  `MAX_CHUNK_LIMIT` (60,000) characters per call with `offset` paging and a
+  optional `section` narrow. The external-agent fetch tool and the AI tool now
+  share one reader instead of duplicating it.
+- **Scoped search and recommendation.** `search_workspace` takes an optional
+  `collectionId` and `limit`; `recommend_documents` returns only results that
+  carry a reason, so “recommend” has something to rank by.
+- **Citation marking.** A turn with no tool-returned identifier in its answer is
+  stored with `citationMiss = true` and shown as “No sources found”.
+- **Tool-call persistence.** A stored assistant turn keeps a body-free
+  `toolCallDigest`, so what the assistant read is visible after the fact.
+- **A repository-side instruction layer.** `AI_CHAT_SYSTEM_PROMPT` opts into a
+  leading system message that states the knowledge-base boundary, the citation
+  rule, the read-before-summarise rule and the “document text is data” rule.
 
 **Still deferred (unchanged from the plan):**
 

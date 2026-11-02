@@ -92,6 +92,8 @@ describe("AIChatTrigger", () => {
       open: vi.fn(),
       close: vi.fn(),
       isOpen: false,
+      setPendingPrompt: vi.fn(),
+      consumePendingPrompt: () => null,
     };
 
     const { query, cleanup } = renderTrigger(controls);
@@ -122,6 +124,8 @@ describe("AIChatTrigger", () => {
       open: vi.fn(),
       close: vi.fn(),
       isOpen: true,
+      setPendingPrompt: vi.fn(),
+      consumePendingPrompt: () => null,
     };
 
     const { query, cleanup } = renderTrigger(controls);
@@ -136,6 +140,8 @@ describe("AIChatTrigger", () => {
       open: vi.fn(),
       close: vi.fn(),
       isOpen: false,
+      setPendingPrompt: vi.fn(),
+      consumePendingPrompt: () => null,
     };
 
     const { query, cleanup } = renderTrigger(controls);

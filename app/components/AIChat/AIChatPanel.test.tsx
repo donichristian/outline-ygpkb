@@ -504,14 +504,15 @@ function renderPanel(
 
   const pressEnter = async () => {
     const input = query("ai-chat-input") as HTMLInputElement;
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      })
+    );
     await act(async () => {
-      input.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "Enter",
-          bubbles: true,
-          cancelable: true,
-        })
-      );
+      await Promise.resolve();
     });
   };
 
@@ -1553,6 +1554,100 @@ describe("AIChatPanel", () => {
     panel.cleanup();
   });
 
+  it("renders the stored tool-call digest of a reopened answer", async () => {
+    const post = vi.mocked(client.post);
+    post.mockImplementation((async (path: string) => {
+      if (path === "/ai.sessions.list") {
+        return {
+          data: {
+            sessions: [
+              {
+                id: "session-a",
+                title: "Digest conversation",
+                createdAt: "2024-01-01T00:00:00.000Z",
+                updatedAt: "2024-01-02T00:00:00.000Z",
+              },
+            ],
+          },
+        };
+      }
+      if (path === "/ai.messages.list") {
+        return {
+          data: {
+            messages: [
+              {
+                id: "m2",
+                seq: 2,
+                role: "assistant",
+                content: "Refunds are processed within five days.",
+                status: "completed",
+                runId: "run-1",
+                citationMiss: false,
+                toolCallDigest: {
+                  toolCalls: [
+                    {
+                      toolCallId: "call-1",
+                      toolName: "search_workspace",
+                      arguments: { query: "refund policy" },
+                      documentIds: ["doc-1"],
+                      titles: ["Refund policy"],
+                      links: ["/doc/refund-policy"],
+                      characterCount: 420,
+                      truncated: false,
+                    },
+                  ],
+                },
+                createdAt: "2024-01-02T00:00:00.000Z",
+              },
+              {
+                id: "m1",
+                seq: 1,
+                role: "user",
+                content: "what is our refund policy?",
+                status: "completed",
+                runId: "run-1",
+                createdAt: "2024-01-01T00:00:00.000Z",
+              },
+            ],
+            truncated: false,
+          },
+        };
+      }
+      return defaultPost(path);
+    }) as never);
+
+    const rootStore = new RootStore();
+    rootStore.aiChatSessions.add({
+      id: "session-a",
+      title: "Digest conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    } as never);
+    rootStore.aiChatSessions.setSelectedSessionId("session-a");
+
+    const panel = renderPanel(rootStore);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(panel.transcripts().join("|")).toContain(
+      "Refunds are processed within five days."
+    );
+    expect(panel.query("ai-chat-tool-call")).not.toBeNull();
+    expect(panel.query("ai-chat-tool-name")?.textContent).toBe(
+      "search_workspace"
+    );
+    expect(panel.query("ai-chat-tool-input")?.textContent).toContain(
+      "Refund policy"
+    );
+    // A stored call is finished: it must not show the live spinner, and it has
+    // no result body to show as output.
+    expect(panel.query("ai-chat-tool-pending")).toBeNull();
+    expect(panel.query("ai-chat-tool-output")).toBeNull();
+    panel.cleanup();
+  });
+
   it("shows each session's own transcript when switching between sessions", async () => {
     mockEndpoints([
       {
@@ -1838,6 +1933,79 @@ describe("AIChatPanel", () => {
 
     expect(panel.transcripts()).toEqual(["Beta question"]);
     expect(runs[0].signal?.aborted).toBe(true);
+    panel.cleanup();
+  });
+
+  it("seeds the composer from a starter prompt until the first turn", async () => {
+    const runs = fakeConnection((run) => ({
+      deltas: ["ok"],
+      question: messageText(run.messages[run.messages.length - 1]),
+    }));
+    const { query, click, pressEnter, inputValue, cleanup } =
+      renderPanel(rootStore);
+
+    const starters = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="ai-chat-starter"]'
+      )
+    );
+    expect(starters.length).toBeGreaterThan(0);
+
+    await click(starters[0]);
+    expect(inputValue()).toBe(starters[0].textContent);
+
+    await pressEnter();
+    await flush();
+
+    expect(runs).toHaveLength(1);
+    expect(messageText(runs[0].messages[0])).toBe(starters[0].textContent);
+    expect(query("ai-chat-starters")).toBeNull();
+    cleanup();
+  });
+
+  it("marks a stored assistant turn that found no sources", async () => {
+    mockEndpoints([
+      {
+        id: "session-a",
+        title: "Alpha conversation",
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-02T00:00:00.000Z",
+      },
+    ]);
+    const store = new RootStore();
+    store.aiChatSessions.add({
+      id: "session-a",
+      title: "Alpha conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    } as never);
+    seedMessage(store, "session-a", {
+      id: "m-a2",
+      seq: 2,
+      role: "assistant",
+      content: "answer one",
+      citationMiss: true,
+    });
+    seedMessage(store, "session-a", {
+      id: "m-a1",
+      seq: 1,
+      role: "user",
+      content: "question one",
+    });
+
+    fakeConnection({ deltas: [], skipText: true });
+    const panel = renderPanel(store);
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-session-session-a"));
+
+    expect(panel.transcripts()).toEqual([
+      "question one",
+      "answer oneNo sources found",
+    ]);
+    expect(panel.query("ai-chat-no-source")?.textContent).toBe(
+      "No sources found"
+    );
+    expect(panel.query("ai-chat-starters")).toBeNull();
     panel.cleanup();
   });
 });

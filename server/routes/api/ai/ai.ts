@@ -27,6 +27,7 @@ import type { MessageLike } from "./messages";
 import { appendTurn, createPersistenceMiddleware } from "./middleware";
 import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
+import { buildSystemPrompts } from "./prompt";
 import { loadTanstack } from "./tanstack";
 import { loadServerTools } from "./tools";
 import { createAiChatAdapter } from "./adapter";
@@ -91,9 +92,7 @@ function isForwardableRole(role: string): role is T.AiChatMessageInput["role"] {
  * @param message the message to reduce, in either accepted shape.
  * @returns the `{ role, content }` row, or undefined when it may not be sent.
  */
-function toUpstreamMessage(
-  message: MessageLike
-): UpstreamMessage | undefined {
+function toUpstreamMessage(message: MessageLike): UpstreamMessage | undefined {
   const content = messageText(message);
 
   if (!message.role || !isForwardableRole(message.role)) {
@@ -147,9 +146,9 @@ export function toUpstreamMessages(
     lastCommitted?.role === pending.role &&
     lastCommitted.content === pending.content;
 
-  return (pending && !alreadyCommitted ? [...committed, pending] : committed).slice(
-    -T.AiChatMaxMessages
-  );
+  return (
+    pending && !alreadyCommitted ? [...committed, pending] : committed
+  ).slice(-T.AiChatMaxMessages);
 }
 
 /**
@@ -302,22 +301,6 @@ function refuseWithAgUiRun({
   body.push(null);
   ctx.body = body;
 }
-
-/**
- * The instructions every chat run starts with.
- *
- * Without them the model has tools it was never told about: a summarization or
- * procedure question was answered from the model's own priors instead of the
- * workspace, and a document read was never requested. These four rules are the
- * smallest set that makes the read-only allowlist discoverable and makes an
- * ungrounded answer visible rather than plausible.
- */
-const SystemPrompt = [
-  "You answer questions about this workspace’s own documents.",
-  "Call search_workspace before answering any question that could be about workspace content. Never answer such a question from general knowledge.",
-  "Call read_document when the answer needs a document’s actual text — summaries, procedures, step lists, quotes — and page with offset while truncated is true.",
-  "Cite each document you rely on by its link. If the workspace has nothing relevant, say so plainly instead of guessing.",
-].join("\n");
 
 /**
  * Streams an assistant answer as AG-UI over SSE, with optional turn storage.
@@ -615,19 +598,31 @@ router.post(
       let response: Response;
       try {
         const adapter = await createAiChatAdapter();
+        // OPERATOR GATE: the instruction layer is a repository decision, never
+        // the request body. Off, the `chat()` call is byte-identical to the
+        // pre-gate call — no `systemPrompts` key at all, so the upstream body
+        // the pinned assertions pin down is unchanged.
+        const systemPrompts = env.AI_CHAT_SYSTEM_PROMPT
+          ? buildSystemPrompts()
+          : undefined;
+
         // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- AiChatAdapter is a structurally-compatible subtype of AnyTextAdapter; the adapter type is a union that TanStack's generic parameters reject at compile time but accept at runtime.
         const stream = chat({
           adapter: adapter as unknown as Parameters<typeof chat>[0]["adapter"],
           // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- UpstreamMessage is a valid ModelMessage at runtime; TanStack's generic type parameter is too strict for the schema-inferred shape.
-          messages: resolvedMessages as unknown as Parameters<typeof chat>[0]["messages"],
+          messages: resolvedMessages as unknown as Parameters<
+            typeof chat
+          >[0]["messages"],
           threadId: sessionId,
           runId,
           // The allowlist is static and read-only. It is the only source of
           // tools on this path; the request body contributes none.
           tools: serverTools,
           // The tool descriptions say what each tool does; this says when to
-          // reach for one, which is what keeps an answer grounded.
-          systemPrompts: [SystemPrompt],
+          // reach for one, which is what keeps an answer grounded. It is part
+          // of the operator-gated instruction layer above, so a disabled gate
+          // sends no system message at all.
+          ...(systemPrompts ? { systemPrompts } : {}),
           // Server tools receive the requesting user through this context, so
           // no tool closes over a request-scoped value.
           context: { user },
@@ -669,7 +664,9 @@ router.post(
             }
           }
         })();
-        response = toServerSentEventsResponse(sanitized, { abortController: ac });
+        response = toServerSentEventsResponse(sanitized, {
+          abortController: ac,
+        });
       } catch (err) {
         if (typeof (err as { status?: unknown }).status === "number") {
           throw err;
@@ -685,7 +682,9 @@ router.post(
       ctx.compress = false;
       ctx.req.setTimeout(0);
       // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- Node's ReadableStream generic is incompatible with Readable.fromWeb; the runtime type is correct.
-      ctx.body = Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>);
+      ctx.body = Readable.fromWeb(
+        response.body as unknown as NodeReadableStream<Uint8Array>
+      );
       streamHandedOff = true;
     } finally {
       if (!streamHandedOff) {

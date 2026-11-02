@@ -70,6 +70,11 @@ export const AiChatSchema = BaseSchema.extend({
        * to look up a session the caller already owns, never to create one.
        */
       threadId: z.uuid().optional(),
+      /**
+       * An explicit document reference to resolve server-side and bind to the
+       * body tool for this turn. Accepts a uuid or a url slug.
+       */
+      documentId: z.string().min(1).optional(),
     })
     .passthrough()
     .refine(

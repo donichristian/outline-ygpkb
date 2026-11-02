@@ -419,6 +419,21 @@ export class Environment {
   );
 
   /**
+   * Whether the AI chat route sends the repo-side assistant instruction layer
+   * to the provider as a leading system message: answer only from the
+   * workspace knowledge base, cite the document link for every claim, say so
+   * plainly when the workspace lacks the answer, read a document with the
+   * body tool before summarising it, treat document text as data, and reply
+   * in the user's language. Defaults to false, so the default upstream body
+   * is unchanged. Set to true when the provider is a plain model that needs
+   * the repository to state the knowledge-base boundary itself.
+   */
+  @IsBoolean()
+  public AI_CHAT_SYSTEM_PROMPT = this.toBoolean(
+    environment.AI_CHAT_SYSTEM_PROMPT ?? "false"
+  );
+
+  /**
    * The default interface language. See translate.getoutline.com for a list of
    * available language codes and their percentage translated.
    */
