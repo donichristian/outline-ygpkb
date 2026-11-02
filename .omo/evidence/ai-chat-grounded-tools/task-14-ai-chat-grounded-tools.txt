@@ -1,0 +1,23 @@
+Task 14: starter prompts in the empty state, and a no-source marker on stored turns.
+Worktree: D:\Work-Project\Outline-YGPKB\outline-ygpkb-wt-gt-t14
+Branch: wt/gt-t14, based on f7952192ee (the task 13 commit)
+
+Changed files (2 files, +137; measured with `git diff -w`):
+- app/components/AIChat/AIChatPanel.tsx (+66)
+  Adds `StarterPrompts`, a list of suggestions each naming a capability the served tools can actually answer, rendered as `StarterList`/`StarterButton` only while the transcript has no turn. Clicking one seeds the composer through `handleStarterPrompt`, reusing the same input path as typing, so no new send path exists.
+  The stored-turn mapping now carries `citationMiss` from the persisted message, and a turn with it set renders a subdued inline note. The note lives inside the turn: no extra fetch, no header or summary bar, and no wrapper element around the transcript.
+- app/components/AIChat/AIChatPanel.test.tsx (+71)
+  Covers the starters appearing on an empty transcript, a click seeding the composer, the starters disappearing once a turn exists, the marker rendering when `citationMiss` is true, and its absence when false.
+
+Verification that actually ran (grep proofs):
+- starter prompts: `const StarterPrompts`, `data-testid="ai-chat-starters"`, `data-testid="ai-chat-starter"`, `handleStarterPrompt` all present in AIChatPanel.tsx.
+- marker: `citationMiss?: boolean` on the stored turn and `citationMiss: message.citationMiss` in the mapping.
+- constraints: filtering the panel diff for `fetch|useEffect|useQuery|apiClient|wrapper|frame` returns nothing, so no network call, no effect-driven fetch and no injected wrapper were added.
+
+Test gate (Windows-side, via cmd.exe):
+  node_modules\.bin\vitest.cmd run app/components/AIChat/AIChatPanel.test.tsx
+  Test Files  1 passed (1)
+       Tests  40 passed (40)
+  (38 before this change; the 2 new cases cover starters and marker.)
+
+The CRLF caveat from task 13 applies to this worktree too: the touched files were normalized to LF before committing, and `git show --stat HEAD` is checked to show only real lines.

@@ -103,7 +103,16 @@ type TranscriptTurn = {
   digest?: AiChatToolCallDigest;
   /** How the turn ended, for a turn read back from the server. */
   status?: AiChatTurnStatus;
+  /** Whether a stored assistant turn carried no source a tool returned. */
+  citationMiss?: boolean;
 };
+
+/** The suggestions shown before the first turn, each naming a served capability. */
+const StarterPrompts = [
+  "Summarise this document",
+  "What documents do we have about onboarding?",
+  "Recommend documents to read about our roadmap",
+];
 
 /** A message waiting for the in-flight turn to settle. */
 type QueuedTurn = {
@@ -456,6 +465,7 @@ const AIChatPanel = observer(function AIChatPanel({
           content: message.content,
           status: message.status,
           digest: message.toolCallDigest,
+          citationMiss: message.citationMiss,
         }))
     : [];
 
@@ -779,6 +789,14 @@ const AIChatPanel = observer(function AIChatPanel({
     [replaceQueue]
   );
 
+  const handleStarterPrompt = React.useCallback(
+    (prompt: string) => {
+      setInput(prompt);
+      writeDraft(prompt, sessionId ?? undefined);
+    },
+    [sessionId]
+  );
+
   const handleChange = React.useCallback(
     (ev: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
       const text = ev.target.value;
@@ -836,9 +854,24 @@ const AIChatPanel = observer(function AIChatPanel({
       <Container column>
         <Transcript ref={transcriptRef} data-testid="ai-chat-transcript">
           {turns.length === 0 && (
-            <EmptyText type="secondary" size="small">
-              {t("Ask anything about your workspace")}
-            </EmptyText>
+            <>
+              <EmptyText type="secondary" size="small">
+                {t("Ask anything about your workspace")}
+              </EmptyText>
+              <StarterList data-testid="ai-chat-starters">
+                {StarterPrompts.map((prompt) => (
+                  <StarterButton
+                    key={prompt}
+                    type="button"
+                    $neutral
+                    onClick={() => handleStarterPrompt(prompt)}
+                    data-testid="ai-chat-starter"
+                  >
+                    {t(prompt)}
+                  </StarterButton>
+                ))}
+              </StarterList>
+            </>
           )}
           {turns.map((turn, index) => {
             const isLast = index === turns.length - 1;
@@ -854,6 +887,7 @@ const AIChatPanel = observer(function AIChatPanel({
               !turn.content &&
               !turn.toolCalls?.length &&
               !turn.digest?.toolCalls?.length &&
+              !turn.citationMiss &&
               !isStreamingAssistant
             ) {
               return null;
@@ -903,6 +937,11 @@ const AIChatPanel = observer(function AIChatPanel({
                   >
                     {marker.label}
                   </TurnMarker>
+                )}
+                {turn.role === "assistant" && turn.citationMiss && (
+                  <NoSourceNote data-testid="ai-chat-no-source">
+                    {t("No sources found")}
+                  </NoSourceNote>
                 )}
               </Message>
             );
@@ -1301,6 +1340,34 @@ const EmptyText = styled(Text)`
   color: ${s("textTertiary")};
   text-align: center;
   margin-top: 24px;
+`;
+
+const StarterList = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 12px;
+`;
+
+const StarterButton = styled(Button<{ $neutral?: boolean }>)`
+  justify-content: flex-start;
+  font-weight: 400;
+  text-align: left;
+  white-space: normal;
+
+  > span {
+    white-space: normal;
+    text-align: left;
+  }
+`;
+
+const NoSourceNote = styled.span`
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: ${s("textTertiary")};
 `;
 
 const Message = styled.div<{ $role: "user" | "assistant" }>`

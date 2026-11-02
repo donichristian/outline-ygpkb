@@ -1934,4 +1934,77 @@ describe("AIChatPanel", () => {
     expect(runs[0].signal?.aborted).toBe(true);
     panel.cleanup();
   });
+
+  it("seeds the composer from a starter prompt until the first turn", async () => {
+    const runs = fakeConnection((run) => ({
+      deltas: ["ok"],
+      question: messageText(run.messages[run.messages.length - 1]),
+    }));
+    const { query, click, pressEnter, inputValue, cleanup } =
+      renderPanel(rootStore);
+
+    const starters = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="ai-chat-starter"]'
+      )
+    );
+    expect(starters.length).toBeGreaterThan(0);
+
+    await click(starters[0]);
+    expect(inputValue()).toBe(starters[0].textContent);
+
+    await pressEnter();
+    await flush();
+
+    expect(runs).toHaveLength(1);
+    expect(messageText(runs[0].messages[0])).toBe(starters[0].textContent);
+    expect(query("ai-chat-starters")).toBeNull();
+    cleanup();
+  });
+
+  it("marks a stored assistant turn that found no sources", async () => {
+    mockEndpoints([
+      {
+        id: "session-a",
+        title: "Alpha conversation",
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-02T00:00:00.000Z",
+      },
+    ]);
+    const store = new RootStore();
+    store.aiChatSessions.add({
+      id: "session-a",
+      title: "Alpha conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    } as never);
+    seedMessage(store, "session-a", {
+      id: "m-a2",
+      seq: 2,
+      role: "assistant",
+      content: "answer one",
+      citationMiss: true,
+    });
+    seedMessage(store, "session-a", {
+      id: "m-a1",
+      seq: 1,
+      role: "user",
+      content: "question one",
+    });
+
+    fakeConnection({ deltas: [], skipText: true });
+    const panel = renderPanel(store);
+    await panel.click(panel.query("ai-chat-history-trigger"));
+    await panel.click(panel.query("ai-chat-session-session-a"));
+
+    expect(panel.transcripts()).toEqual([
+      "question one",
+      "answer oneNo sources found",
+    ]);
+    expect(panel.query("ai-chat-no-source")?.textContent).toBe(
+      "No sources found"
+    );
+    expect(panel.query("ai-chat-starters")).toBeNull();
+    panel.cleanup();
+  });
 });
