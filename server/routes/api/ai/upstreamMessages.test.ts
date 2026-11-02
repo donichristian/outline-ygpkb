@@ -697,6 +697,8 @@ describe("POST /api/ai.chat with an AG-UI parts turn", () => {
       content: "What is the payments deployment runbook?",
       status: AIChatMessageStatus.Completed,
       runId: stored.runId,
+      toolCallDigest: stored.toolCallDigest,
+      citationMiss: stored.citationMiss,
       createdAt: stored.createdAt,
     });
   });

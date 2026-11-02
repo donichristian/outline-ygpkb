@@ -31,7 +31,7 @@ type Props = {
   runId?: string | null;
   /**
    * True when the stored answer carries no document link or identifier that a
-   * tool returned in the same run. Persisted once the model column lands.
+   * tool returned in the same run.
    */
   citationMiss?: boolean;
   /**
@@ -73,8 +73,6 @@ export default async function aiChatMessageCreator({
   citationMiss,
   toolCallDigest,
 }: Props) {
-  void citationMiss;
-  void toolCallDigest;
   return retryOnUniqueConstraintError(() =>
     sequelize.transaction(async (transaction) => {
       // A short-lived context bound to this transaction. The caller's context
@@ -117,6 +115,7 @@ export default async function aiChatMessageCreator({
          status,
          runId: runId ?? null,
          toolCallDigest: toolCallDigest ?? null,
+         citationMiss: citationMiss ?? false,
        });
 
       // Sequelize makes `updatedAt` read-only: `set` returns without assigning it on

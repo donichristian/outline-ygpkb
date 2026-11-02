@@ -83,6 +83,14 @@ class AIChatMessage extends IdModel<
   @Column(DataType.JSONB)
   toolCallDigest: Record<string, unknown> | null;
 
+  /**
+   * Whether the answer carried no document link or identifier that a tool
+   * returned in the same run.
+   */
+  @Default(false)
+  @Column(DataType.BOOLEAN)
+  citationMiss: boolean;
+
   // associations
 
   @BelongsTo(() => AIChatSession, "sessionId")

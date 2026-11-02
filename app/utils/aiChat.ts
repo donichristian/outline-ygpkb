@@ -23,6 +23,38 @@ export interface AiChatMessage {
 }
 
 /**
+ * One tool call within a stored {@link AiChatToolCallDigest}. Names what was
+ * read and how much of it, never the text itself.
+ */
+export interface AiChatToolCallSummary {
+  /** The tool call id, stable across streamed updates. */
+  toolCallId?: string;
+  /** The name of the tool the model invoked. */
+  toolName?: string;
+  /** The raw call arguments as the model supplied them. */
+  arguments?: unknown;
+  /** The documents the call returned, for a call that read documents. */
+  documentIds?: string[];
+  /** The titles of the documents the call returned. */
+  titles?: string[];
+  /** The links the call returned. */
+  links?: string[];
+  /** How many characters the call returned, when it returned a body. */
+  characterCount?: number;
+  /** Whether the call returned less than the document holds. */
+  truncated?: boolean;
+}
+
+/**
+ * The body-free record of the tool calls made during one stored turn, as the
+ * server persists and returns it.
+ */
+export interface AiChatToolCallDigest {
+  /** The tool calls made while generating the turn, in call order. */
+  toolCalls?: AiChatToolCallSummary[];
+}
+
+/**
  * Discriminates the category of an {@link AiChatError} so the UI can render an
  * appropriate message and decide whether retrying is meaningful.
  */
