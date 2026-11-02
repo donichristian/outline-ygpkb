@@ -312,6 +312,9 @@ const AIChatPanel = observer(function AIChatPanel({
   const [input, setInput] = React.useState(() =>
     readDraft(sessionId ?? undefined)
   );
+  // Starts at the composer so the keystrokes that follow a starter prompt land
+  // in the text it seeded.
+  const inputRef = React.useRef<HTMLInputElement>(null);
   const [isStreaming, setIsStreaming] = React.useState(false);
   const [error, setError] = React.useState<AiChatError | null>(null);
   // The reasoning of the turn currently streaming. Kept only for the live turn:
@@ -793,6 +796,7 @@ const AIChatPanel = observer(function AIChatPanel({
     (prompt: string) => {
       setInput(prompt);
       writeDraft(prompt, sessionId ?? undefined);
+      inputRef.current?.focus();
     },
     [sessionId]
   );
@@ -863,7 +867,7 @@ const AIChatPanel = observer(function AIChatPanel({
                   <StarterButton
                     key={prompt}
                     type="button"
-                    $neutral
+                    neutral
                     onClick={() => handleStarterPrompt(prompt)}
                     data-testid="ai-chat-starter"
                   >
@@ -995,6 +999,7 @@ const AIChatPanel = observer(function AIChatPanel({
         <Composer ref={formRef} onSubmit={handleSubmit}>
           <Input
             type="text"
+            ref={inputRef}
             value={input}
             placeholder={t("Ask a question…")}
             onChange={handleChange}
@@ -1350,7 +1355,7 @@ const StarterList = styled.div`
   margin-top: 12px;
 `;
 
-const StarterButton = styled(Button)<{ $neutral?: boolean }>`
+const StarterButton = styled(Button)`
   justify-content: flex-start;
   font-weight: 400;
   text-align: left;

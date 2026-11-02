@@ -504,14 +504,15 @@ function renderPanel(
 
   const pressEnter = async () => {
     const input = query("ai-chat-input") as HTMLInputElement;
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      })
+    );
     await act(async () => {
-      input.dispatchEvent(
-        new KeyboardEvent("keydown", {
-          key: "Enter",
-          bubbles: true,
-          cancelable: true,
-        })
-      );
+      await Promise.resolve();
     });
   };
 
