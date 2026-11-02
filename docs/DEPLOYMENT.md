@@ -218,7 +218,7 @@ enabled:
 docker run --rm --env-file .env outline-base yarn db:migrate
 ```
 
-The repository currently has 308 migrations under `server/migrations` (plain
+The repository currently has 48 migrations under `server/migrations` (plain
 CommonJS `.js` files). Migrations are forward-only; rollback is
 `sequelize db:migrate:undo`.
 
@@ -447,7 +447,7 @@ still boots without one, but is unusable.
 | `RATE_LIMITER_REQUESTS` | `1000` | Global request budget per window. |
 | `RATE_LIMITER_DURATION_WINDOW` | `60` | Window length in seconds. |
 | `RATE_LIMITER_MULTIPLIER` | `1` | Multiplier for hardcoded per-endpoint limits. |
-| `AI_CHAT_BASE_URL`, `AI_CHAT_API_KEY`, `AI_CHAT_MODEL`, `AI_CHAT_GROUNDING` | | Fork AI chat. Disabled when unset. See `docs/AI-CHAT.md`. |
+| `AI_CHAT_BASE_URL`, `AI_CHAT_API_KEY`, `AI_CHAT_MODEL`, `AI_CHAT_REASONING`, `AI_CHAT_GROUNDING`, `AI_CHAT_SYSTEM_PROMPT` | | Fork AI chat. Disabled when unset; the route needs both a base URL and a model. `AI_CHAT_GROUNDING` defaults to `true`, `AI_CHAT_SYSTEM_PROMPT` to `false`. See `docs/AI-CHAT.md`. |
 | `SENTRY_DSN`, `SENTRY_TUNNEL` | | Optional Sentry error and performance tracking. |
 | `DEBUG` | `http` | Debug categories. `DEBUG=*` for everything. |
 | `LOG_LEVEL` | `info` | `error`, `warn`, `info`, `http`, `verbose`, `debug` or `silly`. |
