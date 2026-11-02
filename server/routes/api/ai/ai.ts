@@ -29,7 +29,7 @@ import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
 import { buildSystemPrompts } from "./prompt";
 import { loadTanstack } from "./tanstack";
-import { loadServerTools } from "./tools";
+import { loadServerTools, resolveDocumentReference } from "./tools";
 import { createAiChatAdapter } from "./adapter";
 
 /** The validated context of a chat request. */
@@ -302,21 +302,6 @@ function refuseWithAgUiRun({
   ctx.body = body;
 }
 
-/**
- * The instructions every chat run starts with.
- *
- * Without them the model has tools it was never told about: a summarization or
- * procedure question was answered from the model's own priors instead of the
- * workspace, and a document read was never requested. These four rules are the
- * smallest set that makes the read-only allowlist discoverable and makes an
- * ungrounded answer visible rather than plausible.
- */
-const SystemPrompt = [
-  "You answer questions about this workspace’s own documents.",
-  "Call search_workspace before answering any question that could be about workspace content. Never answer such a question from general knowledge.",
-  "Call fetch_document when the answer needs a document’s actual text — summaries, procedures, step lists, quotes — and page with offset while truncated is true.",
-  "Cite each document you rely on by its link. If the workspace has nothing relevant, say so plainly instead of guessing.",
-].join("\n");
 
 /**
  * Streams an assistant answer as AG-UI over SSE, with optional turn storage.
@@ -367,6 +352,15 @@ router.post(
     if (sessionId && !ownedSession) {
       throw NotFoundError();
     }
+
+    // Resolve an explicit document reference server-side before any upstream
+    // call, so the member's own permissions decide whether it resolves at all.
+    // A missing or unresolved reference resolves to `undefined` and the request
+    // continues exactly as it does today.
+    const boundDocumentId = await resolveDocumentReference(
+      ctx.input.body.documentId,
+      user
+    );
 
     // At most one turn may be in flight per (user, session), so a double submit
     // or a reconnect cannot open a second concurrent upstream call against the
@@ -609,6 +603,9 @@ router.post(
         ctx,
         requestId,
         releaseInFlightLock,
+        toolChoice: boundDocumentId
+          ? { type: "tool", name: "fetch_document" }
+          : undefined,
       });
 
       let response: Response;
@@ -636,10 +633,9 @@ router.post(
           tools: serverTools,
           // The tool descriptions say what each tool does; this says when to
           // reach for one, which is what keeps an answer grounded.
-          systemPrompts: [SystemPrompt],
           // Server tools receive the requesting user through this context, so
           // no tool closes over a request-scoped value.
-          context: { user },
+          context: { user, boundDocumentId },
           ...(systemPrompts ? { systemPrompts } : {}),
           // REASONING: an operator decision (`AI_CHAT_REASONING`), never the
           // request body. The installed `openaiCompatibleText` adapter never

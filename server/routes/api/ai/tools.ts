@@ -1,3 +1,4 @@
+import { NotFoundError } from "@server/errors";
 import type * as TanstackAIModule from "@tanstack/ai";
 import type { Filter } from "@shared/helpers/FilterHelper";
 import { z } from "zod";
@@ -34,6 +35,50 @@ export type ServerToolContext = {
 
 /** How many documents one tool call returns, keeping the provider context small. */
 const MaxToolResults = 5;
+
+/**
+ * Resolves an optional document reference supplied on the AI chat request
+ * before any model call. The load goes through the shared document loader so
+ * the member's own permissions decide whether the reference resolves at all:
+ * an unreadable document raises `AuthorizationError`, an archived or
+ * soft-deleted document raises `NotFoundError`. A missing or unresolved
+ * reference resolves to `undefined`, and the request continues exactly as it
+ * does today.
+ *
+ * @param documentId the document reference from the request body, if any.
+ * @param user the requesting user, whose access bounds the load.
+ * @return the loaded, authorized, readable document id, or undefined.
+ */
+export async function resolveDocumentReference(
+  documentId: string | undefined,
+  user: User
+): Promise<string | undefined> {
+  if (!documentId) {
+    return undefined;
+  }
+
+  let document: Document;
+  try {
+    document = await loadDocumentForRead(documentId, user);
+  } catch (err) {
+    // A reference that does not resolve is not an error: the request
+    // continues exactly as it does today, without a bound document.
+    if ((err as { status?: number })?.status === 404) {
+      return undefined;
+    }
+    throw err;
+  }
+
+  // The loader authorizes `restore` for a trashed row and the read policy
+  // does not exclude archived rows, so both conditions are checked here
+  // explicitly: the reference is evidence of a document the member may read,
+  // and an archived or soft-deleted document is not readable.
+  if (document.archivedAt || document.deletedAt) {
+    throw NotFoundError();
+  }
+
+  return document.id;
+}
 
 /**
  * Archived documents are not readable in the assistant, so they are excluded

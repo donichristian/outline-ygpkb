@@ -73,8 +73,6 @@ export default async function aiChatMessageCreator({
   citationMiss,
   toolCallDigest,
 }: Props) {
-  void citationMiss;
-  void toolCallDigest;
   return retryOnUniqueConstraintError(() =>
     sequelize.transaction(async (transaction) => {
       // A short-lived context bound to this transaction. The caller's context
