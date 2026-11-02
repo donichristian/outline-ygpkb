@@ -1553,6 +1553,100 @@ describe("AIChatPanel", () => {
     panel.cleanup();
   });
 
+  it("renders the stored tool-call digest of a reopened answer", async () => {
+    const post = vi.mocked(client.post);
+    post.mockImplementation((async (path: string) => {
+      if (path === "/ai.sessions.list") {
+        return {
+          data: {
+            sessions: [
+              {
+                id: "session-a",
+                title: "Digest conversation",
+                createdAt: "2024-01-01T00:00:00.000Z",
+                updatedAt: "2024-01-02T00:00:00.000Z",
+              },
+            ],
+          },
+        };
+      }
+      if (path === "/ai.messages.list") {
+        return {
+          data: {
+            messages: [
+              {
+                id: "m2",
+                seq: 2,
+                role: "assistant",
+                content: "Refunds are processed within five days.",
+                status: "completed",
+                runId: "run-1",
+                citationMiss: false,
+                toolCallDigest: {
+                  toolCalls: [
+                    {
+                      toolCallId: "call-1",
+                      toolName: "search_workspace",
+                      arguments: { query: "refund policy" },
+                      documentIds: ["doc-1"],
+                      titles: ["Refund policy"],
+                      links: ["/doc/refund-policy"],
+                      characterCount: 420,
+                      truncated: false,
+                    },
+                  ],
+                },
+                createdAt: "2024-01-02T00:00:00.000Z",
+              },
+              {
+                id: "m1",
+                seq: 1,
+                role: "user",
+                content: "what is our refund policy?",
+                status: "completed",
+                runId: "run-1",
+                createdAt: "2024-01-01T00:00:00.000Z",
+              },
+            ],
+            truncated: false,
+          },
+        };
+      }
+      return defaultPost(path);
+    }) as never);
+
+    const rootStore = new RootStore();
+    rootStore.aiChatSessions.add({
+      id: "session-a",
+      title: "Digest conversation",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-02T00:00:00.000Z",
+    } as never);
+    rootStore.aiChatSessions.setSelectedSessionId("session-a");
+
+    const panel = renderPanel(rootStore);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(panel.transcripts().join("|")).toContain(
+      "Refunds are processed within five days."
+    );
+    expect(panel.query("ai-chat-tool-call")).not.toBeNull();
+    expect(panel.query("ai-chat-tool-name")?.textContent).toBe(
+      "search_workspace"
+    );
+    expect(panel.query("ai-chat-tool-input")?.textContent).toContain(
+      "Refund policy"
+    );
+    // A stored call is finished: it must not show the live spinner, and it has
+    // no result body to show as output.
+    expect(panel.query("ai-chat-tool-pending")).toBeNull();
+    expect(panel.query("ai-chat-tool-output")).toBeNull();
+    panel.cleanup();
+  });
+
   it("shows each session's own transcript when switching between sessions", async () => {
     mockEndpoints([
       {

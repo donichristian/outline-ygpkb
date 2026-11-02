@@ -27,6 +27,7 @@ import type {
   AiChatError,
   AiChatKind,
   AiChatMessage,
+  AiChatToolCallDigest,
   AiChatTurnStatus,
   AiChatWhenBusy,
 } from "~/utils/aiChat";
@@ -74,6 +75,11 @@ type ToolCallView = {
   input?: unknown;
   /** The tool's result, absent while the call is still running. */
   output?: unknown;
+  /**
+   * Whether the call is finished. A live call derives this from its output; a
+   * stored digest carries no result body to inspect, so it states it directly.
+   */
+  complete?: boolean;
 };
 
 /** A transcript entry: the turn sent to the provider, or one read back. */
@@ -86,6 +92,13 @@ type TranscriptTurn = {
   content: string;
   /** The tool calls made while producing a live turn. */
   toolCalls?: ToolCallView[];
+
+  /**
+   * The stored, body-free record of the tool calls a live turn made. Only a
+   * turn read back from the server carries one, and it is what keeps the
+   * evidence for a reopened answer visible instead of reduced to prose.
+   */
+  digest?: AiChatToolCallDigest;
   /** How the turn ended, for a turn read back from the server. */
   status?: AiChatTurnStatus;
 };
@@ -100,6 +113,27 @@ type QueuedTurn = {
 
 /** How a turn ended, which decides whether the queue drains or is discarded. */
 type TurnOutcome = "settled" | "superseded" | "failed";
+
+/**
+ * Projects a stored tool-call digest onto the same view the live turn renders,
+ * so a reopened answer shows the evidence it was built from. A digest carries
+ * no result body by design, so the card renders the call as complete and shows
+ * what was read – names, titles and sizes – through its input.
+ *
+ * @param digest the digest read back from the server, if the turn has one.
+ * @returns the tool calls to render, in call order.
+ */
+function digestToolCalls(
+  digest: AiChatToolCallDigest | undefined
+): ToolCallView[] {
+  return (digest?.toolCalls ?? []).map((toolCall, index) => ({
+    id: toolCall.toolCallId ?? `digest-${index}`,
+    name: toolCall.toolName ?? "",
+    input: toolCall,
+    output: undefined,
+    complete: true,
+  }));
+}
 
 /**
  * The text, reasoning and tool calls carried by the client's trailing assistant
@@ -391,6 +425,7 @@ const AIChatPanel = observer(function AIChatPanel({
           role: message.role,
           content: message.content,
           status: message.status,
+          digest: message.toolCallDigest,
         }))
     : [];
 
@@ -771,12 +806,17 @@ const AIChatPanel = observer(function AIChatPanel({
               turn.role === "assistant" &&
               !turn.content &&
               !turn.toolCalls?.length &&
+              !turn.digest?.toolCalls?.length &&
               !isStreamingAssistant
             ) {
               return null;
             }
 
             const marker = turnMarker(turn, t);
+
+            const toolCalls = turn.toolCalls?.length
+              ? turn.toolCalls
+              : digestToolCalls(turn.digest);
 
             return (
               <Message
@@ -798,7 +838,7 @@ const AIChatPanel = observer(function AIChatPanel({
                     <ReasoningBody>{reasoning}</ReasoningBody>
                   </ReasoningDisclosure>
                 )}
-                {turn.toolCalls?.map((toolCall) => (
+                {toolCalls.map((toolCall) => (
                   <ToolCallCard key={toolCall.id} toolCall={toolCall} />
                 ))}
                 {turn.role === "assistant" ? (
@@ -970,7 +1010,8 @@ function toolValue(value: unknown): string {
  */
 function ToolCallCard({ toolCall }: { toolCall: ToolCallView }) {
   const { t } = useTranslation();
-  const isComplete = toolCall.output !== undefined;
+  const isComplete = toolCall.complete ?? toolCall.output !== undefined;
+  const hasOutput = toolCall.output !== undefined;
 
   return (
     <ToolCall data-testid="ai-chat-tool-call">
@@ -988,14 +1029,14 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCallView }) {
           </ToolCallValue>
         </ToolCallField>
       )}
-      {isComplete ? (
+      {hasOutput ? (
         <ToolCallField>
           <ToolCallLabel>{t("Output")}</ToolCallLabel>
           <ToolCallValue data-testid="ai-chat-tool-output">
             {toolValue(toolCall.output)}
           </ToolCallValue>
         </ToolCallField>
-      ) : (
+      ) : isComplete ? null : (
         <ToolCallPending data-testid="ai-chat-tool-pending" role="status">
           <Spinner aria-hidden />
           {t("Waiting for result…")}
