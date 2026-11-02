@@ -17,7 +17,22 @@ export interface AIChatControls {
   close: () => void;
   /** Whether the AI chat panel is currently open. */
   isOpen: boolean;
+  /** Seeds a prompt into the panel's composer, consuming any prior one. */
+  setPendingPrompt: (prompt: AiChatPrefill | null) => void;
+  /**
+   * Takes the pending prompt exactly once; `null` does not clear it, so a
+   * closed panel finds it again on its next open.
+   */
+  consumePendingPrompt: () => AiChatPrefill | null;
 }
+
+/** A prompt waiting for the panel, optionally pinned to a document. */
+export type AiChatPrefill = {
+  /** The text to seed into the composer. */
+  prompt: string;
+  /** Sent as the top-level `documentId` of the request that sends it. */
+  documentId?: string;
+};
 
 const AIChatContext = React.createContext<AIChatControls | null>(null);
 
@@ -30,6 +45,10 @@ const AIChatContext = React.createContext<AIChatControls | null>(null);
  * `UiStore` (whose persisted `rightSidebar` field drives the Document sidebar).
  */
 let openHandler: (() => void) | null = null;
+
+/** The pending prompt shared with {@link openAIChatPanel}. */
+let pendingPrompt: AiChatPrefill | null = null;
+const pendingPromptListeners = new Set<() => void>();
 
 /**
  * Registers the callback used by {@link openAIChatPanel} to open the panel.
@@ -47,13 +66,63 @@ export function registerAIChatOpenHandler(handler: () => void): () => void {
 }
 
 /**
+ * Reads and clears the pending prompt. Callers that do not take it (a panel
+ * that mounts while closed) leave it in place, so the next open still finds it.
+ *
+ * @returns the pending prompt, or `null`.
+ */
+export function takePendingPrompt(): AiChatPrefill | null {
+  const value = pendingPrompt;
+  if (value !== null) {
+    setPendingPrompt(null);
+  }
+  return value;
+}
+
+function getPendingPrompt(): AiChatPrefill | null {
+  return pendingPrompt;
+}
+
+/**
+ * Sets the prompt the panel seeds into its composer, or clears it. Kept outside
+ * panel state so closing and reopening the panel never loses it.
+ *
+ * @param prompt the prompt, or `null` to clear it.
+ */
+export function setPendingPrompt(prompt: AiChatPrefill | null): void {
+  pendingPrompt = prompt;
+  pendingPromptListeners.forEach((listener) => listener());
+}
+
+function subscribePendingPrompt(listener: () => void): () => void {
+  pendingPromptListeners.add(listener);
+  return () => {
+    pendingPromptListeners.delete(listener);
+  };
+}
+
+/**
+ * Restores a prompt that was never sent, unless a newer one has arrived.
+ *
+ * @param prompt the prefill to put back.
+ */
+export function restorePendingPrompt(prompt: AiChatPrefill): void {
+  if (!pendingPrompt) {
+    setPendingPrompt(prompt);
+  }
+}
+
+/**
  * Opens the AI chat panel via the currently registered provider, if any. Safe
  * to call when AI chat is disabled for the workspace – the provider does not
  * register a handler while the {@link TeamPreference.AIChat} gate is off, so
  * the call is a no-op. The action additionally hides itself via its `visible`
  * predicate, so this is defence in depth.
+ *
+ * @param prompt an optional prompt to seed into the composer.
  */
-export function openAIChatPanel(): void {
+export function openAIChatPanel(prompt?: string | AiChatPrefill): void {
+  setPendingPrompt(prompt ?? null);
   openHandler?.();
 }
 
@@ -119,6 +188,11 @@ export function AIChatProvider({ children }: { children: React.ReactNode }) {
   const team = useCurrentTeam({ rejectOnEmpty: false });
   const enabled = !!team?.getPreference(TeamPreference.AIChat);
   const [requested, setRequested] = React.useState(false);
+  const pendingPrompt = React.useSyncExternalStore(
+    subscribePendingPrompt,
+    getPendingPrompt,
+    () => null
+  );
 
   // Derive the open state during render so that disabling the workspace
   // preference collapses an already-open panel without an effect.
@@ -136,8 +210,11 @@ export function AIChatProvider({ children }: { children: React.ReactNode }) {
       open: handleOpen,
       close: handleClose,
       isOpen,
+      pendingPrompt,
+      setPendingPrompt,
+      consumePendingPrompt: takePendingPrompt,
     };
-  }, [enabled, isOpen, handleOpen, handleClose]);
+  }, [enabled, isOpen, pendingPrompt, handleOpen, handleClose]);
 
   // Publish the open callback to the module bridge so the command-bar action
   // can reach it, but only while the workspace gate is on.

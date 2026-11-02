@@ -40,6 +40,7 @@ import {
   ExportIcon,
   CodeIcon,
   PDFIcon,
+  SparklesIcon,
 } from "outline-icons";
 import { toast } from "sonner";
 import Icon from "@shared/components/Icon";
@@ -52,6 +53,7 @@ import {
 } from "@shared/types";
 import { isMobile } from "@shared/utils/browser";
 import { Week } from "@shared/utils/time";
+import { TeamPreference } from "@shared/types";
 import type UserMembership from "~/models/UserMembership";
 import Document from "~/models/Document";
 import { client } from "~/utils/ApiClient";
@@ -117,6 +119,7 @@ import env from "~/env";
 import { isMac, isWindows } from "@shared/utils/browser";
 import isCloudHosted from "~/utils/isCloudHosted";
 import DocumentMove from "~/components/DocumentExplorer/DocumentMove";
+import { openAIChatPanel } from "~/components/AIChat/AIChatContext";
 
 /** Lazy insights dialog, exported so that triggers can preload it. */
 export const Insights = lazyWithRetry(
@@ -1174,6 +1177,38 @@ export const printDocument = createAction({
   },
 });
 
+export const askAIDocument = createAction({
+  name: ({ t, isMenu }) =>
+    isMenu ? t("Ask AI") : t("Ask AI about this document"),
+  analyticsName: "Ask AI about document",
+  section: ActiveDocumentSection,
+  icon: <SparklesIcon />,
+  keywords: "assistant chat question summarize",
+  visible: ({ activeDocumentId, currentTeamId, stores }) => {
+    if (!activeDocumentId || !currentTeamId) {
+      return false;
+    }
+    const document = stores.documents.get(activeDocumentId);
+    return (
+      !!document?.isActive &&
+      !!stores.auth.team?.getPreference(TeamPreference.AIChat)
+    );
+  },
+  perform: ({ activeDocumentId, stores, t }) => {
+    const document = activeDocumentId
+      ? stores.documents.get(activeDocumentId)
+      : undefined;
+    if (!document) {
+      return;
+    }
+
+    openAIChatPanel({
+      prompt: t("Ask AI about this document").concat(`: ${document.title}`),
+      documentId: document.id,
+    });
+  },
+});
+
 export const exportDocument = createActionWithChildren({
   name: ({ t, isMenu }) => (isMenu ? t("Export") : t("Export document")),
   analyticsName: "Export document",
@@ -1950,8 +1985,8 @@ export const rootDocumentActions = [
   subscribeDocument,
   unsubscribeDocument,
   searchInDocument,
+  askAIDocument,
   duplicateDocument,
-  leaveDocument,
   moveDocumentToCollection,
   openRandomDocument,
   permanentlyDeleteDocument,
@@ -1968,4 +2003,5 @@ export const rootDocumentActions = [
   shareDocument,
   toggleDocumentStats,
   changeHeadingPrefix,
+  leaveDocument,
 ];

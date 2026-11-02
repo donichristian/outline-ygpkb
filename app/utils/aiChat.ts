@@ -261,6 +261,8 @@ export interface AiChatConnectionOptions {
   fetchClient?: typeof globalThis.fetch;
   /** Called with each response's `X-AI-Chat-Kind` value, `null` when absent. */
   onKind?: (kind: AiChatKind) => void;
+  /** Sent as the top-level `documentId` of each request body, when set. */
+  documentId?: string;
 }
 
 /**
@@ -272,16 +274,20 @@ export interface AiChatConnectionOptions {
  * a reload, and an absent token omits the header rather than sending an empty
  * one. No `tools` or `forwardedProps` are ever derived from client state: the
  * library sends `tools: []` and `forwardedProps: {}` by default, which is what
- * the server expects.
+ * the server expects. The optional `documentId` is written top-level into the
+ * body, never into `forwardedProps`.
  *
- * @param options the fetch override and kind observer.
+ * @param options the fetch override, kind observer and request document.
  * @returns the connection adapter consumed by the chat client.
  */
 export function createAiChatConnection(
   options: AiChatConnectionOptions = {}
 ): ResumableConnectConnectionAdapter {
   const observeFetch: typeof globalThis.fetch = async (input, init) => {
-    const response = await (options.fetchClient ?? fetch)(input, init);
+    const request = options.documentId
+      ? withDocumentId(init, options.documentId)
+      : init;
+    const response = await (options.fetchClient ?? fetch)(input, request);
     options.onKind?.(readKind(response));
 
     if (!response.ok) {
@@ -309,6 +315,23 @@ export function createAiChatConnection(
         throw unwrapHttpError(error) ?? error;
       }
     },
+  };
+}
+
+function withDocumentId(
+  init: RequestInit | undefined,
+  documentId: string
+): RequestInit {
+  let parsed: Record<string, unknown> | null = null;
+  try {
+    parsed = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+  } catch {
+    parsed = null;
+  }
+
+  return {
+    ...init,
+    body: JSON.stringify({ ...parsed, documentId }),
   };
 }
 

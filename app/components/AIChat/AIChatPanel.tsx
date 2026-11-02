@@ -23,6 +23,7 @@ import {
   toAiChatError,
   writeDraft,
 } from "~/utils/aiChat";
+import { restorePendingPrompt, useAIChatPanel } from "./AIChatContext";
 import type {
   AiChatError,
   AiChatKind,
@@ -31,6 +32,7 @@ import type {
   AiChatTurnStatus,
   AiChatWhenBusy,
 } from "~/utils/aiChat";
+import type { AiChatPrefill } from "./AIChatContext";
 import AIChatHistory from "./AIChatHistory";
 
 /*
@@ -314,6 +316,31 @@ const AIChatPanel = observer(function AIChatPanel({
   // stored row, and `stopTurn` discards it.
   const [queued, setQueued] = React.useState<QueuedTurn[]>([]);
   const [isFullscreen, setIsFullscreen] = React.useState(false);
+  const aiChatControls = useAIChatPanel();
+  const consumePendingPrompt = aiChatControls?.consumePendingPrompt;
+  // The document a prefill refers to, read by the request that sends it. The
+  // composer text alone carries no id, and the request needs it top-level.
+  const prefillDocumentIdRef = React.useRef<string | null>(null);
+  const seedPrefill = React.useCallback(
+    (prefill: AiChatPrefill | null) => {
+      if (!prefill) {
+        return false;
+      }
+      prefillDocumentIdRef.current = prefill.documentId ?? null;
+      setInput(prefill.prompt);
+      writeDraft(prefill.prompt, sessionId ?? undefined);
+      return true;
+    },
+    [sessionId]
+  );
+
+  // A prefill seeds the composer once, even across a close and reopen of the
+  // panel, and is spent on its first send.
+  React.useEffect(() => {
+    if (consumePendingPrompt) {
+      seedPrefill(consumePendingPrompt());
+    }
+  }, [consumePendingPrompt, seedPrefill]);
   // The client for the turn currently in flight. It is recreated per turn, so
   // it never owns the committed transcript – the store does.
   const clientRef = React.useRef<ChatClient | null>(null);
@@ -404,8 +431,11 @@ const AIChatPanel = observer(function AIChatPanel({
   // and whenever the selection changes, so an unsent question is never carried
   // into – or lost with – a different conversation.
   React.useEffect(() => {
-    setInput(readDraft(sessionId ?? undefined));
-  }, [sessionId]);
+    const prefilled = consumePendingPrompt ? consumePendingPrompt() : null;
+    if (!seedPrefill(prefilled)) {
+      setInput(readDraft(sessionId ?? undefined));
+    }
+  }, [sessionId, consumePendingPrompt, seedPrefill]);
 
   // The persisted turns of the active session, ordered by ascending `seq` so
   // the transcript reads oldest-first. Deliberately not `orderedData`, which
@@ -499,7 +529,8 @@ const AIChatPanel = observer(function AIChatPanel({
    */
   const sendTurn = async (
     content: string,
-    restoreOnBusy = false
+    restoreOnBusy = false,
+    documentId: string | null = null
   ): Promise<TurnOutcome> => {
     setPending([
       { role: "user", content },
@@ -536,6 +567,7 @@ const AIChatPanel = observer(function AIChatPanel({
       // very first send. The client is a frame source only — the committed
       // history stays in the store and is merged in for rendering.
       const connection = createAiChatConnection({
+        documentId: documentId ?? undefined,
         onKind: (kind) => {
           observedKind = kind;
         },
@@ -613,6 +645,12 @@ const AIChatPanel = observer(function AIChatPanel({
           setInput(content);
           writeDraft(content, targetSessionId);
           flushDrafts();
+          if (prefillDocumentIdRef.current) {
+            restorePendingPrompt({
+              prompt: content,
+              documentId: prefillDocumentIdRef.current,
+            });
+          }
         }
 
         // Aborts and every other failure keep the text out of the composer:
@@ -657,13 +695,20 @@ const AIChatPanel = observer(function AIChatPanel({
    * stops the drain so a broken request can never fire a backlog.
    *
    * @param first the message the user just submitted.
+   * @param documentId the document the submitted message references, if any.
    */
-  const runTurns = async (first: string) => {
+  const runTurns = async (first: string, documentId?: string | null) => {
     let next: string | undefined = first;
     let isSubmittedTurn = true;
 
     while (next !== undefined) {
-      const outcome = await sendTurn(next, isSubmittedTurn);
+      // Only the turn the prefill was spent on references the document; a
+      // drained queue item is a plain question.
+      const outcome = await sendTurn(
+        next,
+        isSubmittedTurn,
+        isSubmittedTurn ? documentId : null
+      );
       isSubmittedTurn = false;
       const following = queueRef.current[0];
 
@@ -715,9 +760,11 @@ const AIChatPanel = observer(function AIChatPanel({
 
     setInput("");
     // The message is leaving the composer as a turn, so it must not also come
-    // back as a draft for this conversation.
+    // back as a draft for this conversation. The prefill is spent once sent.
     clearDraft(sessionId ?? undefined);
-    await runTurns(content);
+    const documentId = prefillDocumentIdRef.current;
+    prefillDocumentIdRef.current = null;
+    await runTurns(content, documentId);
   };
 
   /**
