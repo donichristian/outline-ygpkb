@@ -122,7 +122,9 @@ export function restorePendingPrompt(prompt: AiChatPrefill): void {
  * @param prompt an optional prompt to seed into the composer.
  */
 export function openAIChatPanel(prompt?: string | AiChatPrefill): void {
-  setPendingPrompt(prompt ?? null);
+  setPendingPrompt(
+    typeof prompt === "string" ? { prompt } : (prompt ?? null)
+  );
   openHandler?.();
 }
 

@@ -294,6 +294,39 @@ describe("#createAiChatConnection", () => {
     expect(body.threadId).toBe(threadId);
   });
 
+  it("should carry documentId as a top-level body key", async () => {
+    document.cookie = "csrfToken=t; path=/";
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(sseResponse());
+    const connection = createAiChatConnection({
+      fetchClient: fetchMock,
+      documentId: "dddddddd-0000-4000-8000-000000000000",
+    });
+
+    await collect(
+      connection.connect(messages, undefined, undefined, runContext)
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body.documentId).toBe("dddddddd-0000-4000-8000-000000000000");
+    expect(body.forwardedProps).toEqual({});
+    expect(body.threadId).toBe(threadId);
+  });
+
+  it("should omit documentId when no document is in scope", async () => {
+    document.cookie = "csrfToken=t; path=/";
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(sseResponse());
+    const connection = createAiChatConnection({ fetchClient: fetchMock });
+
+    await collect(
+      connection.connect(messages, undefined, undefined, runContext)
+    );
+
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("documentId");
+  });
+
   it("should observe X-AI-Chat-Kind: refusal", async () => {
     document.cookie = "csrfToken=t; path=/";
     const kinds: AiChatKind[] = [];

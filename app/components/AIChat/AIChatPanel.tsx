@@ -1350,7 +1350,7 @@ const StarterList = styled.div`
   margin-top: 12px;
 `;
 
-const StarterButton = styled(Button<{ $neutral?: boolean }>)`
+const StarterButton = styled(Button)<{ $neutral?: boolean }>`
   justify-content: flex-start;
   font-weight: 400;
   text-align: left;
