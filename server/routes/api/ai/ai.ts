@@ -29,7 +29,7 @@ import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
 import { buildSystemPrompts } from "./prompt";
 import { loadTanstack } from "./tanstack";
-import { loadServerTools } from "./tools";
+import { loadServerTools, resolveDocumentReference } from "./tools";
 import { createAiChatAdapter } from "./adapter";
 
 /** The validated context of a chat request. */
@@ -302,6 +302,7 @@ function refuseWithAgUiRun({
   ctx.body = body;
 }
 
+
 /**
  * Streams an assistant answer as AG-UI over SSE, with optional turn storage.
  *
@@ -351,6 +352,15 @@ router.post(
     if (sessionId && !ownedSession) {
       throw NotFoundError();
     }
+
+    // Resolve an explicit document reference server-side before any upstream
+    // call, so the member's own permissions decide whether it resolves at all.
+    // A missing or unresolved reference resolves to `undefined` and the request
+    // continues exactly as it does today.
+    const boundDocumentId = await resolveDocumentReference(
+      ctx.input.body.documentId,
+      user
+    );
 
     // At most one turn may be in flight per (user, session), so a double submit
     // or a reconnect cannot open a second concurrent upstream call against the
@@ -593,6 +603,9 @@ router.post(
         ctx,
         requestId,
         releaseInFlightLock,
+        toolChoice: boundDocumentId
+          ? { type: "tool", name: "fetch_document" }
+          : undefined,
       });
 
       let response: Response;
@@ -624,8 +637,10 @@ router.post(
           // sends no system message at all.
           ...(systemPrompts ? { systemPrompts } : {}),
           // Server tools receive the requesting user through this context, so
-          // no tool closes over a request-scoped value.
-          context: { user },
+          // no tool closes over a request-scoped value. boundDocumentId is
+          // threaded through so the frozen fetch_document tool can bind its
+          // requested id to the document the user referenced.
+          context: { user, boundDocumentId },
           // REASONING: an operator decision (`AI_CHAT_REASONING`), never the
           // request body. The installed `openaiCompatibleText` adapter never
           // maps `chat({ reasoning })` onto the wire — its base

@@ -1,4 +1,4 @@
-import type { ChatMiddleware, StreamChunk } from "@tanstack/ai";
+import type { ChatMiddleware, StreamChunk, ToolChoice } from "@tanstack/ai";
 import { toError } from "@shared/utils/error";
 import aiChatMessageCreator from "@server/commands/aiChatMessageCreator";
 import Logger from "@server/logging/Logger";
@@ -53,6 +53,11 @@ export type PersistenceMiddlewareProps = {
   requestId?: string;
   /** Releases the per-session in-flight lock, idempotently. */
   releaseInFlightLock: () => Promise<void>;
+  /**
+   * Tool choice forced on the first upstream model call when a document is
+   * bound to the request, or `undefined` to leave the default (auto).
+   */
+  toolChoice?: ToolChoice;
 };
 
 /** Body-free digest of one tool call made while generating an assistant turn. */
@@ -201,6 +206,7 @@ export function createPersistenceMiddleware({
   ctx,
   requestId,
   releaseInFlightLock,
+  toolChoice,
 }: PersistenceMiddlewareProps): ChatMiddleware {
   let content = "";
   const toolResultIdentifiers: Set<string> = new Set();
@@ -440,6 +446,15 @@ export function createPersistenceMiddleware({
 
   return {
     name: "ai-chat-persist",
+    onConfig(hookCtx, _config) {
+      // Force the named body tool on the first upstream model call only, when a
+      // document is bound to the request. Subsequent calls fall back to the
+      // default (auto) so the model can decide whether to call again.
+      if (toolChoice && hookCtx.iteration === 0) {
+        return { toolChoice };
+      }
+      return undefined;
+    },
     onChunk(_hookCtx, chunk) {
       if (chunk.type === "TEXT_MESSAGE_CONTENT") {
          content += chunk.delta;
