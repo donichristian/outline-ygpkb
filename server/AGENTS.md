@@ -14,7 +14,7 @@ events on every write, Y.js collaboration, Bull queues.
 - `services/` (lazily imported): `web` (mounts API/MCP/auth/oauth/SPA),
   `worker` (Bull), `cron` (CronTasks), `collaboration` (Hocuspocus `/collaboration`),
   `websockets` (Socket.IO `/realtime`), `admin` (Bull Board, prod-blocked).
-- `env.ts` — 895-line zod-validated config, single source of truth.
+- `env.ts` — zod-validated config, single source of truth.
 
 ## Structure
 
@@ -30,7 +30,7 @@ server/
 ├── services/     Bootable modes (web/worker/cron/collaboration/websockets/admin)
 ├── collaboration/ Hocuspocus Y.js extensions
 ├── storage/      database.ts (Sequelize + Umzug), redis.ts, requestContext.ts
-├── migrations/   307 migrations (compiled by build:server before db:migrate)
+├── migrations/   48 committed .js migrations + baseline/ (run as-is)
 ├── emails/       Templates + mailer.tsx
 ├── utils/        66 helpers (startup, PluginManager, ssl, jwt, ShutdownHelper…)
 └── converters/   Import/export formats (Docx, PDF, CSV, TextPack)
@@ -62,14 +62,15 @@ domain routers. Per-route: `auth()` → `rateLimiter()` → `validate(zodSchema)
 
 ## Gotchas
 
-- `build/` is generated — never edit/commit. `yarn build:server` compiles TS
-  migrations before `db:migrate`.
+- `build/` is generated — never edit/commit. `yarn build:server` compiles
+  `server/`, `shared/` and `plugins/` to `build/`; migrations are plain `.js`
+  and need no build step before `db:migrate`.
 - `db:migrate` requires `NODE_ENV=development`.
 - Server tests share a module registry per worker — any test using `vi.mock` /
   `vi.resetModules` must start with `// @vitest-isolate true`.
 
 ## Hot files
 
-`routes/api/documents/documents.ts` (2088) · `models/helpers/ProsemirrorHelper.tsx`
-(1532) · `models/Document.ts` (1521) · `models/helpers/DocumentHelper.tsx` (1292) ·
-`models/Collection.ts` (1045) · `env.ts` (895)
+`routes/api/documents/documents.ts` · `models/helpers/ProsemirrorHelper.tsx` ·
+`models/Document.ts` · `models/helpers/DocumentHelper.tsx` ·
+`models/Collection.ts` · `env.ts`
