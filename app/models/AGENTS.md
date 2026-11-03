@@ -4,7 +4,7 @@ Client-side projections of server entities: MobX observables plus decorators. Se
 
 ## Overview
 
-**Base.** `app/models/base/Model.ts` is abstract; `static modelName` is the key the store layer matches on (`RootStore.getStoreForModelName`). `ParanoidModel` (soft delete: `deletedAt`, `isDeleted`) and `ArchivableModel` (archive: `archivedAt`) both extend `Model`, and `Document` extends `ArchivableModel`. `NavigableModel` (tree navigation: `node`, `path`) extends `Model` directly — it is not part of that chain. `Collection`, `User`, `OAuthClient` extend `ParanoidModel`; `OAuthAuthentication` extends `Model`. Base members: `fetch`, `refresh`, `delete`, `loadRelations()`, `toAPI`, `toPersisted`, `fromPersisted`, `isDirty`.
+**Base.** `app/models/base/Model.ts` is abstract; `static modelName` is the key the store layer matches on (`RootStore.getStoreForModelName`). `ParanoidModel` (soft delete: `deletedAt`, `isDeleted`) and `ArchivableModel` (archive: `archivedAt`) both extend `Model`, and `Document` extends `ArchivableModel`. `NavigableModel` (tree navigation: `node`, `pathToDocument()`) extends `Model` directly — it is not part of that chain. `Collection`, `User`, `OAuthClient` extend `ParanoidModel`; `OAuthAuthentication` extends `Model`. Base members: `fetch`, `refresh`, `delete`, `loadRelations()`, `toAPI`, `toPersisted`, `fromPersisted`, `isDirty`.
 
 **Constructor contract.** `super(fields, store)`, then `this.initialize(fields)` in the most-derived class. `initialize` pre-defines each declared field as an own property (`Object.defineProperty`, value `undefined`), applies the payload through `updateData`, sets `isNew = !id`, then calls `makeObservable(this)`.
 
