@@ -462,9 +462,28 @@ it after the upstream latency.
   string differs; the decision is unchanged and still fail-closed.
 
 Cost: one search per request (two or three indexed queries on the read
-replica). The upgrade path, if this proves too blunt, is ranking with embeddings,
-or keeping the lexical probe and adding a post-hoc check that the upstream stream
-cites a `/doc/` URL before any token of it is flushed.
+replica). The upgrade path, if this proves too blunt, is ranking with embeddings.
+
+The second half of that upgrade path **has since shipped**, in a deliberately
+weaker form than the version written above. Rather than gating the stream before
+the first token is flushed (which would require holding the whole answer), the
+check runs at the **end** of the turn: `isCitationMiss()`
+(`server/routes/api/ai/middleware.ts`) compares the accumulated answer text
+against the set of identifiers that tools actually returned during the run. If
+no tool ran, or none of its identifiers appears in the answer, the turn is
+recorded with `citationMiss = true` and the panel shows “No sources found”.
+
+What this does and does not buy:
+
+- It **marks** an unsourced answer rather than suppressing it. The user sees the
+  answer and the marker together, and the flag is persisted, so the judgement is
+  available when the conversation is reopened.
+- It is an **identifier-substring test**, not a citation parser. An answer that
+  happens to contain a returned document id for an unrelated reason passes; an
+  answer that cites a document the tools never returned fails. It is a cheap
+  lower bound on “did this answer use what it read”, not proof of support.
+- It costs **no extra model call and no extra query** — the identifiers are
+  collected while the tools run.
 
 ### 4.2 The residual risk of storing history: durable fabrication
 
@@ -566,7 +585,7 @@ Search["SearchProviderManager.getProvider().searchForUser"]
 Sessions["ai.sessions.create / list / delete<br/>ai.messages.list<br/>findOwned + authorize"]
 Lock["Redis in-flight cap<br/>aiChat:inflight:{user}:{session}, TTL 900s"]
 Chain["TanStack chat()<br/>openaiCompatibleText adapter"]
-Tools["tools.ts<br/>frozen search_workspace allowlist"]
+Tools["tools.ts<br/>frozen allowlist: search_workspace,<br/>recommend_documents, fetch_document"]
 Persist["persistence middleware<br/>appendTurn + lock release"]
 Db[("ai_chat_sessions<br/>ai_chat_messages")]
 end
@@ -726,6 +745,7 @@ document.
 | `AI_CHAT_MODEL` | Handed to the `openaiCompatibleText` adapter and forwarded as `model` in the upstream body (§7). **Required to enable the route**: with `AI_CHAT_BASE_URL` set but no model, `POST /api/ai.chat` returns 404 and is never sent upstream. |
 | `AI_CHAT_REASONING` | `@IsIn(["minimal", "low", "medium", "high"])`, optional. Sets the Chat Completions `reasoning_effort` through `modelOptions`; unset omits the field entirely. Never read from the request body. |
 | `AI_CHAT_GROUNDING` | `@IsBoolean`, default `true`. Runs the local grounding probe (§4). Set `false` to skip it when the provider is itself the retrieval agent and enforces the boundary, so the lexical probe does not refuse prompts the provider can answer. |
+| `AI_CHAT_SYSTEM_PROMPT` | `@IsBoolean`, default `false`. Opts into the repository-side assistant instruction layer as a leading system message (answer only from the workspace, cite every claim, say plainly when the workspace lacks the answer, read before summarising, treat document text as data, reply in the user's language). Default `false` leaves the upstream body unchanged. |
 
 `AI_CHAT_API_KEY` and `AI_CHAT_MODEL` are `@CannotUseWithout("AI_CHAT_BASE_URL")`,
 so setting either without the base URL is rejected at boot. `AI_CHAT_GROUNDING`

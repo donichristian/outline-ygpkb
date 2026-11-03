@@ -12,6 +12,19 @@ Read these before working here:
 - `docs/ARCHITECTURE.md` — upstream architecture
 - `docs/NON-TECHNICAL-GUIDE.md` — non-engineering overview
 
+Fork-specific docs:
+
+- `docs/AI-CHAT.md` — AI chat feature
+- `docs/KB-INTEGRATION-CONTRACT.md` — knowledge-base integration contract
+- `docs/HERMES-INTEGRATION.md` — Hermes integration
+- `docs/HERMES-OUTLINE-ARCHITECTURE.md` — Hermes × Outline architecture
+- `docs/FOUNDATION-ARCHITECTURE.md` — foundation architecture
+- `docs/SERVICES.md` — service topology
+- `docs/DEPLOYMENT.md` — deployment
+- `docs/TELEGRAM-COMMANDS.md` — Telegram commands
+- `docs/FRONTMATTER-PLAN.md` — frontmatter plan
+- `docs/SECURITY.md` — security notes
+
 ## Where to look
 
 | Task | Location | Notes |
@@ -19,13 +32,16 @@ Read these before working here:
 | Frontend feature/bug | `app/` | React 19 SPA, MobX stores, react-router v5. See `app/AGENTS.md`. |
 | API endpoint | `server/routes/api/<resource>/<resource>.ts` | RPC-style `POST /api/x.y`. See `server/AGENTS.md`. |
 | DB model / soft-delete | `server/models/*.ts` + `models/helpers/` | Sequelize. See `server/models/AGENTS.md`. |
-| Multi-step write workflow | `server/commands/` | Cross-model orchestration (create/move/import). |
-| Authorization rule | `server/policies/*.ts` | cancan-style; one file per model. |
+| Multi-step write workflow | `server/commands/` | Cross-model orchestration (create/move/import). See `server/commands/AGENTS.md`. |
+| Authorization rule | `server/policies/*.ts` | cancan-style; one file per model. See `server/policies/AGENTS.md`. |
 | Rich-text editor | `shared/editor/` | ProseMirror. See `shared/editor/AGENTS.md`. |
 | Shared types/utils | `shared/` | Used by both app + server. See `shared/AGENTS.md`. |
 | Third-party integration | `plugins/<name>/` | `server/` + `client/` split. See `plugins/AGENTS.md`. |
 | Background job / queue | `server/queues/` | Bull tasks + processors. See `server/queues/AGENTS.md`. |
-| Command bar / context menu action | `app/actions/definitions/` | Definitions consumed by menus + kbar. |
+| Command bar / context menu action | `app/actions/definitions/` | Definitions consumed by menus + kbar. See `app/actions/AGENTS.md`. |
+| Client-side model | `app/models/` | MobX models + field decorators. See `app/models/AGENTS.md`. |
+| AI chat (fork feature) | `server/routes/api/ai/` + `app/components/AIChat/` | Streaming chat. See `docs/AI-CHAT.md`. |
+| MCP tools (fork feature) | `server/mcp/` | Tool impls + skills; `server/routes/mcp/` is the HTTP mount. |
 
 ## Subdirectory knowledge base
 
@@ -34,11 +50,15 @@ touch (children never restate parent content):
 
 - `app/AGENTS.md` — SPA structure, stores, models, routing, conventions
 - `app/stores/AGENTS.md` — MobX store patterns
+- `app/models/AGENTS.md` — client-side models + field decorators
 - `app/components/AGENTS.md` — shared component library
 - `app/scenes/AGENTS.md` — route-level pages
+- `app/actions/AGENTS.md` — action definitions (kbar, menus, WebMCP)
 - `server/AGENTS.md` — Koa app, boot, request flow, commands/policies
 - `server/models/AGENTS.md` — Sequelize models + base classes
 - `server/routes/api/AGENTS.md` — RPC route conventions
+- `server/commands/AGENTS.md` — cross-model write commands
+- `server/policies/AGENTS.md` — cancan abilities
 - `server/queues/AGENTS.md` — Bull tasks/processors
 - `shared/AGENTS.md` — cross-cutting shared code
 - `shared/editor/AGENTS.md` — ProseMirror editor internals
@@ -51,11 +71,11 @@ outline-ygpkb/
 ├── app/          React SPA (MobX, react-router v5, styled-components) → "~" alias
 ├── server/       Koa + Sequelize + Bull backend (RPC API, services, queues)
 ├── shared/       Code used by BOTH app and server (editor, types, utils) → "@shared"
-├── plugins/      23 integrations, each server/ + client/ (slack, github, …)
+├── plugins/      24 integrations, each server/ + client/ (slack, github, …)
 ├── scripts/      Windows dev launchers (dev-start/check/stop/reset.ps1, dev.js)
 ├── docs/         Technical + architecture guides
 ├── build/        GENERATED — never edit or commit
-└── server/migrations/   307 Sequelize migrations (compiled before db:migrate)
+└── server/migrations/   48 committed .js migrations (+ baseline/) — plain JS, run as-is
 ```
 
 Note that `shared/types.ts` no longer exists — upstream split it into the
@@ -100,38 +120,82 @@ docs: document native Windows dev setup
 ## Commands
 
 ```bash
-yarn lint                # oxlint, type-aware
+yarn lint                # oxlint --type-aware over app server shared plugins
+yarn lint:changed        # oxlint on git-changed files (POSIX grep/xargs — fails on Windows)
 yarn format              # oxfmt (write); yarn format:check to verify
-yarn tsc                 # typecheck — use --incremental false as CI does
+yarn tsc --incremental false   # typecheck, the CI form (no package script — local binary)
 yarn test path/to/x.test.ts   # single file (preferred)
 yarn test:app  test:server  test:shared
-yarn build:server        # required before db:migrate (compiles TS migrations)
-yarn db:migrate          # needs NODE_ENV=development set
+yarn build:server        # compile server TS → build/ (needed before yarn start)
+yarn build:i18n          # extract translations + copy locales → build/
+yarn db:migrate          # sequelize-cli; needs NODE_ENV=development
+yarn db:rollback  yarn db:reset
 yarn db:create-migration --name my-migration
 ```
+
+Migrations are already plain `.js` in `server/migrations/`, and `.sequelizerc`
+points sequelize-cli there, so no build step is needed before `db:migrate`.
 
 `yarn test` runs with `TZ=UTC`. Server tests need PostgreSQL and Redis on
 `127.0.0.1` (`outline-test` database, `.env.test`).
 
-Pre-commit runs `oxfmt`, `oxlint --fix`, and `yarn build:i18n` on staged
-JS/TS via Husky + lint-staged. Translation strings are **extracted
-automatically** — never hand-edit `shared/i18n/locales/`.
+CI (`.github/workflows/ci.yml`) runs `yarn lint --quiet` → `yarn tsc
+--incremental false` → `yarn test:app` / `yarn test:shared`; the server job
+runs `yarn sequelize db:migrate` then `yarn test:server --maxWorkers=4
+--shard=N/6`. Separate `actionlint`, `audit`, and `bundle-size` jobs cover
+workflow YAML, dependency advisories, and app bundle size (the last is gated
+to the upstream repo).
 
-`yarn format:check` currently reports ~2601 pre-existing files as
-unformatted, and `yarn lint` has many pre-existing warnings. Both are
-baseline noise, not caused by your change. Do **not** run bare `yarn format`
-to "fix" them — it rewrites the whole repo. Format and lint only the files
-you touched, and compare against the baseline before assuming you broke
-something.
+`.husky/pre-commit` runs `npx lint-staged`, configured by
+`lint-staged.config.mjs`: oxfmt → oxlint `--fix` (or `yarn lint --fix` above
+20 files) → `yarn build:i18n` → `git add` the translation catalog, plus
+`yarn dedupe` for lockfile changes. The hook does not run in this checkout —
+see below. Translation strings are **extracted automatically** — never
+hand-edit `shared/i18n/locales/`.
+
+`yarn format:check` reports many pre-existing files as unformatted, and
+`yarn lint` has many pre-existing warnings. Both are baseline noise, not
+caused by your change. Do **not** run bare `yarn format` to "fix" them — it
+rewrites the whole repo. Format and lint only the files you touched, and
+compare against the baseline before assuming you broke something.
 
 ### Verify in this order
 
 `yarn lint` → `yarn tsc` → `yarn test <file>`. Typecheck before tests; a
 type error usually explains a test failure.
 
+## Lint and format (oxlint + oxfmt)
+
+`.oxlintrc.json` is the single source of truth. It loads eight custom JS
+plugins from `.oxlint/`:
+
+- `mobx.mjs` — `mobx/observable-needs-initializer`: every MobX observable field
+  needs an initializer (this is what breaks models that forget a default).
+- `bundle.mjs` — `bundle/no-constructor-name`, applied to `plugins/*/client/**`
+  only.
+- `sequelize.mjs` — `sequelize/prefer-after-commit-helper`.
+- `vitest.mjs` — `vitest-local/require-isolate-directive`, alongside the
+  built-in `vitest/*` test rules.
+- `editor.mjs` — `editor/sanitize-url-in-to-dom`.
+- `koa.mjs` — `koa/no-request-origin`.
+- `react-router.mjs` — `react-router/no-deferred-use-location`.
+- `classes.mjs` — `classes/no-private-identifier`.
+
+Ignored paths: `build/**`, `node_modules/**`, `public/**`, `server/migrations/**`,
+`server/scripts/**`, `patches/**`, `*.d.ts`. Errors include `no-explicit-any`,
+`eqeqeq`, `curly`, `no-console`, `react-hooks/exhaustive-deps`,
+`typescript/no-floating-promises`, `typescript/consistent-type-imports`.
+`no-restricted-imports` bans direct `addRowBefore`/`addColumnAfter` imports
+from `prosemirror-tables` — use the wrappers in `shared/editor/commands/table`
+— and bans `lodash` in favour of `es-toolkit`.
+
+Format with `yarn format` (oxfmt). Format and lint only files you touched.
+
 ## General guidelines
 
-- Critical – Do not create new markdown (.md) files.
+- Critical – Do not create new documentation markdown files. The `AGENTS.md`
+  knowledge-base files are the exception; add one where a subsystem is complex
+  enough that its own file beats a growing root section.
 - Use early returns for readability.
 - Leave an empty line above every comment, unless the comment is the first line in a block.
 - Emphasize type safety and static analysis.
@@ -164,9 +228,10 @@ unrelated consumers onto an incompatible version. Never hand-merge
 
 ## Windows environment
 
-No Docker, no WSL, no bash (WSL is not installed and virtualization is
-disabled in firmware). Use the `yarn` commands, not `make` targets — the
-`Makefile` assumes Docker.
+No Docker, no WSL, no POSIX shell on PATH (WSL is not installed and
+virtualization is disabled in firmware; Git Bash ships with Git but `grep` /
+`xargs` are not on PATH, so `yarn lint:changed` fails). Use the `yarn`
+commands, not `make` targets — the `Makefile` assumes Docker.
 
 - App runs at **http://localhost:3050** (`PORT`); Vite serves assets on
   `VITE_DEV_PORT` (3051). Both ports must differ or HMR breaks.
@@ -177,18 +242,26 @@ disabled in firmware). Use the `yarn` commands, not `make` targets — the
 - Set `NODE_ENV=development` before `yarn db:migrate` or the env validator
   fails — it only reads `.env.development` in that mode.
 
-### Husky is not installed
+### Pre-commit hook does not run
 
-`core.hooksPath` is unset and `.husky/_` does not exist, so **the pre-commit
-hook does not run** — format, lint, and i18n extraction are silently skipped
-on every commit. Run `yarn lint`, `yarn format:check`, and `yarn build:i18n`
-manually before committing. Do not assume a commit was checked.
+`package.json` has `"prepare": "husky"`, but `.yarnrc.yml` sets
+`enableScripts: false`, so no install lifecycle script runs: `.husky/_` does
+not exist and `core.hooksPath` is unset, so `.husky/pre-commit` never
+executes. Format, lint, and i18n extraction are silently skipped on every
+commit. Run `yarn lint`, `yarn format:check`, and `yarn build:i18n` manually
+before committing. Do not assume a commit was checked. The hook also shells
+out through `bash -c` (`lint-staged.config.mjs`) and `npx lint-staged`, so it
+needs a POSIX shell even once installed.
 
-`yarn build:i18n` also **fails on Windows** (`command not found: mkdir`): the
-`copy:i18n` script uses `mkdir -p` and `cp`, which need a POSIX shell. It
-partially writes `shared/i18n/locales/en_US/translation.json` with CRLF churn
-before erroring. Check `git status` after running it and revert that file if
-your change did not add or modify any user-facing string.
+`enableScripts: false` also skips `postinstall`, so `yarn patch-package` never
+runs on install — apply `patches/` manually (`yarn patch-package`) after a
+fresh `yarn install`.
+
+`yarn build:i18n` = `i18next` extraction + `scripts/copy-i18n.mjs`, which uses
+`node:fs` (`mkdirSync` + `cpSync`) and works on Windows — the old POSIX
+`mkdir -p`/`cp` version is gone. Extraction rewrites
+`shared/i18n/locales/en_US/translation.json`; check `git status` afterwards and
+revert that file if your change added no user-facing string.
 
 ### Shell environment
 

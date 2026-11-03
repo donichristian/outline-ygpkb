@@ -33,7 +33,7 @@ vi.mock("~/components/Button", () => ({
     // assertions below assert the mock instead of AIChatTrigger.
     const { children, onClick, "data-testid": testId, style } = props;
     return (
-      <button data-testid={testId} onClick={onClick} style={style}>
+      <button type="button" data-testid={testId} onClick={onClick} style={style}>
         {children}
       </button>
     );
@@ -92,6 +92,8 @@ describe("AIChatTrigger", () => {
       open: vi.fn(),
       close: vi.fn(),
       isOpen: false,
+      setPendingPrompt: vi.fn(),
+      consumePendingPrompt: () => null,
     };
 
     const { query, cleanup } = renderTrigger(controls);
@@ -122,6 +124,8 @@ describe("AIChatTrigger", () => {
       open: vi.fn(),
       close: vi.fn(),
       isOpen: true,
+      setPendingPrompt: vi.fn(),
+      consumePendingPrompt: () => null,
     };
 
     const { query, cleanup } = renderTrigger(controls);
@@ -136,6 +140,8 @@ describe("AIChatTrigger", () => {
       open: vi.fn(),
       close: vi.fn(),
       isOpen: false,
+      setPendingPrompt: vi.fn(),
+      consumePendingPrompt: () => null,
     };
 
     const { query, cleanup } = renderTrigger(controls);

@@ -23,13 +23,16 @@ import {
   toAiChatError,
   writeDraft,
 } from "~/utils/aiChat";
+import { restorePendingPrompt, useAIChatPanel } from "./AIChatContext";
 import type {
   AiChatError,
   AiChatKind,
   AiChatMessage,
+  AiChatToolCallDigest,
   AiChatTurnStatus,
   AiChatWhenBusy,
 } from "~/utils/aiChat";
+import type { AiChatPrefill } from "./AIChatContext";
 import AIChatHistory from "./AIChatHistory";
 
 /*
@@ -74,6 +77,11 @@ type ToolCallView = {
   input?: unknown;
   /** The tool's result, absent while the call is still running. */
   output?: unknown;
+  /**
+   * Whether the call is finished. A live call derives this from its output; a
+   * stored digest carries no result body to inspect, so it states it directly.
+   */
+  complete?: boolean;
 };
 
 /** A transcript entry: the turn sent to the provider, or one read back. */
@@ -86,9 +94,25 @@ type TranscriptTurn = {
   content: string;
   /** The tool calls made while producing a live turn. */
   toolCalls?: ToolCallView[];
+
+  /**
+   * The stored, body-free record of the tool calls a live turn made. Only a
+   * turn read back from the server carries one, and it is what keeps the
+   * evidence for a reopened answer visible instead of reduced to prose.
+   */
+  digest?: AiChatToolCallDigest;
   /** How the turn ended, for a turn read back from the server. */
   status?: AiChatTurnStatus;
+  /** Whether a stored assistant turn carried no source a tool returned. */
+  citationMiss?: boolean;
 };
+
+/** The suggestions shown before the first turn, each naming a served capability. */
+const StarterPrompts = [
+  "Summarise this document",
+  "What documents do we have about onboarding?",
+  "Recommend documents to read about our roadmap",
+];
 
 /** A message waiting for the in-flight turn to settle. */
 type QueuedTurn = {
@@ -100,6 +124,27 @@ type QueuedTurn = {
 
 /** How a turn ended, which decides whether the queue drains or is discarded. */
 type TurnOutcome = "settled" | "superseded" | "failed";
+
+/**
+ * Projects a stored tool-call digest onto the same view the live turn renders,
+ * so a reopened answer shows the evidence it was built from. A digest carries
+ * no result body by design, so the card renders the call as complete and shows
+ * what was read – names, titles and sizes – through its input.
+ *
+ * @param digest the digest read back from the server, if the turn has one.
+ * @returns the tool calls to render, in call order.
+ */
+function digestToolCalls(
+  digest: AiChatToolCallDigest | undefined
+): ToolCallView[] {
+  return (digest?.toolCalls ?? []).map((toolCall, index) => ({
+    id: toolCall.toolCallId ?? `digest-${index}`,
+    name: toolCall.toolName ?? "",
+    input: toolCall,
+    output: undefined,
+    complete: true,
+  }));
+}
 
 /**
  * The text, reasoning and tool calls carried by the client's trailing assistant
@@ -267,6 +312,9 @@ const AIChatPanel = observer(function AIChatPanel({
   const [input, setInput] = React.useState(() =>
     readDraft(sessionId ?? undefined)
   );
+  // Starts at the composer so the keystrokes that follow a starter prompt land
+  // in the text it seeded.
+  const inputRef = React.useRef<HTMLInputElement>(null);
   const [isStreaming, setIsStreaming] = React.useState(false);
   const [error, setError] = React.useState<AiChatError | null>(null);
   // The reasoning of the turn currently streaming. Kept only for the live turn:
@@ -280,6 +328,31 @@ const AIChatPanel = observer(function AIChatPanel({
   // stored row, and `stopTurn` discards it.
   const [queued, setQueued] = React.useState<QueuedTurn[]>([]);
   const [isFullscreen, setIsFullscreen] = React.useState(false);
+  const aiChatControls = useAIChatPanel();
+  const consumePendingPrompt = aiChatControls?.consumePendingPrompt;
+  // The document a prefill refers to, read by the request that sends it. The
+  // composer text alone carries no id, and the request needs it top-level.
+  const prefillDocumentIdRef = React.useRef<string | null>(null);
+  const seedPrefill = React.useCallback(
+    (prefill: AiChatPrefill | null) => {
+      if (!prefill) {
+        return false;
+      }
+      prefillDocumentIdRef.current = prefill.documentId ?? null;
+      setInput(prefill.prompt);
+      writeDraft(prefill.prompt, sessionId ?? undefined);
+      return true;
+    },
+    [sessionId]
+  );
+
+  // A prefill seeds the composer once, even across a close and reopen of the
+  // panel, and is spent on its first send.
+  React.useEffect(() => {
+    if (consumePendingPrompt) {
+      seedPrefill(consumePendingPrompt());
+    }
+  }, [consumePendingPrompt, seedPrefill]);
   // The client for the turn currently in flight. It is recreated per turn, so
   // it never owns the committed transcript – the store does.
   const clientRef = React.useRef<ChatClient | null>(null);
@@ -370,8 +443,11 @@ const AIChatPanel = observer(function AIChatPanel({
   // and whenever the selection changes, so an unsent question is never carried
   // into – or lost with – a different conversation.
   React.useEffect(() => {
-    setInput(readDraft(sessionId ?? undefined));
-  }, [sessionId]);
+    const prefilled = consumePendingPrompt ? consumePendingPrompt() : null;
+    if (!seedPrefill(prefilled)) {
+      setInput(readDraft(sessionId ?? undefined));
+    }
+  }, [sessionId, consumePendingPrompt, seedPrefill]);
 
   // The persisted turns of the active session, ordered by ascending `seq` so
   // the transcript reads oldest-first. Deliberately not `orderedData`, which
@@ -391,6 +467,8 @@ const AIChatPanel = observer(function AIChatPanel({
           role: message.role,
           content: message.content,
           status: message.status,
+          digest: message.toolCallDigest,
+          citationMiss: message.citationMiss,
         }))
     : [];
 
@@ -464,7 +542,8 @@ const AIChatPanel = observer(function AIChatPanel({
    */
   const sendTurn = async (
     content: string,
-    restoreOnBusy = false
+    restoreOnBusy = false,
+    documentId: string | null = null
   ): Promise<TurnOutcome> => {
     setPending([
       { role: "user", content },
@@ -501,6 +580,7 @@ const AIChatPanel = observer(function AIChatPanel({
       // very first send. The client is a frame source only — the committed
       // history stays in the store and is merged in for rendering.
       const connection = createAiChatConnection({
+        documentId: documentId ?? undefined,
         onKind: (kind) => {
           observedKind = kind;
         },
@@ -578,6 +658,12 @@ const AIChatPanel = observer(function AIChatPanel({
           setInput(content);
           writeDraft(content, targetSessionId);
           flushDrafts();
+          if (prefillDocumentIdRef.current) {
+            restorePendingPrompt({
+              prompt: content,
+              documentId: prefillDocumentIdRef.current,
+            });
+          }
         }
 
         // Aborts and every other failure keep the text out of the composer:
@@ -622,13 +708,20 @@ const AIChatPanel = observer(function AIChatPanel({
    * stops the drain so a broken request can never fire a backlog.
    *
    * @param first the message the user just submitted.
+   * @param documentId the document the submitted message references, if any.
    */
-  const runTurns = async (first: string) => {
+  const runTurns = async (first: string, documentId?: string | null) => {
     let next: string | undefined = first;
     let isSubmittedTurn = true;
 
     while (next !== undefined) {
-      const outcome = await sendTurn(next, isSubmittedTurn);
+      // Only the turn the prefill was spent on references the document; a
+      // drained queue item is a plain question.
+      const outcome = await sendTurn(
+        next,
+        isSubmittedTurn,
+        isSubmittedTurn ? documentId : null
+      );
       isSubmittedTurn = false;
       const following = queueRef.current[0];
 
@@ -680,9 +773,11 @@ const AIChatPanel = observer(function AIChatPanel({
 
     setInput("");
     // The message is leaving the composer as a turn, so it must not also come
-    // back as a draft for this conversation.
+    // back as a draft for this conversation. The prefill is spent once sent.
     clearDraft(sessionId ?? undefined);
-    await runTurns(content);
+    const documentId = prefillDocumentIdRef.current;
+    prefillDocumentIdRef.current = null;
+    await runTurns(content, documentId);
   };
 
   /**
@@ -695,6 +790,15 @@ const AIChatPanel = observer(function AIChatPanel({
       replaceQueue(queueRef.current.filter((item) => item.id !== id));
     },
     [replaceQueue]
+  );
+
+  const handleStarterPrompt = React.useCallback(
+    (prompt: string) => {
+      setInput(prompt);
+      writeDraft(prompt, sessionId ?? undefined);
+      inputRef.current?.focus();
+    },
+    [sessionId]
   );
 
   const handleChange = React.useCallback(
@@ -754,9 +858,24 @@ const AIChatPanel = observer(function AIChatPanel({
       <Container column>
         <Transcript ref={transcriptRef} data-testid="ai-chat-transcript">
           {turns.length === 0 && (
-            <EmptyText type="secondary" size="small">
-              {t("Ask anything about your workspace")}
-            </EmptyText>
+            <>
+              <EmptyText type="secondary" size="small">
+                {t("Ask anything about your workspace")}
+              </EmptyText>
+              <StarterList data-testid="ai-chat-starters">
+                {StarterPrompts.map((prompt) => (
+                  <StarterButton
+                    key={prompt}
+                    type="button"
+                    neutral
+                    onClick={() => handleStarterPrompt(prompt)}
+                    data-testid="ai-chat-starter"
+                  >
+                    {t(prompt)}
+                  </StarterButton>
+                ))}
+              </StarterList>
+            </>
           )}
           {turns.map((turn, index) => {
             const isLast = index === turns.length - 1;
@@ -771,12 +890,18 @@ const AIChatPanel = observer(function AIChatPanel({
               turn.role === "assistant" &&
               !turn.content &&
               !turn.toolCalls?.length &&
+              !turn.digest?.toolCalls?.length &&
+              !turn.citationMiss &&
               !isStreamingAssistant
             ) {
               return null;
             }
 
             const marker = turnMarker(turn, t);
+
+            const toolCalls = turn.toolCalls?.length
+              ? turn.toolCalls
+              : digestToolCalls(turn.digest);
 
             return (
               <Message
@@ -798,7 +923,7 @@ const AIChatPanel = observer(function AIChatPanel({
                     <ReasoningBody>{reasoning}</ReasoningBody>
                   </ReasoningDisclosure>
                 )}
-                {turn.toolCalls?.map((toolCall) => (
+                {toolCalls.map((toolCall) => (
                   <ToolCallCard key={toolCall.id} toolCall={toolCall} />
                 ))}
                 {turn.role === "assistant" ? (
@@ -816,6 +941,11 @@ const AIChatPanel = observer(function AIChatPanel({
                   >
                     {marker.label}
                   </TurnMarker>
+                )}
+                {turn.role === "assistant" && turn.citationMiss && (
+                  <NoSourceNote data-testid="ai-chat-no-source">
+                    {t("No sources found")}
+                  </NoSourceNote>
                 )}
               </Message>
             );
@@ -869,6 +999,7 @@ const AIChatPanel = observer(function AIChatPanel({
         <Composer ref={formRef} onSubmit={handleSubmit}>
           <Input
             type="text"
+            ref={inputRef}
             value={input}
             placeholder={t("Ask a question…")}
             onChange={handleChange}
@@ -970,7 +1101,8 @@ function toolValue(value: unknown): string {
  */
 function ToolCallCard({ toolCall }: { toolCall: ToolCallView }) {
   const { t } = useTranslation();
-  const isComplete = toolCall.output !== undefined;
+  const isComplete = toolCall.complete ?? toolCall.output !== undefined;
+  const hasOutput = toolCall.output !== undefined;
 
   return (
     <ToolCall data-testid="ai-chat-tool-call">
@@ -988,14 +1120,14 @@ function ToolCallCard({ toolCall }: { toolCall: ToolCallView }) {
           </ToolCallValue>
         </ToolCallField>
       )}
-      {isComplete ? (
+      {hasOutput ? (
         <ToolCallField>
           <ToolCallLabel>{t("Output")}</ToolCallLabel>
           <ToolCallValue data-testid="ai-chat-tool-output">
             {toolValue(toolCall.output)}
           </ToolCallValue>
         </ToolCallField>
-      ) : (
+      ) : isComplete ? null : (
         <ToolCallPending data-testid="ai-chat-tool-pending" role="status">
           <Spinner aria-hidden />
           {t("Waiting for result…")}
@@ -1213,6 +1345,34 @@ const EmptyText = styled(Text)`
   color: ${s("textTertiary")};
   text-align: center;
   margin-top: 24px;
+`;
+
+const StarterList = styled.div`
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 12px;
+`;
+
+const StarterButton = styled(Button)`
+  justify-content: flex-start;
+  font-weight: 400;
+  text-align: left;
+  white-space: normal;
+
+  > span {
+    white-space: normal;
+    text-align: left;
+  }
+`;
+
+const NoSourceNote = styled.span`
+  display: block;
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: ${s("textTertiary")};
 `;
 
 const Message = styled.div<{ $role: "user" | "assistant" }>`

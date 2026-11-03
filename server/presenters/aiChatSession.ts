@@ -25,6 +25,10 @@ export function presentAIChatSession(session: AIChatSession) {
  * No ownership column is exposed: messages carry none, and permission for a
  * message is resolved through its session.
  *
+ * The tool-call digest is body-free: it names what was read and how large it
+ * was, never the text itself, so a stored call can be redrawn without leaking
+ * a document the reader could no longer open.
+ *
  * @param message the message to serialize.
  * @returns the message in API shape.
  */
@@ -36,6 +40,8 @@ export function presentAIChatMessage(message: AIChatMessage) {
     content: message.content,
     status: message.status,
     runId: message.runId,
+    toolCallDigest: message.toolCallDigest,
+    citationMiss: message.citationMiss,
     createdAt: message.createdAt,
   };
 }

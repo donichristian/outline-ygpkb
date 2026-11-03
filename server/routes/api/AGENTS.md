@@ -9,13 +9,14 @@ directory over the README's "RESTful endpoints" claim.
 Every `<resource>/` typically holds:
 
 - `<resource>.ts` — `router.post("resource.action", ...)` handlers
-- `schema.ts` — zod schemas (`T.ResourceActionSchema` + derived `Req/Res` types)
+- `schema.ts` — zod schemas (built on `BaseSchema` from `routes/api/schema.ts`,
+  plus derived `Req/Res` types)
 - `index.ts` — wires the domain router (`<resource>.routes()`)
 - `<resource>.test.ts` — API tests (+ `__snapshots__/`)
 
 ## Route middleware stack (in order)
 
-`auth()` → `rateLimiter(RateLimiterStrategy.…)` → `validate(T.Schema)` (sets
+`auth()` → `rateLimiter(RateLimiterStrategy.…)` → `validate(Schema)` (sets
 `ctx.input`) → `transaction()` (sets `ctx.state.transaction`) → handler.
 
 Handler shape: `authorize(user, "action", model)` (from `server/policies/`) →
@@ -43,12 +44,12 @@ Unknown paths raise `NotFoundError`.
 
 ## Gotchas
 
-- 307 migrations live in `server/migrations/`; run `yarn build:server` before
-  `yarn db:migrate` (migrations are compiled).
+- Migrations are plain `.js` in `server/migrations/`; run `yarn db:migrate`
+  directly — no build step.
 - Route types come from `router.post(".name", ...)` string keys, matched by
   `ApiClient` — renaming an action is a breaking API change.
 
 ## Hot files
 
-`documents/documents.ts` (2088, + `schema.ts` 605) · `collections/collections.ts`
-(881) · `users/users.ts` (600) · `shares/shares.ts` (584) · `groups/groups.ts` (572)
+`documents/documents.ts` (+ `schema.ts`) · `collections/collections.ts` ·
+`users/users.ts` · `shares/shares.ts` · `groups/groups.ts`
