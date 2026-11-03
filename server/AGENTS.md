@@ -5,16 +5,18 @@ events on every write, Y.js collaboration, Bull queues.
 
 ## Entry points & boot
 
-- `index.ts` — `throng` process supervisor. `master()` runs pending-migration
+- `index.ts` — `ClusterManager` supervisor. `primary()` runs pending-migration
   check + env print only; the heavy model graph loads lazily in workers via
-  `import("./main")`. Count: 1 for worker-only, else `WEB_CONCURRENCY`.
+  `import("./main")`. Process count: 1 for worker-only, else
+  `WEB_CONCURRENCY ?? os.cpus().length`, and forced to 1 for collaboration
+  without `REDIS_COLLABORATION_URL`.
 - `main.ts` — `start(id, disconnect)`: load plugins, build Koa + http/https,
   install `helmet`/`onerror`/rate limiter/`/_health`, then init each service in
   `env.SERVICES` from `services/index.ts`.
 - `services/` (lazily imported): `web` (mounts API/MCP/auth/oauth/SPA),
   `worker` (Bull), `cron` (CronTasks), `collaboration` (Hocuspocus `/collaboration`),
   `websockets` (Socket.IO `/realtime`), `admin` (Bull Board, prod-blocked).
-- `env.ts` — zod-validated config, single source of truth.
+- `env.ts` — class-validator-validated config, single source of truth.
 
 ## Structure
 

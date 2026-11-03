@@ -19,15 +19,20 @@ import the file directly.
 | Group sync | `groupsSyncer` |
 | AI chat (fork) | `aiChatSessionCreator` `aiChatMessageCreator` `aiChatSessionDestroyer` |
 
+`shareLoader.ts` exports `loadPublicShare` / `loadShareWithParent` /
+`getAllIdsInSharedTree` as named functions.
+
 Publishing is not a command file: `document.publish(ctx, { collectionId, data })` is a Document model method.
 
 ## Conventions
 
-**Shape.** Default export, dominant signature
+**Shape.** Default export (exceptions: `shareLoader` uses named exports only),
+dominant signature
 `async function <name>(ctx: APIContext, props)`; minority variant puts `ctx`
 inside `Props` (`starCreator`, `attachmentCreator`, `documentImporter`).
 `Props` lives in the command file, but the route owns the zod schema
-(`server/routes/api/documents/schema.ts` → `DocumentsCreateSchema`) and passes `ctx.input.body` field by field — keep both field lists in sync.
+(`server/routes/api/documents/schema.ts`) and destructures `ctx.input.body`
+itself into an explicit `Props` object — keep both field lists in sync.
 
 **Writes.** `ctx.state.transaction` comes from the `transaction()` middleware
 (`server/middlewares/transaction.ts`); pass it to every query. Write through
@@ -61,10 +66,13 @@ structure and pins, `documentDuplicator` calls `documentCreator` per copy,
 
 ## Anti-patterns
 
-- Raw `.save()` inside a command, or a query without `transaction` — events
-  are lost silently; `insertEvent` logs "No transaction provided to insertEvent".
+- Raw `.save()` inside a command, or a query without `transaction` — the
+  `Event` row is written without a publishable transaction (`insertEvent` logs
+  "No transaction provided to insertEvent"), so search, notifications and
+  websocket updates never fire.
 - Setting `document.collectionId` without touching the collection structure —
-  `documentMover` is the sanctioned path (maintains collection structure, removes stale pins).
+  `documentMover` is the sanctioned path (maintains collection structure, deletes
+  the stale pin for the previous collection).
 - Reading `document.collection` after a save — structure hooks replace the
   loaded association, so policies see stale membership; reload with `Document.findByPk(id, { userId })`.
 - Re-implementing a permission check in a route instead of calling the
