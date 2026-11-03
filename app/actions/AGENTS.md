@@ -4,13 +4,13 @@ One action = one declarative object, consumed by three surfaces: kbar command ba
 
 ## Overview
 
-Factories in `app/actions/index.ts` — all set `type: "action"`, `id` defaults to `uuidv4()`:
+Factories in `app/actions/index.ts` — the action factories emit `type: "action"` and default `id` to `uuidv4()`:
 
 - `createAction` → `"action"`, needs `perform(context)`
 - `createInternalLinkAction` → `"internal_link"`, needs `to`
 - `createExternalLinkAction` → `"external_link"`, needs `url`
 - `createActionWithChildren` → `"action_with_children"`, needs `children`
-- `createActionGroup` → `action_group`, needs `name` + `actions`; `createRootMenuAction(list)` wraps a list, `ActionSeparator` is a marker
+- `createActionGroup` → `action_group`, needs `name` + `actions`; it and the `ActionSeparator` marker (`action_separator`) carry no `id`; `createRootMenuAction(list)` wraps a list and mints a fresh `uuidv4()`.
 
 Fields (`app/types.ts` `BaseAction`): `id`, `name`, `section`, `analyticsName`, `description`, `shortcut`, `keywords`, `priority`, `icon`, `iconInContextMenu`, `badge`, `placeholder`, `selected`, `visible`, `disabled`, `mcp.inputSchema`; `Action` adds `dangerous`, `tooltip`, `perform`.
 
