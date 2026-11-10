@@ -1,4 +1,5 @@
 import { isEqual, omit } from "es-toolkit/compat";
+import fastDeepEqual from "fast-deep-equal";
 import { Node, Fragment, type NodeType } from "prosemirror-model";
 import ukkonen from "ukkonen";
 import { updateYFragment, yDocToProsemirrorJSON } from "y-prosemirror";
@@ -9,6 +10,7 @@ import {
 } from "@shared/editor/lib/ChangesetHelper";
 import { HeadingSlugger } from "@shared/editor/lib/headingToSlug";
 import textBetween from "@shared/editor/lib/textBetween";
+import { withTrailingNode } from "@shared/editor/lib/trailingNode";
 import type { NavigationNode, ProsemirrorData } from "@shared/types";
 import { DocumentPreference, IconType, TextEditMode } from "@shared/types";
 import { determineIconType } from "@shared/utils/icon";
@@ -24,6 +26,9 @@ import { Collection, Document, Revision } from "@server/models";
 import type { MentionAttrs } from "./ProsemirrorHelper";
 import { ProsemirrorHelper } from "./ProsemirrorHelper";
 import { TextHelper } from "./TextHelper";
+
+/** The minimum width and height, in pixels, of an image used as a preview. */
+const previewImageMinSize = 100;
 
 /** Maps a range of text-content offsets to ProseMirror Fragment offsets. */
 interface InlineSegment {
@@ -319,6 +324,42 @@ export class DocumentHelper {
   }
 
   /**
+   * Returns the source of the first image in the document that is larger than
+   * the minimum preview size. Images without a stored size are skipped, so
+   * small images such as icons are not used.
+   *
+   * @param document the document, revision or prosemirror data to read.
+   * @returns the image source, or undefined if there is no suitable image.
+   */
+  static getPreviewImage(
+    document: Document | Revision | ProsemirrorData
+  ): string | undefined {
+    const node = DocumentHelper.toProsemirror(document);
+    let src: string | undefined;
+
+    node.descendants((child) => {
+      if (src) {
+        return false;
+      }
+      const { attrs } = child;
+      if (
+        child.type.name === "image" &&
+        typeof attrs.src === "string" &&
+        attrs.src &&
+        typeof attrs.width === "number" &&
+        typeof attrs.height === "number" &&
+        attrs.width > previewImageMinSize &&
+        attrs.height > previewImageMinSize
+      ) {
+        src = attrs.src;
+      }
+      return true;
+    });
+
+    return src;
+  }
+
+  /**
    * Returns the document as Markdown. This is a lossy conversion and should only be used for export.
    *
    * @param document The document or revision to convert
@@ -433,6 +474,23 @@ export class DocumentHelper {
     }
 
     return output;
+  }
+
+  /**
+   * Returns the document or collection as static HTML with its title. The
+   * output is rendered from the schema without node components or styles.
+   *
+   * @param model The document or collection to convert.
+   * @returns The title and content as a HTML string.
+   */
+  static async toStaticHTML(model: Document | Collection) {
+    return ProsemirrorHelper.toStaticHTML(DocumentHelper.toProsemirror(model), {
+      title: model instanceof Collection ? model.name : model.title,
+      headingPrefix:
+        model instanceof Document
+          ? model.getPreference(DocumentPreference.HeadingPrefix)
+          : undefined,
+    });
   }
 
   /**
@@ -647,7 +705,7 @@ export class DocumentHelper {
       const firstChild = existingDoc.firstChild;
 
       if (
-        !text.match(/\n\s*$/) &&
+        !text.slice(text.trimEnd().length).includes("\n") &&
         lastChild &&
         firstChild &&
         lastChild.type.name === "paragraph" &&
@@ -672,9 +730,13 @@ export class DocumentHelper {
     if (actorId) {
       doc = ProsemirrorHelper.assignMentionActors(doc, actorId, previousDoc);
     }
-
-    document.content = doc.toJSON();
+    doc = ProsemirrorHelper.assignMissingIds(doc);
     document.text = serializer.serialize(doc);
+
+    // Match the editor's normalized form, so open editors do not write their
+    // own repairs back in response to this change.
+    doc = withTrailingNode(doc);
+    document.content = doc.toJSON();
 
     if (document.state) {
       const ydoc = new Y.Doc();
@@ -1283,7 +1345,7 @@ export class DocumentHelper {
     second: Document | Revision,
     options?: { ignoreMarks?: string[] }
   ) {
-    if (isEqual(first.content, second.content)) {
+    if (fastDeepEqual(first.content, second.content)) {
       return true;
     }
 

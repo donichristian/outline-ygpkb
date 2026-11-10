@@ -202,6 +202,7 @@ Format with `yarn format` (oxfmt). Format and lint only files you touched.
 - Follow consistent oxfmt formatting.
 - Do not replace smart quotes (“”) or (‘’) with simple quotes ("").
 - Do not add translation strings manually; they will be extracted automatically from the codebase.
+- UI strings use US English and full grammar. Do not join two sentences with a comma.
 
 ## Dependencies and upgrading
 
@@ -280,6 +281,8 @@ node C:\Users\Media\AppData\Local\Temp\opencode\vcs.mjs status
 
 For multi-line commit messages, read the message from a file and pipe it to
 `git commit -F -` rather than fighting shell quoting. `gh` works directly.
+
+When changing persisted task input fields, keep readers compatible with queued inputs or migrate them before removing old fields.
 
 ## Testing quirks
 
@@ -364,6 +367,8 @@ For multi-line commit messages, read the message from a file and pipe it to
   never store sensitive data in plain text.
 - Use `yarn` for dependency changes. Scope `resolutions` entries to specific
   vulnerable descriptors (`pkg@npm:^x.y.z`) rather than overriding globally.
+- When linking accounts by provider email, use exact case-insensitive equality
+  within the workspace.
 
 ## Performance
 
@@ -371,6 +376,7 @@ For multi-line commit messages, read the message from a file and pipe it to
 - Implement pagination for large lists.
 - Use database indexes effectively.
 - Cache expensive computations.
+- Use `Redis.ephemeralClient` for request-path caches, rate limits, and locks, including lock extension and release.
 - Monitor performance with appropriate tools.
 - Lazy load routes and components where appropriate.
 

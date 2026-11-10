@@ -82,6 +82,15 @@ export const TeamsUpdateSchema = BaseSchema.extend({
           [TeamPreference.AIChat]: z.boolean(),
           /** Whether users can create documents in a personal collection. */
           [TeamPreference.PersonalDocs]: z.boolean(),
+          /** The number of days until new public share links expire, 0 for no expiry. */
+          [TeamPreference.DefaultShareExpiryDays]: z
+            .number()
+            .refine(
+              (val) => TeamValidation.defaultShareExpiryDays.includes(val),
+              {
+                error: "must be one of the available expiry periods",
+              }
+            ),
       })
       .partial()
       .optional(),
