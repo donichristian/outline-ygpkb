@@ -69,6 +69,8 @@ export enum TeamPreference {
   PersonalDocs = "personalDocs",
   /** Whether the AI chat workspace feature is enabled. */
   AIChat = "aiChat",
+  /** The number of days until new public share links expire, 0 for no expiry. */
+  DefaultShareExpiryDays = "defaultShareExpiryDays",
 }
 
 /** Workspace preference values, keyed by preference. */
@@ -89,4 +91,5 @@ export type TeamPreferences = {
   [TeamPreference.DisabledEmbeds]?: string[];
   [TeamPreference.PersonalDocs]?: boolean;
   [TeamPreference.AIChat]?: boolean;
+  [TeamPreference.DefaultShareExpiryDays]?: number;
 };

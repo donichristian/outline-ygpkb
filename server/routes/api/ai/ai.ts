@@ -27,8 +27,9 @@ import type { MessageLike } from "./messages";
 import { appendTurn, createPersistenceMiddleware } from "./middleware";
 import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
+import { buildSystemPrompts } from "./prompt";
 import { loadTanstack } from "./tanstack";
-import { loadServerTools } from "./tools";
+import { loadServerTools, resolveDocumentReference } from "./tools";
 import { createAiChatAdapter } from "./adapter";
 
 /** The validated context of a chat request. */
@@ -91,9 +92,7 @@ function isForwardableRole(role: string): role is T.AiChatMessageInput["role"] {
  * @param message the message to reduce, in either accepted shape.
  * @returns the `{ role, content }` row, or undefined when it may not be sent.
  */
-function toUpstreamMessage(
-  message: MessageLike
-): UpstreamMessage | undefined {
+function toUpstreamMessage(message: MessageLike): UpstreamMessage | undefined {
   const content = messageText(message);
 
   if (!message.role || !isForwardableRole(message.role)) {
@@ -147,9 +146,9 @@ export function toUpstreamMessages(
     lastCommitted?.role === pending.role &&
     lastCommitted.content === pending.content;
 
-  return (pending && !alreadyCommitted ? [...committed, pending] : committed).slice(
-    -T.AiChatMaxMessages
-  );
+  return (
+    pending && !alreadyCommitted ? [...committed, pending] : committed
+  ).slice(-T.AiChatMaxMessages);
 }
 
 /**
@@ -303,6 +302,7 @@ function refuseWithAgUiRun({
   ctx.body = body;
 }
 
+
 /**
  * Streams an assistant answer as AG-UI over SSE, with optional turn storage.
  *
@@ -352,6 +352,15 @@ router.post(
     if (sessionId && !ownedSession) {
       throw NotFoundError();
     }
+
+    // Resolve an explicit document reference server-side before any upstream
+    // call, so the member's own permissions decide whether it resolves at all.
+    // A missing or unresolved reference resolves to `undefined` and the request
+    // continues exactly as it does today.
+    const boundDocumentId = await resolveDocumentReference(
+      ctx.input.body.documentId,
+      user
+    );
 
     // At most one turn may be in flight per (user, session), so a double submit
     // or a reconnect cannot open a second concurrent upstream call against the
@@ -594,24 +603,44 @@ router.post(
         ctx,
         requestId,
         releaseInFlightLock,
+        toolChoice: boundDocumentId
+          ? { type: "tool", name: "fetch_document" }
+          : undefined,
       });
 
       let response: Response;
       try {
         const adapter = await createAiChatAdapter();
+        // OPERATOR GATE: the instruction layer is a repository decision, never
+        // the request body. Off, the `chat()` call is byte-identical to the
+        // pre-gate call — no `systemPrompts` key at all, so the upstream body
+        // the pinned assertions pin down is unchanged.
+        const systemPrompts = env.AI_CHAT_SYSTEM_PROMPT
+          ? buildSystemPrompts()
+          : undefined;
+
         // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- AiChatAdapter is a structurally-compatible subtype of AnyTextAdapter; the adapter type is a union that TanStack's generic parameters reject at compile time but accept at runtime.
         const stream = chat({
           adapter: adapter as unknown as Parameters<typeof chat>[0]["adapter"],
           // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- UpstreamMessage is a valid ModelMessage at runtime; TanStack's generic type parameter is too strict for the schema-inferred shape.
-          messages: resolvedMessages as unknown as Parameters<typeof chat>[0]["messages"],
+          messages: resolvedMessages as unknown as Parameters<
+            typeof chat
+          >[0]["messages"],
           threadId: sessionId,
           runId,
           // The allowlist is static and read-only. It is the only source of
           // tools on this path; the request body contributes none.
           tools: serverTools,
+          // The tool descriptions say what each tool does; this says when to
+          // reach for one, which is what keeps an answer grounded. It is part
+          // of the operator-gated instruction layer above, so a disabled gate
+          // sends no system message at all.
+          ...(systemPrompts ? { systemPrompts } : {}),
           // Server tools receive the requesting user through this context, so
-          // no tool closes over a request-scoped value.
-          context: { user },
+          // no tool closes over a request-scoped value. boundDocumentId is
+          // threaded through so the frozen fetch_document tool can bind its
+          // requested id to the document the user referenced.
+          context: { user, boundDocumentId },
           // REASONING: an operator decision (`AI_CHAT_REASONING`), never the
           // request body. The installed `openaiCompatibleText` adapter never
           // maps `chat({ reasoning })` onto the wire — its base
@@ -650,7 +679,9 @@ router.post(
             }
           }
         })();
-        response = toServerSentEventsResponse(sanitized, { abortController: ac });
+        response = toServerSentEventsResponse(sanitized, {
+          abortController: ac,
+        });
       } catch (err) {
         if (typeof (err as { status?: unknown }).status === "number") {
           throw err;
@@ -666,7 +697,9 @@ router.post(
       ctx.compress = false;
       ctx.req.setTimeout(0);
       // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- Node's ReadableStream generic is incompatible with Readable.fromWeb; the runtime type is correct.
-      ctx.body = Readable.fromWeb(response.body as unknown as NodeReadableStream<Uint8Array>);
+      ctx.body = Readable.fromWeb(
+        response.body as unknown as NodeReadableStream<Uint8Array>
+      );
       streamHandedOff = true;
     } finally {
       if (!streamHandedOff) {

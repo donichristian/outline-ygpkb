@@ -176,7 +176,7 @@ export function useDocumentSave({
 
         if (options.done) {
           history.push({
-            pathname: savedDocument.url,
+            pathname: savedDocument.path,
             state: { sidebarContext },
           });
           ui.setActiveDocument(savedDocument);

@@ -1,5 +1,6 @@
 import { observable } from "mobx";
 import type AIChatMessagesStore from "~/stores/AIChatMessagesStore";
+import type { AiChatToolCallDigest } from "~/utils/aiChat";
 import AIChatSession from "./AIChatSession";
 import Model from "./base/Model";
 import Field from "./decorators/Field";
@@ -52,6 +53,19 @@ class AIChatMessage extends Model {
   @Field
   @observable
   runId?: string;
+
+  /**
+   * Body-free digest of the tool calls made while generating this message, so
+   * a reloaded conversation can redraw them. Absent means no tool was called.
+   */
+  @Field
+  @observable
+  toolCallDigest?: AiChatToolCallDigest;
+
+  /** Whether the answer carried no source that a tool returned. */
+  @Field
+  @observable
+  citationMiss?: boolean;
 
   /**
    * The session this message belongs to. Not part of the API payload — the

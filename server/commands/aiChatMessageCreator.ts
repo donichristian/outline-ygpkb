@@ -30,6 +30,16 @@ type Props = {
   /** The generation run that produced the message, when known. */
   runId?: string | null;
   /**
+   * True when the stored answer carries no document link or identifier that a
+   * tool returned in the same run.
+   */
+  citationMiss?: boolean;
+  /**
+   * Body-free digest of the tool calls made while generating this message.
+   * Persisted into the `toolCallDigest` column. Absent means none.
+   */
+  toolCallDigest?: Record<string, unknown>;
+  /**
    * The request context, supplying the authenticated type and client address.
    * Its transaction is deliberately neither read nor replaced – a streaming
    * context outlives this write and must not be left pointing at a transaction
@@ -60,6 +70,8 @@ export default async function aiChatMessageCreator({
   status = AIChatMessageStatus.Completed,
   runId,
   ctx,
+  citationMiss,
+  toolCallDigest,
 }: Props) {
   return retryOnUniqueConstraintError(() =>
     sequelize.transaction(async (transaction) => {
@@ -95,14 +107,16 @@ export default async function aiChatMessageCreator({
         transaction,
       });
 
-      const message = await AIChatMessage.createWithCtx(txCtx, {
-        sessionId: session.id,
-        role,
-        seq: (last?.seq ?? 0) + 1,
-        content,
-        status,
-        runId: runId ?? null,
-      });
+       const message = await AIChatMessage.createWithCtx(txCtx, {
+         sessionId: session.id,
+         role,
+         seq: (last?.seq ?? 0) + 1,
+         content,
+         status,
+         runId: runId ?? null,
+         toolCallDigest: toolCallDigest ?? null,
+         citationMiss: citationMiss ?? false,
+       });
 
       // Sequelize makes `updatedAt` read-only: `set` returns without assigning it on
       // a persisted row (node_modules/sequelize/lib/model.js:2281), and the

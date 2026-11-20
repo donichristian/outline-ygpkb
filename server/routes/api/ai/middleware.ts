@@ -1,4 +1,4 @@
-import type { ChatMiddleware } from "@tanstack/ai";
+import type { ChatMiddleware, StreamChunk, ToolChoice } from "@tanstack/ai";
 import { toError } from "@shared/utils/error";
 import aiChatMessageCreator from "@server/commands/aiChatMessageCreator";
 import Logger from "@server/logging/Logger";
@@ -28,9 +28,18 @@ export type AppendTurnProps = {
   ctx: APIContext;
   /** The request id used to correlate a failed write with the request. */
   requestId?: string;
+  /**
+   * True when the stored answer carries no document link or identifier that a
+   * tool returned in the same run. The turn writer persists it (todo 10).
+   */
+  citationMiss?: boolean;
+  /**
+   * Body-free digest of the tool calls made while generating this turn, when
+   * any. Persisted into the `toolCallDigest` column. Absent means no tool was
+   * called, which lets the empty-text guard drop a turn that produced nothing.
+   */
+  toolCallDigest?: Record<string, unknown>;
 };
-
-/** Inputs for {@link createPersistenceMiddleware}. */
 export type PersistenceMiddlewareProps = {
   /** The user the turn belongs to. */
   user: User;
@@ -44,6 +53,36 @@ export type PersistenceMiddlewareProps = {
   requestId?: string;
   /** Releases the per-session in-flight lock, idempotently. */
   releaseInFlightLock: () => Promise<void>;
+  /**
+   * Tool choice forced on the first upstream model call when a document is
+   * bound to the request, or `undefined` to leave the default (auto).
+   */
+  toolChoice?: ToolChoice;
+};
+
+/** Body-free digest of one tool call made while generating an assistant turn. */
+export type ToolCallDigestEntry = {
+  /** The tool call identifier within the run. */
+  toolCallId: string;
+  /** The server tool that ran. */
+  toolName: string;
+  /** The tool's declared scalar input fields, never a result or body blob. */
+  arguments: Record<string, unknown>;
+  /** The document identifiers the tool result returned. */
+  documentIds: string[];
+  /** The document titles the tool result returned. */
+  titles: string[];
+  /** The document links the tool result returned. */
+  links: string[];
+  /** The number of characters the tool returned, without the text itself. */
+  characterCount: number;
+  /** Whether the returned body was truncated. */
+  truncated: boolean;
+};
+
+/** The body-free tool-call digest persisted with an assistant turn. */
+export type ToolCallDigest = {
+  toolCalls: ToolCallDigestEntry[];
 };
 
 /** The error code the OpenAI-compatible adapter uses for a stream that ended
@@ -84,12 +123,17 @@ export async function appendTurn({
   runId,
   ctx,
   requestId,
+  citationMiss,
+  toolCallDigest,
 }: AppendTurnProps): Promise<void> {
   if (!sessionId) {
     return;
   }
 
-  if (role === AIChatMessageRole.Assistant && !content.trim()) {
+  // A turn with no text is still written when it carries a tool-call digest,
+  // so a run that read a document and then produced no text does not lose the
+  // read. Otherwise an empty assistant turn stays a client-side placeholder.
+  if (role === AIChatMessageRole.Assistant && !content.trim() && !toolCallDigest) {
     return;
   }
 
@@ -102,6 +146,8 @@ export async function appendTurn({
       status,
       runId,
       ctx,
+      citationMiss,
+      toolCallDigest,
     }).catch((err) =>
       Logger.error("AI chat turn could not be persisted", toError(err), {
         requestId,
@@ -137,6 +183,12 @@ function errorCode(error: unknown): unknown {
  * reasoning text is never stored as the answer. A run that produced no text
  * writes no row while still releasing the lock.
  *
+ * Tool-returned document identifiers are collected from `TOOL_CALL_RESULT`
+ * chunks, and at the terminal hook the accumulated answer is checked against
+ * them: an answer that carries none is a citation miss, logged once and passed
+ * to the turn writer so it can be persisted. The check is measure-and-warn
+ * only — it never blocks, buffers, or alters the streamed answer.
+ *
  * The status mapping is:
  * - `onFinish` with a `finishReason` → `completed`.
  * - `onFinish` with a null `finishReason`, or an `incomplete-stream` error →
@@ -154,8 +206,189 @@ export function createPersistenceMiddleware({
   ctx,
   requestId,
   releaseInFlightLock,
+  toolChoice,
 }: PersistenceMiddlewareProps): ChatMiddleware {
   let content = "";
+  const toolResultIdentifiers: Set<string> = new Set();
+  const toolCalls: ToolCallDigestEntry[] = [];
+  const toolCallIndex = new Map<string, ToolCallDigestEntry>();
+  const toolCallArguments = new Map<string, string>();
+  const toolCallNames = new Map<string, string>();
+
+  /**
+   * Parses the tool result a `TOOL_CALL_RESULT` chunk carries and collects its
+   * document identifiers (link and id) for the citation-miss check. The
+   * engine serializes a tool's structured output into `content` as JSON, so a
+   * string payload is parsed back before reading the `results` array.
+   *
+   * @param chunk the `TOOL_CALL_RESULT` chunk.
+   */
+  const collectToolResultIdentifiers = (
+    chunk: Extract<StreamChunk, { type: "TOOL_CALL_RESULT" }>
+  ): void => {
+    let result: unknown;
+    if (typeof chunk.content === "string") {
+      try {
+        result = JSON.parse(chunk.content);
+      } catch {
+        result = undefined;
+      }
+    } else if (Array.isArray(chunk.content)) {
+      // ContentPart array; tool results serialize into the first text part.
+      const textPart = chunk.content.find(
+        (part): part is { type: "text"; text: string } =>
+          part.type === "text" && typeof part.text === "string"
+      );
+      result = textPart?.text;
+      if (typeof result === "string") {
+        try {
+          result = JSON.parse(result);
+        } catch {
+          result = undefined;
+        }
+      } else {
+        result = undefined;
+      }
+    }
+
+    const items =
+      result && typeof result === "object" && "results" in result
+        ? (result as { results?: unknown }).results
+        : undefined;
+
+    const documentIds: string[] = [];
+    const titles: string[] = [];
+    const links: string[] = [];
+
+    if (Array.isArray(items)) {
+      for (const item of items) {
+        if (item && typeof item === "object") {
+          const identifier = item as {
+            documentId?: unknown;
+            title?: unknown;
+            url?: unknown;
+          };
+          if (
+            typeof identifier.documentId === "string" &&
+            identifier.documentId
+          ) {
+            toolResultIdentifiers.add(identifier.documentId);
+            documentIds.push(identifier.documentId);
+          }
+          if (typeof identifier.title === "string" && identifier.title) {
+            titles.push(identifier.title);
+          }
+          if (typeof identifier.url === "string" && identifier.url) {
+            toolResultIdentifiers.add(identifier.url);
+            links.push(identifier.url);
+          }
+        }
+      }
+    }
+
+    const truncated =
+      (result && typeof result === "object" && "truncated" in result
+        ? (result as { truncated?: unknown }).truncated === true
+        : false) ||
+      (Array.isArray(items)
+        ? items.some(
+            (item) =>
+              item &&
+              typeof item === "object" &&
+              "truncated" in item &&
+              (item as { truncated?: unknown }).truncated === true
+          )
+        : false);
+
+    const characterCount =
+      typeof chunk.content === "string"
+        ? chunk.content.length
+        : Array.isArray(chunk.content)
+        ? chunk.content.reduce(
+            (sum, part) =>
+              sum +
+               (part && typeof part === "object" && "text" in part
+                 ? (typeof (part as { text?: unknown }).text === "string"
+                     ? ((part as { text: string }).text.length)
+                     : 0)
+                 : 0),
+            0
+          )
+        : 0;
+
+    let entry = toolCallIndex.get(chunk.toolCallId);
+    if (!entry) {
+      let args: Record<string, unknown> = {};
+      const accumulated = toolCallArguments.get(chunk.toolCallId);
+      if (accumulated) {
+        try {
+          const parsed = JSON.parse(accumulated);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            args = parsed as Record<string, unknown>;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      entry = {
+        toolCallId: chunk.toolCallId,
+        toolName: toolCallNames.get(chunk.toolCallId) ?? "",
+        arguments: args,
+        documentIds: [],
+        titles: [],
+        links: [],
+        characterCount: 0,
+        truncated: false,
+      };
+      toolCallIndex.set(chunk.toolCallId, entry);
+      toolCalls.push(entry);
+    } else if (Object.keys(entry.arguments).length === 0) {
+      const accumulated = toolCallArguments.get(chunk.toolCallId);
+      if (accumulated) {
+        try {
+          const parsed = JSON.parse(accumulated);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            entry.arguments = parsed as Record<string, unknown>;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      if (!entry.toolName) {
+        entry.toolName = toolCallNames.get(chunk.toolCallId) ?? "";
+      }
+    }
+    entry.documentIds = documentIds;
+    entry.titles = titles;
+    entry.links = links;
+    entry.characterCount = characterCount;
+    entry.truncated = truncated;
+  };
+
+  /**
+   * The citation-miss check: grounded only when the accumulated answer text
+   * contains an identifier some tool returned in this run. A link the model
+   * produced without a tool ever returning it does not count as sourced.
+   *
+   * @return true when no tool-returned identifier is present in the answer.
+   */
+  const isCitationMiss = (): boolean => {
+    if (toolResultIdentifiers.size === 0) {
+      return true;
+    }
+    for (const identifier of toolResultIdentifiers) {
+      if (content.includes(identifier)) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  // Token counts ride the terminal `RUN_FINISHED` chunk as a provider-shaped
+  // value (`usage[]` per the AG-UI spec, or a TanStack object), so it is kept
+  // opaque here and only logged. Shape is provider-defined; nothing branches on
+  // it.
+  let tokenUsage: unknown;
 
   /**
    * Persists the accumulated assistant text, then frees the lock. The release
@@ -163,8 +396,26 @@ export function createPersistenceMiddleware({
    * strand the session.
    *
    * @param status how the run ended.
+   * @param citationMiss whether the answer carried no tool-returned source.
    */
-  const persistAndRelease = async (status: AIChatMessageStatus) => {
+  const persistAndRelease = async (
+    status: AIChatMessageStatus,
+    citationMiss: boolean,
+    toolCallDigest: Record<string, unknown> | undefined
+  ) => {
+    if (citationMiss) {
+      Logger.warn("AI chat answer carries no tool-returned source", {
+        requestId,
+        runId,
+        reason: "citation-miss",
+      });
+    }
+
+    const digest =
+      toolCallDigest && toolCallDigest.toolCalls
+        ? toolCallDigest
+        : undefined;
+
     await appendTurn({
       user,
       sessionId,
@@ -174,26 +425,96 @@ export function createPersistenceMiddleware({
       runId,
       ctx,
       requestId,
+      citationMiss,
+      toolCallDigest: digest,
     });
+
+    // Deliberate: cost is observable but not enforced. Nothing caps spend yet,
+    // so the numbers are logged for an operator to read rather than stored.
+    if (tokenUsage) {
+      Logger.info("http", "AI chat token usage", {
+        requestId,
+        sessionId,
+        runId,
+        status,
+        usage: tokenUsage,
+      });
+    }
+
     await releaseInFlightLock();
   };
 
   return {
     name: "ai-chat-persist",
+    onConfig(hookCtx, _config) {
+      // Force the named body tool on the first upstream model call only, when a
+      // document is bound to the request. Subsequent calls fall back to the
+      // default (auto) so the model can decide whether to call again.
+      if (toolChoice && hookCtx.iteration === 0) {
+        return { toolChoice };
+      }
+      return undefined;
+    },
     onChunk(_hookCtx, chunk) {
       if (chunk.type === "TEXT_MESSAGE_CONTENT") {
-        content += chunk.delta;
+         content += chunk.delta;
+       } else if (chunk.type === "TOOL_CALL_START") {
+         const start = chunk as Extract<
+           StreamChunk,
+           { type: "TOOL_CALL_START" }
+         >;
+         toolCallNames.set(start.toolCallId, start.toolCallName);
+         const entry: ToolCallDigestEntry = {
+           toolCallId: start.toolCallId,
+           toolName: start.toolCallName,
+           arguments: {},
+           documentIds: [],
+           titles: [],
+           links: [],
+           characterCount: 0,
+           truncated: false,
+         };
+         toolCallIndex.set(start.toolCallId, entry);
+         toolCalls.push(entry);
+       } else if (chunk.type === "TOOL_CALL_ARGS") {
+         const args = chunk as Extract<
+           StreamChunk,
+           { type: "TOOL_CALL_ARGS" }
+         >;
+         const prev = toolCallArguments.get(args.toolCallId) ?? "";
+         toolCallArguments.set(args.toolCallId, prev + args.delta);
+         const entry = toolCallIndex.get(args.toolCallId);
+         if (entry) {
+           try {
+             const parsed = JSON.parse(toolCallArguments.get(args.toolCallId) ?? "");
+             if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+               entry.arguments = parsed as Record<string, unknown>;
+             }
+           } catch {
+             // arguments may still be streaming; keep the accumulated string
+           }
+         }
+       } else if (chunk.type === "TOOL_CALL_RESULT") {
+        collectToolResultIdentifiers(chunk);
+      } else if (chunk.type === "RUN_FINISHED") {
+        tokenUsage = chunk.usage;
       }
     },
     async onFinish(_hookCtx, info) {
       await persistAndRelease(
         info.finishReason
           ? AIChatMessageStatus.Completed
-          : AIChatMessageStatus.Truncated
+          : AIChatMessageStatus.Truncated,
+        isCitationMiss(),
+        toolCalls.length > 0 ? { toolCalls } : undefined
       );
     },
     async onAbort() {
-      await persistAndRelease(AIChatMessageStatus.Aborted);
+      await persistAndRelease(
+        AIChatMessageStatus.Aborted,
+        isCitationMiss(),
+        toolCalls.length > 0 ? { toolCalls } : undefined
+      );
     },
     async onError(_hookCtx, info) {
       // The real cause stays server-side; the wire carries a generic message so
@@ -205,7 +526,9 @@ export function createPersistenceMiddleware({
       await persistAndRelease(
         errorCode(info.error) === IncompleteStreamCode
           ? AIChatMessageStatus.Truncated
-          : AIChatMessageStatus.Error
+          : AIChatMessageStatus.Error,
+        isCitationMiss(),
+        toolCalls.length > 0 ? { toolCalls } : undefined
       );
     },
   };

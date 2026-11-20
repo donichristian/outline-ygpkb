@@ -30,7 +30,12 @@ type PresentedSession = {
   [key: string]: unknown;
 };
 
-type PresentedMessage = { seq: number; content: string };
+type PresentedMessage = {
+  seq: number;
+  content: string;
+  toolCallDigest?: unknown;
+  citationMiss?: boolean;
+};
 
 type MessagePage = {
   messages: PresentedMessage[];
@@ -250,8 +255,7 @@ describe("POST /api/ai.messages.list", () => {
     expect(page.cursor).toBeUndefined();
   });
 
-  it("returns only the requested session's rows", async () => {
-    const user = await buildUser();
+  it("returns only the requested session's rows", async () => {    const user = await buildUser();
     await configureAiChat(user.team);
     const session = await buildSession(user);
     const other = await buildSession(user);
@@ -264,6 +268,59 @@ describe("POST /api/ai.messages.list", () => {
 
     const page = (await data(res)).data as MessagePage;
     expect(page.messages.map((m) => m.content)).toEqual(["mine"]);
+  });
+
+  it("returns the body-free digest and the miss flag for a stored turn", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+    const session = await buildSession(user);
+    const digest = {
+      toolCalls: [
+        {
+          toolCallId: "call-1",
+          toolName: "fetch_document",
+          documentIds: ["doc-1"],
+          titles: ["Onboarding"],
+          characterCount: 120,
+          truncated: false,
+        },
+      ],
+    };
+    await aiChatMessageCreator({
+      user,
+      sessionId: session.id,
+      role: AIChatMessageRole.Assistant,
+      content: "See Onboarding.",
+      toolCallDigest: digest,
+      citationMiss: false,
+      ctx: streamingCtx(user),
+    });
+
+    const res = await server.post("/api/ai.messages.list", user, {
+      body: { sessionId: session.id },
+    });
+
+    const page = (await data(res)).data as MessagePage;
+    expect(page.messages[0].toolCallDigest).toEqual(digest);
+    expect(page.messages[0].citationMiss).toBe(false);
+    expect(JSON.stringify(page.messages[0].toolCallDigest)).not.toContain(
+      "document text"
+    );
+  });
+
+  it("omits the digest for a turn with no tool calls", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+    const session = await buildSession(user);
+    await appendMessage(user, session.id, "plain question");
+
+    const res = await server.post("/api/ai.messages.list", user, {
+      body: { sessionId: session.id },
+    });
+
+    const page = (await data(res)).data as MessagePage;
+    expect(page.messages[0].toolCallDigest).toBeNull();
+    expect(page.messages[0].citationMiss).toBe(false);
   });
 
   it("denies another user's session without writing a row", async () => {

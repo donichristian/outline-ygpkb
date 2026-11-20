@@ -73,7 +73,7 @@ frontmatter: Record<string, unknown> | null;
 - Add a scope note: exclude from `withoutContent`? No — frontmatter is small,
   keep it in default scope so agents get it from `list_documents`.
 
-### 3. Shared type — `shared/types.ts`
+### 3. Shared type — `shared/types/frontmatter.ts`
 ```ts
 /** A YAML frontmatter value, restricted to JSON-safe primitives. */
 export type FrontmatterValue =

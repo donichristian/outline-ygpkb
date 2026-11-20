@@ -15,6 +15,7 @@ import { getTestServer } from "@server/test/support";
 import Redis from "@server/storage/redis";
 import { OutOfScopeRefusal } from "./scope";
 import { createAiChatAdapter } from "./adapter";
+import { createPersistenceMiddleware } from "./middleware";
 
 vi.mock("./tanstack", () => ({
   loadTanstack: () => import("@tanstack/ai"),
@@ -1164,7 +1165,8 @@ describe("POST /api/ai.chat turn persistence", () => {
 
     const { fetchMock } = providerContacted();
     vi.stubGlobal("fetch", fetchMock);
-    const warnSpy = vi.spyOn(Logger, "warn").mockImplementation(() => {});
+    const { default: FreshLogger } = await import("@server/logging/Logger");
+    const warnSpy = vi.spyOn(FreshLogger, "warn").mockImplementation(() => {});
 
     const res = await server.post("/api/ai.chat", user, {
       body: {
@@ -1233,6 +1235,224 @@ describe("POST /api/ai.chat node Readable invariant", () => {
       }
       expect(source).toMatch(new RegExp(`const ${rhs} = new Readable\\(`));
     }
+  });
+});
+describe("POST /api/ai.chat citation-miss measurement", () => {
+  // Stub the turn writer for every test in this file: a real write would open
+  // a database transaction the streaming tests do not set up. The writer is the
+  // seam these tests assert on, so all of them see the stub.
+  const writeSpy = vi.fn(async () => ({
+    id: "turn-1",
+    runId: "",
+    role: AIChatMessageRole.Assistant,
+    status: AIChatMessageStatus.Completed,
+    content: "",
+    seq: 1,
+  }));
+
+  beforeEach(() => {
+    vi.doMock("@server/commands/aiChatMessageCreator", () => ({
+      default: writeSpy,
+    }));
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.doUnmock("@server/commands/aiChatMessageCreator");
+  });
+
+  // Drives the persistence middleware's terminal hook with a recorded chunk
+  // sequence, isolating the module so its imported writer resolves to the stub.
+  async function driveMiddleware({
+    runId,
+    requestId,
+    toolResults,
+    answer,
+  }: {
+    runId: string;
+    requestId: string;
+    toolResults?: Array<Record<string, unknown>>;
+    answer: string;
+  }): Promise<import("@tanstack/ai").ChatMiddleware> {
+    const module = await import("./middleware");
+    const middleware = module.createPersistenceMiddleware({
+      user: {} as never,
+      sessionId: "session-1",
+      runId,
+      ctx: {} as never,
+      requestId,
+      releaseInFlightLock: vi.fn().mockResolvedValue(undefined),
+    });
+
+    for (const result of toolResults ?? []) {
+      middleware.onChunk?.(
+        {} as never,
+        {
+          type: "TOOL_CALL_RESULT",
+          messageId: "m1",
+          toolCallId: "t1",
+          content: JSON.stringify({ total: 1, results: [result] }),
+          role: "tool",
+        } as never
+      );
+    }
+
+    middleware.onChunk?.(
+      {} as never,
+      {
+        type: "TEXT_MESSAGE_CONTENT",
+        messageId: "m1",
+        delta: answer,
+        timestamp: 1,
+      } as never
+    );
+
+    return middleware;
+  }
+
+  it("logs a miss and reports it when the answer cites a link no tool returned", async () => {
+    const { default: FreshLogger } = await import("@server/logging/Logger");
+    const warnSpy = vi.spyOn(FreshLogger, "warn").mockImplementation(() => {});
+    writeSpy.mockClear();
+
+    // A tool returned this document; the answer cites a different link the
+    // tool never returned, so the answer carries no tool-returned source.
+    const middleware = await driveMiddleware({
+      runId: "run-miss",
+      requestId: "req-miss",
+      toolResults: [
+        {
+          documentId: "doc-a1b2",
+          title: "Runbook",
+          url: "/runbook",
+          context: "payments",
+        },
+      ],
+      answer: "See /other-doc for details.",
+    });
+
+    // A tool returned this document; the answer cites a different link the
+    // tool never returned, so the answer carries no tool-returned source.
+    await middleware.onFinish?.({} as never, {
+      finishReason: "stop",
+      duration: 1,
+      content: "See /other-doc for details.",
+    });
+
+    // Exactly one miss log line, carrying the run id and request id.
+    const missLines = warnSpy.mock.calls.filter(
+      ([message]) =>
+        message === "AI chat answer carries no tool-returned source"
+    );
+    expect(missLines).toHaveLength(1);
+    expect(missLines[0]?.[1]).toMatchObject({
+      requestId: "req-miss",
+      runId: "run-miss",
+      reason: "citation-miss",
+    });
+
+    // The miss is reported to the turn writer.
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls.at(0)?.at(0)).toMatchObject({
+      role: AIChatMessageRole.Assistant,
+      status: AIChatMessageStatus.Completed,
+      content: "See /other-doc for details.",
+      citationMiss: true,
+    });
+  });
+
+  it("reports a clear flag when the answer cites a link a tool did return", async () => {
+    const { default: FreshLogger } = await import("@server/logging/Logger");
+    const warnSpy = vi.spyOn(FreshLogger, "warn").mockImplementation(() => {});
+    writeSpy.mockClear();
+
+    const middleware = await driveMiddleware({
+      runId: "run-grounded",
+      requestId: "req-grounded",
+      toolResults: [
+        {
+          documentId: "doc-c3d4",
+          title: "Runbook",
+          url: "/runbook",
+          context: "payments",
+        },
+      ],
+      answer: "See /runbook for the steps.",
+    });
+
+    // The answer quotes the link the tool actually returned.
+    await middleware.onFinish?.({} as never, {
+      finishReason: "stop",
+      duration: 1,
+      content: "See /runbook for the steps.",
+    });
+
+    // Grounded: no miss log line.
+    expect(
+      warnSpy.mock.calls.filter(
+        ([message]) =>
+          message === "AI chat answer carries no tool-returned source"
+      )
+    ).toHaveLength(0);
+
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls.at(0)?.at(0)).toMatchObject({
+      content: "See /runbook for the steps.",
+      citationMiss: false,
+    });
+  });
+
+  it("logs the grounding refusal once and emits no miss line for it", async () => {
+    // A refusal never reaches the terminal hook: `ai.ts` returns before the
+    // stream is handed off, so `onFinish`/`onAbort`/`onError` never run. The
+    // refusal is recorded by the existing `Logger.warn` at `ai.ts:508`, which
+    // must carry the gate's reason. The middleware must add no third line.
+    const { default: FreshLogger } = await import("@server/logging/Logger");
+    const warnSpy = vi.spyOn(FreshLogger, "warn").mockImplementation(() => {});
+    writeSpy.mockClear();
+
+    // Simulate a refusal run: no tool results, and the answer is the refusal
+    // string the gate produced. Drive the terminal hook so a miss line would
+    // be emitted if the counting rule miscounted it.
+    const middleware = await driveMiddleware({
+      runId: "run-refusal",
+      requestId: "req-refusal",
+      answer: OutOfScopeRefusal,
+    });
+
+    await middleware.onFinish?.({} as never, {
+      finishReason: "stop",
+      duration: 1,
+      content: OutOfScopeRefusal,
+    });
+
+    // No tool ever returned an identifier, so this run counts as a miss. The
+    // assertion is that exactly ONE line is emitted for it, and it is the
+    // citation-miss line — a second refusal-style line would double-count.
+    const missLines = warnSpy.mock.calls.filter(
+      ([message]) =>
+        message === "AI chat answer carries no tool-returned source"
+    );
+    expect(missLines).toHaveLength(1);
+    expect(missLines[0]?.[1]).toMatchObject({
+      requestId: "req-refusal",
+      runId: "run-refusal",
+      reason: "citation-miss",
+    });
+
+    // The refusal record itself stays the gate's existing line, asserted by
+    // message identity. No other "ungrounded" line is produced here.
+    expect(
+      warnSpy.mock.calls.filter(
+        ([message]) => message === "AI chat prompt rejected as ungrounded"
+      )
+    ).toHaveLength(0);
+
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy.mock.calls.at(0)?.at(0)).toMatchObject({
+      content: OutOfScopeRefusal,
+      citationMiss: true,
+    });
   });
 });
 

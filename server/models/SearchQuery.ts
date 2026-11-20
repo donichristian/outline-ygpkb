@@ -26,6 +26,7 @@ export enum SearchQuerySource {
   API = "api",
   OAuth = "oauth",
   MCP = "mcp",
+  Ai = "ai",
 }
 
 @Table({

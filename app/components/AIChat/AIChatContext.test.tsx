@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import {
   AIChatProvider,
   openAIChatPanel,
+  restorePendingPrompt,
   useAIChatPanel,
 } from "./AIChatContext";
 import type * as SidebarContext from "~/components/RightSidebarContext";
@@ -167,6 +168,60 @@ describe("AIChatProvider", () => {
     act(() => opened.close());
     expect(controlsSeen.at(-1)!.isOpen).toBe(false);
     expect(controlsSeen.at(-1)!.open).toBe(initial.open);
+    cleanup();
+  });
+
+  it("hands a pending prompt to the panel exactly once", () => {
+    const { cleanup, controlsSeen } = renderProvider();
+
+    act(() => openAIChatPanel({ prompt: "summarize this document" }));
+
+    const controls = controlsSeen.at(-1)!;
+    expect(controls.consumePendingPrompt()).toEqual({
+      prompt: "summarize this document",
+    });
+    expect(controls.consumePendingPrompt()).toBeNull();
+    cleanup();
+  });
+
+  it("keeps the pending prompt across a close and reopen", () => {
+    const { cleanup, controlsSeen } = renderProvider();
+
+    act(() => openAIChatPanel({ prompt: "what changed?" }));
+    act(() => controlsSeen.at(-1)!.close());
+    act(() => controlsSeen.at(-1)!.open());
+
+    expect(controlsSeen.at(-1)!.consumePendingPrompt()).toEqual({
+      prompt: "what changed?",
+    });
+    cleanup();
+  });
+
+  it("puts a consumed prompt back for the next send", () => {
+    const { cleanup, controlsSeen } = renderProvider();
+
+    act(() => openAIChatPanel({ prompt: "retry me" }));
+    const controls = controlsSeen.at(-1)!;
+    const consumed = controls.consumePendingPrompt();
+    expect(consumed).toEqual({ prompt: "retry me" });
+
+    act(() => restorePendingPrompt(consumed!));
+    expect(controlsSeen.at(-1)!.consumePendingPrompt()).toEqual({
+      prompt: "retry me",
+    });
+    cleanup();
+  });
+
+  it("carries the document a prefilled prompt refers to", () => {
+    const { cleanup, controlsSeen } = renderProvider();
+    const documentId = "dddddddd-0000-4000-8000-000000000000";
+
+    act(() => openAIChatPanel({ prompt: "about this", documentId }));
+
+    expect(controlsSeen.at(-1)!.consumePendingPrompt()).toEqual({
+      prompt: "about this",
+      documentId,
+    });
     cleanup();
   });
 });

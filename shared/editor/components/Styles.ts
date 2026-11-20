@@ -31,6 +31,12 @@ const uploadScaleIn = keyframes`
   to { transform: scale(1); }
 `;
 
+/** The header row of a table moves down with the scroll position of the page. */
+const stickyTableHeader = keyframes`
+  from { transform: translateY(0); }
+  to { transform: translateY(var(--sticky-header-travel)); }
+`;
+
 /** The frame of a file in the editor, which holds the progress bar of an upload. */
 const uploadFrame = `.${EditorStyleHelper.imageWrapper}, .${EditorStyleHelper.videoWrapper}, .widget, .${EditorStyleHelper.pdfWrapper}`;
 
@@ -795,7 +801,7 @@ width: 100%;
   &[data-type="issue"],
   &[data-type="pull_request"],
   &[data-type="project"],
-  &[data-type="url"] {
+  &[data-type="url"]:not([data-display="card"]) {
     max-width: 100%;
     white-space: nowrap;
     overflow: hidden;
@@ -847,6 +853,47 @@ width: 100%;
   &.mention-document::before {
     content: "+";
   }
+
+  &[data-display="card"] {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 88px;
+    margin: 4px 0;
+    padding: 0;
+    overflow: hidden;
+    white-space: normal;
+    font-size: 15px;
+    line-height: 1.4;
+    border-radius: 8px;
+    border: 1px solid ${props.theme.divider};
+    background: ${props.theme.background};
+    cursor: pointer;
+    vertical-align: top;
+
+    &:${hover} {
+      background: ${props.theme.backgroundSecondary};
+    }
+
+    &.ProseMirror-selectednode {
+      outline: 2px solid ${props.theme.selected};
+      outline-offset: -1px;
+    }
+  }
+}
+
+.component-mention:has([data-display="card"]) {
+  display: block;
+}
+
+// Cards are inline nodes displayed as blocks, so hide the forced line below
+.component-mention:has([data-display="card"]) + img.ProseMirror-separator,
+.component-mention:has([data-display="card"])
+  + img.ProseMirror-separator
+  + br.ProseMirror-trailingBreak {
+  display: none;
 }
 
 .${EditorStyleHelper.suggestionTrigger} {
@@ -1900,6 +1947,11 @@ li p:first-child {
   word-break: break-word;
 }
 
+/* Space block images in list items like top-level blocks */
+li .component-image:has(> .image:not(.image-icon, .image-left-50, .image-right-50)) {
+  margin: .5em 0;
+}
+
 hr {
   position: relative;
   height: 1em;
@@ -2650,6 +2702,25 @@ table {
 
 .${EditorStyleHelper.table} {
   position: relative;
+
+  // The browser moves the header row in the same frame as the scroll, a scroll
+  // listener is always one frame behind.
+  @supports (animation-timeline: view()) {
+    view-timeline: --sticky-table-header block;
+    view-timeline-inset: var(--header-offset, ${HEADER_HEIGHT}px) 0px;
+
+    > .${EditorStyleHelper.tableScrollable} > table > tbody > tr:first-child > th {
+      animation: ${stickyTableHeader} linear both;
+      animation-timeline: --sticky-table-header;
+      animation-range:
+        exit-crossing var(--sticky-header-start, 0px)
+        exit-crossing calc(var(--sticky-header-start, 0px) + var(--sticky-header-travel, 0px));
+    }
+  }
+}
+
+table .${EditorStyleHelper.table} > .${EditorStyleHelper.tableScrollable} > table > tbody > tr:first-child > th {
+  animation: none;
 }
 
 .${EditorStyleHelper.tableStickyHeader} {
@@ -2664,7 +2735,9 @@ table {
   }
 
   > .${EditorStyleHelper.tableScrollable} > table > tbody > tr:first-child > th {
-    transform: translateY(calc(var(--header-offset, ${HEADER_HEIGHT}px) + var(--sticky-scroll-offset, 0px)));
+    @supports not (animation-timeline: view()) {
+      transform: translateY(calc(var(--header-offset, ${HEADER_HEIGHT}px) + var(--sticky-scroll-offset, 0px)));
+    }
 
     // Mask content scrolling past the top of the header (first shadow) and draw
     // the divider below it (second shadow). Using box-shadow rather than a real

@@ -72,8 +72,37 @@ describe("presentAIChatMessage", () => {
       content: "Here is the summary.",
       status: "completed",
       runId: "run-1",
+      toolCallDigest: undefined,
+      citationMiss: false,
       createdAt: now,
     });
+  });
+
+  it("returns the body-free digest and the citation-miss flag", () => {
+    const digest = {
+      toolCalls: [
+        {
+          toolCallId: "call-1",
+          toolName: "fetch_document",
+          documentIds: ["doc-1"],
+          titles: ["Onboarding"],
+          characterCount: 120,
+          truncated: false,
+        },
+      ],
+    };
+    const message = AIChatMessage.build({
+      id: "message-1",
+      seq: 1,
+      role: AIChatMessageRole.Assistant,
+      content: "See Onboarding.",
+      status: AIChatMessageStatus.Completed,
+      toolCallDigest: digest,
+      citationMiss: true,
+    });
+
+    expect(presentAIChatMessage(message).toolCallDigest).toEqual(digest);
+    expect(presentAIChatMessage(message).citationMiss).toBe(true);
   });
 
   it("keeps a null runId rather than coercing it", () => {
@@ -93,6 +122,7 @@ describe("presentAIChatMessage", () => {
     expect(Object.keys(result)).not.toContain("teamId");
     expect(Object.keys(result)).not.toContain("userId");
     expect(Object.keys(result).sort()).toEqual([
+      "citationMiss",
       "content",
       "createdAt",
       "id",
@@ -100,6 +130,7 @@ describe("presentAIChatMessage", () => {
       "runId",
       "seq",
       "status",
+      "toolCallDigest",
     ]);
   });
 });

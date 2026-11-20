@@ -110,6 +110,7 @@ export const TeamPreferenceDefaults: TeamPreferences = {
   [TeamPreference.AIChat]: false,
   /** Whether users can create documents in a personal collection. */
   [TeamPreference.PersonalDocs]: true,
+  [TeamPreference.DefaultShareExpiryDays]: 0,
 };
 
 export const DocumentPreferenceDefaults: DocumentPreferences = {

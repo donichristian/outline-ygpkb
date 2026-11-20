@@ -191,7 +191,7 @@ $env:NODE_ENV = 'development'
 yarn db:migrate
 ```
 
-Expected result: 306 migrations, 42 tables in `public`, and the four required
+Expected result: 48 migrations, 42 tables in `public`, and the four required
 extensions present.
 
 ## Daily development
@@ -251,7 +251,7 @@ Server tests share a module registry; any test using `vi.mock` or
 
 - `app/` — React frontend (MobX stores in `app/stores/`)
 - `server/` — Koa API, Sequelize models, workers, cron
-- `server/migrations/` — Sequelize migrations (306 files)
+- `server/migrations/` — Sequelize migrations (48 plain `.js` files + `baseline/`)
 - `shared/` — shared types, editor, utilities
 - `plugins/` — integrations (google, slack, azure, email, oidc, ...)
 - `scripts/` — local Windows helper scripts
@@ -292,8 +292,10 @@ Set `$env:NODE_ENV = 'development'` first; the validator only loads
 `.env.development` in that mode.
 
 **`yarn db:migrate` cannot find a compiled migration script**
-Run `yarn build:server` first — some migrations are TypeScript that must be
-compiled into `build/server` before the CLI can execute them.
+Every committed migration is plain `.js`, so no build step is involved:
+`.sequelizerc` points sequelize-cli straight at `server/migrations`. If the CLI
+reports no migrations, you are outside the repo root (`.sequelizerc` not found)
+or the file was never committed — do not run `yarn build:server` for this.
 
 **Redis exits immediately with "can't open config file"**
 Run it from inside the extracted folder using the bare filename

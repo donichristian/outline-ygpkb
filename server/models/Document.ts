@@ -54,7 +54,7 @@ import type {
 import { DocumentPreferenceDefaults } from "@shared/constants";
 import { ProsemirrorHelper } from "@shared/utils/ProsemirrorHelper";
 import { UrlHelper } from "@shared/utils/UrlHelper";
-import slugify from "@shared/utils/slugify";
+import slugify from "@server/utils/slugify";
 import { DeprecationValidation, DocumentValidation } from "@shared/validations";
 import { InvalidRequestError, ValidationError } from "@server/errors";
 import { afterCommit } from "@server/storage/transaction";
@@ -1457,7 +1457,12 @@ class Document extends ArchivableModel<
       await share.updateWithCtx(ctx, { published: false });
     }
 
-    return this.saveWithCtx(ctx, undefined, { name: "unpublish" });
+    // Drafts are excluded from the default scope, so the title cannot be read
+    // from the document association when listing this event.
+    return this.saveWithCtx(ctx, undefined, {
+      name: "unpublish",
+      data: { title: this.title },
+    });
   };
 
   // Moves a document from being visible to the team within a collection
