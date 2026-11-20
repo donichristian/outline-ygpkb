@@ -717,6 +717,11 @@ describe("POST /api/ai.chat turn persistence", () => {
 
       abort.abort();
 
+      // No post-abort token can reach the client: its response body is aborted.
+      if (res) {
+        await expect(res.text()).rejects.toThrow();
+      }
+
       const rows = await waitForRows(session.id, 2);
       expect(rows).toHaveLength(2);
 
@@ -1426,19 +1431,13 @@ describe("POST /api/ai.chat citation-miss measurement", () => {
       content: OutOfScopeRefusal,
     });
 
-    // No tool ever returned an identifier, so this run counts as a miss. The
-    // assertion is that exactly ONE line is emitted for it, and it is the
-    // citation-miss line — a second refusal-style line would double-count.
+    // A zero-tool refusal names no source and carries no source-like marker,
+    // so it is not a citation miss and must add no miss line of its own.
     const missLines = warnSpy.mock.calls.filter(
       ([message]) =>
         message === "AI chat answer carries no tool-returned source"
     );
-    expect(missLines).toHaveLength(1);
-    expect(missLines[0]?.[1]).toMatchObject({
-      requestId: "req-refusal",
-      runId: "run-refusal",
-      reason: "citation-miss",
-    });
+    expect(missLines).toHaveLength(0);
 
     // The refusal record itself stays the gate's existing line, asserted by
     // message identity. No other "ungrounded" line is produced here.
@@ -1451,7 +1450,7 @@ describe("POST /api/ai.chat citation-miss measurement", () => {
     expect(writeSpy).toHaveBeenCalledTimes(1);
     expect(writeSpy.mock.calls.at(0)?.at(0)).toMatchObject({
       content: OutOfScopeRefusal,
-      citationMiss: true,
+      citationMiss: false,
     });
   });
 });

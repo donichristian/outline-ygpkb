@@ -13,9 +13,17 @@ type DynamicImport = <T>(specifier: string) => Promise<T>;
 /**
  * A dynamic `import()` that survives swc's CommonJS transform. swc rewrites a
  * literal or variable `import()` into `require()` when `module.type` is
- * `commonjs`, and `require()` cannot resolve these packages because their
- * `exports` maps expose only the `import` condition. Assembling the function
- * from a string keeps a real `import()` intact, so Node resolves it as ESM.
+ * `commonjs` (see `.swcrc`), and `require()` cannot resolve these packages:
+ * `@tanstack/ai-openai` and `@tanstack/ai` 1.0.1 publish an `import`-only
+ * exports map, so Node rejects them with
+ * `ERR_PACKAGE_PATH_NOT_EXPORTED: No "exports" main defined in
+ * node_modules/@tanstack/ai-openai/package.json` (same for `@tanstack/ai`).
+ * Assembling the function from a string keeps a real `import()` intact, so
+ * Node resolves it as ESM.
+ *
+ * ponytail: the ceiling is the CommonJS server build; the upgrade path is an
+ * ESM server build (or a package that adds a `require` condition), at which
+ * point this seam becomes a static import.
  */
 // oxlint-disable-next-line typescript/no-implied-eval -- required to preserve a real dynamic import through swc's CommonJS transform.
 const dynamicImport = new Function(

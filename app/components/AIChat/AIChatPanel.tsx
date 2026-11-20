@@ -13,6 +13,8 @@ import Input from "~/components/Input";
 import Scrollable from "~/components/Scrollable";
 import Text from "~/components/Text";
 import Tooltip from "~/components/Tooltip";
+import useKeyDown from "~/hooks/useKeyDown";
+import useMobile from "~/hooks/useMobile";
 import useStores from "~/hooks/useStores";
 import SidebarLayout from "~/scenes/Document/components/SidebarLayout";
 import {
@@ -26,6 +28,7 @@ import {
 import { restorePendingPrompt, useAIChatPanel } from "./AIChatContext";
 import type {
   AiChatError,
+  AiChatErrorKind,
   AiChatKind,
   AiChatMessage,
   AiChatToolCallDigest,
@@ -277,6 +280,12 @@ function errorText(error: AiChatError, t: (key: string) => string): string {
       return t("A network error occurred, try again?");
     case "stream":
       return t("The AI chat stream failed, try again?");
+    case "upstream":
+      // One notice, not two: the banner region renders a single error, so an
+      // upstream failure replaces the generic copy rather than stacking on it.
+      return t("The AI service is temporarily unavailable. Please try again.");
+    case "persistence":
+      return t("The assistant's answer could not be saved to your chat history.");
     case "busy":
       return t("Another AI chat response is still in progress");
     case "truncated":
@@ -293,6 +302,20 @@ function errorText(error: AiChatError, t: (key: string) => string): string {
 }
 
 /**
+ * The failure kinds a user can resend the same prompt for. Each one left the
+ * turn uncommitted or incomplete, so the same text is worth one more request.
+ * Network and rejected-request failures are deliberately absent: their copy
+ * sends the user to an admin, which a resend cannot replace.
+ */
+const RetryableErrorKinds: ReadonlySet<AiChatErrorKind> = new Set([
+  "refusal",
+  "busy",
+  "truncated",
+  "upstream",
+  "persistence",
+]);
+
+/**
  * The right-sidebar AI chat panel: a streaming transcript and a composer. The
  * transcript is rendered as plain text with preserved line breaks – this is
  * intentional for the transport spike, which favours proving the stream over
@@ -306,6 +329,7 @@ const AIChatPanel = observer(function AIChatPanel({
   whenBusy = "queue",
 }: Props) {
   const { t } = useTranslation();
+  const isMobile = useMobile();
   const { aiChatSessions, aiChatMessages } = useStores();
   const sessionId = aiChatSessions.selectedSessionId;
   const [pending, setPending] = React.useState<TranscriptTurn[]>([]);
@@ -417,6 +441,22 @@ const AIChatPanel = observer(function AIChatPanel({
     []
   );
 
+  // The close control advertises Esc. On mobile the vaul Drawer already closes
+  // itself on Escape, so registering the shortcut there as well would dismiss
+  // both layers from one keypress. Closing is not Stop: a streaming turn keeps
+  // running, and only the `ai-chat-stop` button abandons it. `allowInTextInput`
+  // keeps the shortcut live while the composer holds focus; a menu or dialog
+  // that owns its own Escape is still skipped by `useKeyDown`.
+  useKeyDown(
+    "Escape",
+    React.useCallback(() => {
+      if (!isMobile) {
+        onClose();
+      }
+    }, [isMobile, onClose]),
+    { allowInTextInput: true }
+  );
+
   // Load the session list once so the history dropdown has something to show
   // before the panel is opened for the first time.
   React.useEffect(() => {
@@ -473,6 +513,26 @@ const AIChatPanel = observer(function AIChatPanel({
     : [];
 
   const turns: TranscriptTurn[] = mergeTurns(storedTurns, pending);
+
+  // The turn a lost-persist failure refers to: the last answer the user can
+  // still read. A trailing empty assistant turn (never stored, never filled)
+  // carries no answer to mark, so the marker stays with the content that was.
+  const lastAnswerIndex = turns.reduce(
+    (last, turn, index) => (turn.role === "assistant" && turn.content ? index : last),
+    -1
+  );
+
+  // The prompt a Retry resends: the failed turn's own text, read off the
+  // transcript and never the composer. A busy refusal puts that text back in
+  // the composer, so whatever the user edits there afterwards must not change
+  // what Retry sends.
+  const retryPrompt =
+    error && RetryableErrorKinds.has(error.kind)
+      ? turns.reduce(
+          (last, turn) => (turn.role === "user" ? turn.content : last),
+          ""
+        )
+      : "";
 
   const handleNewChat = React.useCallback(() => {
     stopTurn();
@@ -673,6 +733,26 @@ const AIChatPanel = observer(function AIChatPanel({
         return "failed";
       }
 
+      // A grounding refusal reaches the client the same way: a completed
+      // synthetic run whose header is the only signal. Unlike busy, the server
+      // has already stored both the question and the refusal row, so the text
+      // is not put back in the composer — it is already in the transcript, and
+      // a submit from the composer would store a second copy of that turn.
+      // Retry reads the refused turn's own prompt off the transcript instead.
+      if (observedKind === "refusal") {
+        setError(toAiChatError(undefined, { kind: observedKind }));
+        return "failed";
+      }
+
+      // A failure before the stream began is the same shape as busy: a
+      // complete synthetic run whose header is the only signal. Nothing was
+      // stored and the provider's own message never reaches the client, so the
+      // banner carries the fixed copy instead.
+      if (observedKind === "upstream_unavailable") {
+        setError(toAiChatError(undefined, { kind: observedKind }));
+        return "failed";
+      }
+
       // The stream only closes after the server has committed the turn, so a
       // successful re-read includes the assistant row and the local turn is
       // dropped in the same pass. A failed re-read committed nothing to the
@@ -741,6 +821,24 @@ const AIChatPanel = observer(function AIChatPanel({
     }
   };
 
+  /**
+   * Sends `content` as the next turn, taking it out of the composer and its
+   * draft first and running it through the same turn loop. The composer and
+   * Retry both go through here so neither can grow its own pipeline; a retry
+   * hands it the failed turn's own text, never the composer buffer.
+   *
+   * @param content the message to send.
+   */
+  const sendPrompt = async (content: string) => {
+    setInput("");
+    // The message is leaving the composer as a turn, so it must not also come
+    // back as a draft for this conversation. The prefill is spent once sent.
+    clearDraft(sessionId ?? undefined);
+    const documentId = prefillDocumentIdRef.current;
+    prefillDocumentIdRef.current = null;
+    await runTurns(content, documentId);
+  };
+
   const handleSubmit = async (ev: React.FormEvent<HTMLFormElement>) => {
     ev.preventDefault();
     const content = input.trim();
@@ -771,13 +869,17 @@ const AIChatPanel = observer(function AIChatPanel({
       stopTurn();
     }
 
-    setInput("");
-    // The message is leaving the composer as a turn, so it must not also come
-    // back as a draft for this conversation. The prefill is spent once sent.
-    clearDraft(sessionId ?? undefined);
-    const documentId = prefillDocumentIdRef.current;
-    prefillDocumentIdRef.current = null;
-    await runTurns(content, documentId);
+    await sendPrompt(content);
+  };
+
+  // One more try at the failed turn, user-initiated only: nothing here fires on
+  // its own, so a refusal stays refused until the user asks again.
+  const handleRetry = () => {
+    if (!retryPrompt || isStreaming) {
+      return;
+    }
+
+    void sendPrompt(retryPrompt);
   };
 
   /**
@@ -947,6 +1049,13 @@ const AIChatPanel = observer(function AIChatPanel({
                     {t("No sources found")}
                   </NoSourceNote>
                 )}
+                {turn.role === "assistant" &&
+                  index === lastAnswerIndex &&
+                  error?.kind === "persistence" && (
+                    <NoSourceNote data-testid="ai-chat-not-saved">
+                      {t("Not saved")}
+                    </NoSourceNote>
+                  )}
               </Message>
             );
           })}
@@ -989,11 +1098,25 @@ const AIChatPanel = observer(function AIChatPanel({
         </TurnDisclosure>
 
         {error && (
-          <ErrorNotice data-testid="ai-chat-error">
+          <ErrorNotice data-testid="ai-chat-error" role="alert">
             <Text type="danger" size="small">
               {errorText(error, t)}
             </Text>
           </ErrorNotice>
+        )}
+
+        {retryPrompt && (
+          <RetryRow hidden={isStreaming}>
+            <Button
+              type="button"
+              neutral
+              disabled={isStreaming}
+              onClick={handleRetry}
+              data-testid="ai-chat-retry"
+            >
+              {t("Retry")}
+            </Button>
+          </RetryRow>
         )}
 
         <Composer ref={formRef} onSubmit={handleSubmit}>
@@ -1424,6 +1547,13 @@ const ErrorNotice = styled.div`
   border-radius: 6px;
   background: ${(props) => props.theme.sidebarBackground};
   border: 1px solid ${(props) => props.theme.danger};
+`;
+
+const RetryRow = styled.div`
+  display: flex;
+  justify-content: flex-end;
+  margin: 0 16px 8px;
+  flex-shrink: 0;
 `;
 
 const TurnDisclosure = styled(Text)`

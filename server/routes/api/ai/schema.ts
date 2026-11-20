@@ -19,6 +19,13 @@ export const AiChatMaxMessageLength = 8000;
 export const AiChatMaxSessionTitleLength = 200;
 
 /**
+ * The maximum number of sessions returned in one page of the session list.
+ * Bounds the history read so a long-lived account cannot make the list
+ * endpoint load every conversation it has ever had in one request.
+ */
+export const AiChatMaxSessions = 100;
+
+/**
  * One part of an AG-UI message. Only `type` is required: a text part carries its
  * text in `content`, a `thinking` part carries the same field but is never read
  * as answer text, and tool parts carry their own fields. Everything beyond
@@ -103,7 +110,24 @@ export const AiSessionsCreateSchema = BaseSchema.extend({
 export type AiSessionsCreateReq = z.infer<typeof AiSessionsCreateSchema>;
 
 export const AiSessionsListSchema = BaseSchema.extend({
-  body: z.object({}),
+  body: z.object({
+    /**
+     * The maximum number of sessions to return. Clamped to
+     * `AiChatMaxSessions`; the client cannot raise the bound.
+     */
+    limit: z.number().int().min(1).optional(),
+    /**
+     * The opaque cursor returned as `cursor` by the previous page, positioned
+     * on the last session it returned.
+     */
+    after: z
+      .string()
+      .regex(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+        "Invalid cursor"
+      )
+      .optional(),
+  }),
 });
 
 export type AiSessionsListReq = z.infer<typeof AiSessionsListSchema>;

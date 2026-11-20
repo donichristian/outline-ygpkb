@@ -208,6 +208,39 @@ describe("#toAiChatError", () => {
     expect(toAiChatError(rejectedUpstream).kind).toBe("stream");
   });
 
+  it("maps the upstream unavailable surface to upstream", () => {
+    // The pre-stream path reports through the response header; a failure after
+    // the headers are out can only report through the terminal frame's code.
+    expect(toAiChatError(undefined, { kind: "upstream_unavailable" })).toEqual(
+      expect.objectContaining({
+        kind: "upstream",
+        message:
+          "The AI service is temporarily unavailable. Please try again.",
+      })
+    );
+
+    const midRun = Object.assign(new Error("provider detail"), {
+      code: "upstream_unavailable",
+    });
+    expect(toAiChatError(midRun).kind).toBe("upstream");
+  });
+
+  it("maps a lost assistant turn to persistence", () => {
+    // The frame trails a finished run, so the answer is already on screen and
+    // only the stored copy is missing.
+    const lost = Object.assign(
+      new Error("The assistant turn could not be persisted"),
+      { code: "persistence-failed" }
+    );
+    expect(toAiChatError(lost)).toEqual(
+      expect.objectContaining({
+        kind: "persistence",
+        message:
+          "The assistant's answer could not be saved to your chat history.",
+      })
+    );
+  });
+
   it("maps an unparseable frame to malformed without throwing", async () => {
     let parseFailure: unknown;
     try {

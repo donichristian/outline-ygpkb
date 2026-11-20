@@ -154,7 +154,7 @@ once a provider is configured.
 | `AI_CHAT_BASE_URL` | no | Base URL of an OpenAI-compatible provider, e.g. a URL ending in `/v1`. The route appends `/chat/completions`. When unset, the feature is disabled. |
 | `AI_CHAT_API_KEY` | no | **SECRET.** Sent as `Authorization: Bearer <key>` to the provider. **Server-side only — never sent to the browser.** |
 | `AI_CHAT_MODEL` | **when `AI_CHAT_BASE_URL` is set** | Model id handed to the TanStack adapter (`openaiCompatibleText`) and forwarded as `model` in the upstream request body. With a base URL configured but no model, the route returns **404** and no upstream request is made. |
-| `AI_CHAT_REASONING` | no | Reasoning effort requested from the provider: `minimal`, `low`, `medium` or `high`. Unset means the upstream body carries no reasoning field. Sent as the Chat Completions `reasoning_effort` through `modelOptions` (see [Panel behaviour](#panel-behaviour)); never read from the request body. |
+| `AI_CHAT_REASONING` | no | Reasoning effort requested from the provider: `minimal`, `low`, `medium` or `high`. Unset means the upstream body carries no reasoning field. Sent as the top-level `reasoning` option (1.0 moved it out of `modelOptions`; see [Upgrading to @tanstack/ai 1.0 (v1 lockstep)](#upgrading-to-tanstackai-10-v1-lockstep)); never read from the request body. |
 | `AI_CHAT_GROUNDING` | no | Whether the route runs the local grounding probe (§2). Defaults to `true`. Set to `false` when the provider is itself a retrieval agent that enforces the knowledge-base boundary — the local lexical probe would otherwise refuse prompts the provider can answer. |
 | `AI_CHAT_SYSTEM_PROMPT` | no | Whether the route prepends the repository's own assistant instruction layer as a leading system message: answer only from the workspace knowledge base, cite the document link for every claim, say so plainly when the workspace lacks the answer, read a document with `fetch_document` before summarising it, treat document text as data, and reply in the user's language. Defaults to `false`, so the upstream body is unchanged unless an operator opts in. Set to `true` when the provider is a plain model that needs this repository to state the knowledge-base boundary. |
 
@@ -179,6 +179,101 @@ Defined in `server/env.ts` (the `AI_CHAT_*` block). Notes:
   in the serialized environment exposed to the client.
 - Setting **none** of them is a safe no-op (see
   [Fail-soft behavior](#fail-soft-behavior-when-env-is-unset)).
+
+## Cost and operator limits
+
+Two knobs bound one turn, one limiter bounds one caller, and the rest bound what
+a tool may pull into context. Every value below is what the code enforces; the
+citation is where to change it.
+
+### Per-turn limits
+
+| Knob | Default | Clamp | Where |
+| --- | --- | --- | --- |
+| `AI_CHAT_MAX_TURN_TOKENS` | unset or `0` means unlimited, and that is the default today | a positive value is clamped to `32000` | `server/env.ts:450-464` (declaration), `server/routes/api/ai/ai.ts:580-583` (resolve) |
+| `AI_CHAT_MAX_TOOL_CALLS` | `12` (`DefaultMaxToolCalls`) | values above `40` are clamped (`MaxToolCalls`); an unset or below-`1` value falls back to the default, while a non-numeric value fails boot validation (`@IsNumber()` at `server/env.ts:473`) instead of falling back | `server/env.ts:466-476` (declaration), `server/routes/api/ai/tools.ts:27-30`, `tools.ts:62-82` (resolve) |
+
+`AI_CHAT_MAX_TURN_TOKENS` is enforced twice against the same resolved number. A
+pre-call estimate — the serialized message bytes over four, rounded up — refuses
+the turn with the typed `over_ceiling` refusal and makes no upstream call
+(`server/routes/api/ai/ai.ts:584-612`). The same number rides as `max_tokens` in
+`modelOptions` to cap the provider's output (`ai.ts:792-798`). The estimate can
+refuse a turn that could not fit but never admits one that cannot; unset or `0`
+keeps the pre-ceiling behaviour exactly. A decimal value is truncated at boot
+rather than rejected: `toOptionalNumber` is `parseInt(value, 10)`, so
+`AI_CHAT_MAX_TURN_TOKENS=4096.5` resolves to `4096`; only a non-numeric string
+parses to `NaN` and fails the `@IsNumber()` check (`server/env.ts:1107-1109`,
+`:461`).
+
+`AI_CHAT_MAX_TOOL_CALLS` is one counter shared by every tool call in a turn, not
+one counter per tool (`ai.ts:739-741`). A call over the cap fails inside the
+existing tool-error path with `tool_budget_exhausted`, so the model receives a
+typed result and nothing executes (`tools.ts:85-95`).
+
+### Request rate
+
+`POST /api/ai.chat` carries `rateLimiter(RateLimiterStrategy.TenPerMinute)`
+(`server/routes/api/ai/ai.ts:352`), which allows ten requests per minute per IP
+address (`server/utils/RateLimiter.ts:190-194`). This is the only limit in the
+feature that applies to a caller rather than to a turn, and it is the backstop
+that makes an unlimited token ceiling acceptable.
+
+### Context bounds
+
+| Bound | Value | Source |
+| --- | --- | --- |
+| Results per `search_workspace` or `recommend_documents` call | `5` by default (`MaxToolResults`), `10` as an absolute ceiling (`MaxToolResultsBound`) | `server/routes/api/ai/tools.ts:114`, `:167`, applied at `:239` and `:322` |
+| `fetch_document` default chunk | `20000` characters (`DEFAULT_CHUNK_LIMIT`) | `server/commands/documentReader.ts:8`, applied at `:190-192` |
+| `fetch_document` explicit `limit` ceiling | `60000` characters (`MAX_CHUNK_LIMIT`) | `server/commands/documentReader.ts:11`, applied at `:181` |
+
+### Citation validation
+
+The assistant's answer is validated before it is persisted
+(`server/routes/api/ai/middleware.ts:766`). A URL that no tool returned in the
+same run is stripped (`:453` `removeUrls`); if stripping empties the answer, the
+stored content becomes `[citation removed]` (`:491`, `:499`). The validator
+never throws: on an internal error it strips every URL instead, so an
+unvalidated link cannot reach a row (`:479-502`, fail-closed branch at `:495-502`).
+A turn is marked as a citation miss when its answer carries a source marker
+the regexes recognize (`SourceMarkerPattern`, `:379-380`: a `[n]` footnote, a
+`Sources:`/`References:` line, a markdown link, or a space- or
+paren-prefixed absolute path) while no tool returned an identifier in the same
+run (`hasSourceMarker` at `:388-390`, gate at `:716`). Stripping a URL also
+marks the turn (`citationMiss: citationMiss || validated.stripped > 0`,
+`:786`). The flag is telemetry: the miss is logged (`:750-756`) and the turn is
+still stored with `citationMiss = true`
+(`server/models/AIChatMessage.ts:92`) — it is never dropped or rewritten. The
+panel renders a subdued “No sources found” note inside that turn
+(`app/components/AIChat/AIChatPanel.tsx:1046-1050`). The marker list is a text
+heuristic, so ordinary prose can trip it: an answer that writes a
+space-prefixed path, as in “the file lives at /etc/hosts”, counts as a source
+marker and must still name a tool-returned identifier to avoid the flag.
+
+### Token usage columns (operator read-out)
+
+`ai_chat_messages` carries two nullable integers, `prompt_tokens` and
+`completion_tokens` (`server/models/AIChatMessage.ts:98-106`). They are filled
+from the terminal `RUN_FINISHED` chunk when the provider reports usage
+(`server/routes/api/ai/middleware.ts:886`, normalized at `:278-320`) and
+written with the assistant row (`:788-789`); a provider that omits usage leaves
+both `NULL` rather than `0`. The same values are logged as
+`AI chat token usage` for an operator reading logs (`:799-806`).
+
+These columns are **server-only**. The session presenter
+(`server/presenters/aiChatSession.ts`) exposes no usage field, so the panel has
+no counters, and this plan adds no admin UI: operator visibility is SQL or a
+database admin tool against `ai_chat_messages`.
+
+### Database connection contracts
+
+Two contracts exist and they differ, so use the one that matches the command
+you are running rather than guessing a password.
+
+| Context | Value | Source |
+| --- | --- | --- |
+| Local development (`yarn dev`) | `postgres://user:pass@127.0.0.1:5432/outline` | `.env.development:3` |
+| Local tests (`yarn test:server`) | `postgres://user:pass@127.0.0.1:5432/outline-test` | `.env.test:2` |
+| CI (`test:server` job) | `postgres://postgres:password@localhost:5432/outline_test` | `.github/workflows/ci.yml:10`; the role password and database are created at `:139-140` |
 
 ## How to run the spike
 
@@ -515,6 +610,15 @@ The old guarantee that a stateless response matched the provider's bytes is
 retired: TanStack re-frames every chunk and appends its own terminal event, so
 no consumer may depend on the provider's wire format.
 
+One late failure is a terminal event of its own. The completed turn is written
+in the `onFinish` hook after `RUN_FINISHED` was already yielded, so a failed
+write cannot be retracted: the hook rethrows `PersistenceFailedError`
+(`server/routes/api/ai/middleware.ts:155-162`, raised at `:240` when
+`onFinish` passes `surfaceFailure: true` at `:872-882`) and the route's stream
+generator turns that code into a trailing `RUN_ERROR` carrying
+`code: "persistence-failed"` (`server/routes/api/ai/ai.ts:832-851`, constant at
+`middleware.ts:139`). The client therefore never treats a lost turn as saved.
+
 Refusal and busy are **not** `RUN_ERROR`: each is a complete synthetic run
 (`RUN_STARTED … RUN_FINISHED`) carrying ordinary assistant text, and the only
 thing that tells them apart from a real answer is the `X-AI-Chat-Kind:
@@ -532,18 +636,27 @@ never cascades.
 
 ### What a stored turn keeps
 
-A stored assistant row carries two columns beyond its text, so reopening a
-conversation shows what the answer was built from without re-running any tool:
+A stored assistant row carries four columns beyond its text, so reopening a
+conversation shows what the answer was built from and what it cost without
+re-running any tool:
 
 - `toolCallDigest` (JSONB) — a **body-free** digest of the tool calls made
   while generating the turn. It records which tool was called and with what
   identifier or query, never the document body a tool returned, so the column
   cannot become a second copy of the knowledge base. The transcript renders it
   as a tool-call card under the turn.
-- `citationMiss` (boolean, default `false`) — set when the answer cited no
-  document link or id that a tool returned in the same run. The panel renders a
-  subdued “No sources found” note inside that turn, so an unsourced answer is
-  visible when the conversation is reopened, not only while streaming.
+- `citationMiss` (boolean, default `false`) — set when the answer carries a
+  source marker but no document link or id that a tool returned in the same run,
+  or when citation validation stripped a URL. Marking never drops the turn. The
+  panel renders a subdued “No sources found” note inside that turn, so an
+  unsourced answer is visible when the conversation is reopened, not only while
+  streaming.
+- `promptTokens` / `completionTokens` (nullable integers) — the provider-reported
+  token counts taken from the terminal `RUN_FINISHED` chunk and summed across a
+  run's upstream calls. A provider that reports no count stores `NULL`, never an
+  estimate, so a blank column always means “not reported” rather than “zero”.
+  They are server-only: no presenter field and no admin UI, read them with SQL
+  (see [Token usage columns](#token-usage-columns-operator-read-out)).
 
 Because the digest is body-free, reading a stored conversation is not a way to
 read a document the reader could not open at the time.
@@ -628,19 +741,28 @@ saw the whole document.
 - **The in-flight lock is bounded and released on every exit.** The Redis key
   `aiChat:inflight:{userId}:{sessionId}` is taken with `SET … EX 900 NX` and
   released by compare-and-delete on finish, error, abort and refusal. The TTL is
-  900s because the unit that matters is a **tool loop**, not one model call
-  (roughly 5 rounds × (120s model + 5s tool) ≈ 625s worst case); a lock that
-  expired mid-stream would silently defeat the cap, so the cost is pushed into
-  the crash case.
+  900s because the unit that matters is a **tool loop**, not one model call: the
+  engine runs at most five model turns, and per-turn latency has not been
+  measured here, so 900s is a chosen bound rather than a measured worst case; a
+  lock that expired mid-stream would silently defeat the cap, so the cost is
+  pushed into the crash case. 900s is intended to sit above the longest
+  legitimate turn at that loop shape, so a live run is not cut off mid-stream.
+  A process that dies mid-stream leaves the key to expire
+  rather than to a sweeper: TTL expiry is the leak bound, and a reaper is
+  deliberately declined because compare-and-delete already prevents a stale
+  owner from deleting a successor's key while the TTL alone caps how long a
+  stuck session stays refused. A 900s refusal for a dead process is the price
+  of never cutting off a live one.
 - **The tool loop is bounded by the engine, not by this route.** No
   `agentLoopStrategy` is passed, so `@tanstack/ai` applies its default
   `combineStrategies([maxIterations(5), untilFinishReason(["length"])])` — five
   model turns, then a final answer. That default is what the lock TTL above is
   sized against; changing it means re-deriving the TTL.
-- **Token usage is logged, not stored or enforced.** `RUN_FINISHED.usage` is
-  captured by the persistence middleware's `onChunk` and logged with
-  `requestId`/`sessionId`/`runId`/`status`. The value is provider-shaped, so it
-  is passed through opaque; there is no spend cap and no per-message column.
+- **Token usage is stored and logged, still not enforced.** `RUN_FINISHED.usage`
+  is normalized by the persistence middleware and written to the turn's
+  `prompt_tokens`/`completion_tokens` columns, then logged with
+  `requestId`/`sessionId`/`runId`/`status`. Nothing caps spend: the columns are
+  an operator read-out (see [Cost and operator limits](#cost-and-operator-limits)).
 - **Reasoning is an operator decision.** `AI_CHAT_REASONING` sets the Chat
   Completions `reasoning_effort` through `modelOptions`; the request body never
   carries a reasoning level, and an unconfigured value omits the field entirely.
@@ -691,6 +813,29 @@ until the user closes it. A few UI facts worth knowing:
   refused by the server with a synthetic run marked `X-AI-Chat-Kind: busy`; the
   panel surfaces it as a retry-later message rather than as an error banner,
   and **puts the typed text back in the composer** so the retry is actionable.
+- **A failed turn can be retried, and Retry is not a resend from the
+  composer.** Refusal, busy, truncated, upstream-unavailable and persistence
+  failures are the retryable kinds
+  (`app/components/AIChat/AIChatPanel.tsx:310-316`); network and
+  rejected-request failures are not, because their copy sends the user to an
+  admin. `Retry` resends the failed turn's own prompt, read off the transcript
+  and never the composer (`:525-535`). The control renders only when such a
+  prompt exists and is both hidden and disabled while a turn is in flight
+  (`:1108-1119`). A refusal is the exception on the input side: the server has
+  already stored both the question and the refusal row, so the panel shows it
+  inline as an ordinary turn and does not refill the composer (`:736-745`;
+  `server/routes/api/ai/ai.ts:530-547`, `:644-662`).
+- **A turn the server could not store is marked, not silently lost.** When the
+  assistant turn's write fails, the server emits a trailing `RUN_ERROR` carrying
+  `code: persistence-failed` (`server/routes/api/ai/ai.ts:836-851`;
+  `server/routes/api/ai/middleware.ts:139`), which the client maps to the
+  `persistence` error kind (`app/utils/aiChat.ts:69`, `:154`, `:254-258`). The
+  panel keeps the streamed answer visible and renders a “Not saved” note under
+  the last answer (`app/components/AIChat/AIChatPanel.tsx:1051-1057`), because
+  reopening the conversation will not show it. An assistant turn with no
+  content is suppressed rather than rendered as an empty bubble unless it is
+  streaming, has tool calls or a digest, or carries `citationMiss`
+  (`:987-1000`).
 - **A send while streaming is queued by default.** The `whenBusy` prop selects
   `queue` (default), `drop` or `interrupt`. Queued messages live in panel state,
   never in the transcript and never in a stored row, and each one can be
@@ -720,11 +865,12 @@ until the user closes it. A few UI facts worth knowing:
   writes it into the input and focuses the field, so the user can edit before
   sending. There is no separate send path and no hidden state: the click is
   equivalent to typing.
-- **An unsourced answer is marked, live and stored.** When the answer cited no
-  document that a tool returned in the same run, the turn carries
-  `citationMiss` and the panel renders a subdued “No sources found” note inside
-  that turn. The flag is persisted, so the marker is still there when the
-  conversation is reopened.
+- **An unsourced answer is marked, live and stored.** When the answer carries a
+  source marker but no identifier that a tool returned in the same run, the turn
+  carries `citationMiss` and the panel renders a subdued “No sources found” note
+  inside that turn. The flag is persisted, so the marker is still there when the
+  conversation is reopened. It marks the answer rather than filtering it: the
+  stored text is unchanged.
 
 The panel is rendered with `SidebarLayout scrollable={false}` so the transcript
 scrolls internally and the composer stays pinned. This and the clickability
@@ -759,6 +905,23 @@ Setting only `AI_CHAT_API_KEY`/`AI_CHAT_MODEL` (without `AI_CHAT_BASE_URL`) is
 the one exception: it is **rejected at boot** by the `@CannotUseWithout`
 validator (`process.exit(1)`) — it is not a runtime crash. Leave them all unset
 for a clean disabled state.
+
+## Known Limits
+
+- MCP tool errors return a stable `tool_error` code. The exception message and
+  stack are written to the server log only and never reach the client.
+- MCP tools are registered only when the caller's scopes cover the tool's
+  path, so a limited token never receives write or admin-gated tools. The
+  filter runs before registration, not at call time.
+- OAuth clients cannot request a wildcard scope:
+  `AuthenticationHelper.isValidScope` rejects `*` and `/api/*.*` when called
+  with `allowRootWildcard: false`.
+- An API key without a scope defaults to `*` and receives every tool. That is
+  a deliberate full-access credential; each handler still enforces its own
+  role and team authorization.
+- Owner-side unverified: whether a deployment's identity provider or
+  provisioning process grants wildcard-scoped API keys is outside this
+  repository and not checked here.
 
 ## Production open items (out of scope)
 
@@ -818,8 +981,9 @@ It is implemented and shipped; what follows is the boundary of that work.
 - **Scoped search and recommendation.** `search_workspace` takes an optional
   `collectionId` and `limit`; `recommend_documents` returns only results that
   carry a reason, so “recommend” has something to rank by.
-- **Citation marking.** A turn with no tool-returned identifier in its answer is
-  stored with `citationMiss = true` and shown as “No sources found”.
+- **Citation marking.** A turn whose answer carries a source marker but no
+  tool-returned identifier is stored with `citationMiss = true` and shown as
+  “No sources found”; the marker records the answer, it never drops it.
 - **Tool-call persistence.** A stored assistant turn keeps a body-free
   `toolCallDigest`, so what the assistant read is visible after the fact.
 - **A repository-side instruction layer.** `AI_CHAT_SYSTEM_PROMPT` opts into a
@@ -835,8 +999,8 @@ It is implemented and shipped; what follows is the boundary of that work.
 - **TanStack persistence.** The library's own persistence is not used; the
   server store remains authoritative.
 - **Client tools.** Never accepted; the allowlist is the only source of tools.
-- **Token usage.** No usage capture or display; the provider's usage tail is not
-  surfaced.
+- **Token usage display.** Usage is captured and stored per assistant turn, but
+  no panel counter and no admin UI surface it, and there is no spend cap.
 
 **Carry-forward engineering facts:**
 
@@ -847,3 +1011,56 @@ It is implemented and shipped; what follows is the boundary of that work.
 - Keep slice 1's mechanics: abort-on-disconnect, the eight-kind client error
   taxonomy, `ctx.compress = false`, and `ctx.req.setTimeout(0)`.
 - Avoid `/mcp-apps`.
+
+## Upgrading to @tanstack/ai 1.0 (v1 lockstep)
+
+The chat transport runs **1.0.1** on `@tanstack/ai`, `@tanstack/ai-client`
+and `@tanstack/ai-openai` — exact versions in `package.json`, no range
+operators. `@tanstack/ai-client@1.0.1` itself depends on
+`@tanstack/ai: ^1.0.1`, so a plain install resolves a second copy; a scoped
+resolution, `"@tanstack/ai@npm:^1.0.1": "1.0.1"`, keeps one 1.0 version in
+the tree and pins only that descriptor, not the package globally. Upgrade all
+three together; a mixed tree is not tested.
+
+- **`systemPrompts` sits at the root of `chat()`.** The instruction layer is
+  assembled once (`ai.ts:750`) and spread into the call (`ai.ts:770`); there is
+  no per-message system injection.
+- **Sampling lives under the provider key.** `modelOptions` remains the escape
+  hatch for provider-specific sampling. `reasoning` is the exception: 1.0 moved
+  `reasoning_effort` to a top-level `reasoning` option (`ai.ts:786`). The
+  generic `openaiCompatibleText` adapter ships no model metadata and its base
+  `modelReasoning()` returns `undefined`, which leaves top-level `reasoning`
+  resolving to nothing. `adapter.ts` therefore declares the operator levels at
+  runtime with `modelReasoning` on the instance, so `AI_CHAT_REASONING` still
+  reaches the provider as `reasoning_effort`.
+- **Stop is still `abortController`.** The route passes an `AbortController`
+  signal to `chat()` (`ai.ts:806`), and the panel's `stopTurn` client API is
+  unchanged (`stopTurn` calls `client?.stop()`). 1.0 also ships interrupts and
+  approvals; that is approval-flow machinery and this flow has no
+  human-confirmation step, so it is **not adopted** and stays opt-in future
+  work.
+- **`memoryCredentialStore` is not enabled**: it has zero hits in this
+  repository, and production credentials come from `env.AI_CHAT_API_KEY`
+  (`server/routes/api/ai/adapter.ts`).
+
+**TanStack-side persistence and resumable streams are OPT-IN** and off by
+default: the server store stays authoritative, and a dropped connection is
+retried from scratch.
+
+**External error codes.** `RUN_ERROR` frames carry `upstream_unavailable` when
+the provider cannot be reached (the pre-stream synthetic run uses the same
+kind) and `persistence-failed` when the turn completed but its write failed.
+`X-AI-Chat-Kind` gained `upstream_unavailable`; `busy` and `refusal` are
+unchanged.
+
+**Operator limits.** `AI_CHAT_MAX_TURN_TOKENS` and `AI_CHAT_MAX_TOOL_CALLS`
+are unchanged by the upgrade; see [Per-turn limits](#per-turn-limits).
+
+**Why the `new Function` import seam stays.** `@tanstack/ai` and
+`@tanstack/ai-openai` 1.0.1 publish an import-only exports map (no `require`
+condition) and the server build emits CommonJS, so any plain `import()` is
+rewritten to `require()` and Node answers `ERR_PACKAGE_PATH_NOT_EXPORTED: No
+"exports" main defined in node_modules/@tanstack/ai-openai/package.json`.
+`loadTanstack()` / `loadOpenaiCompatible()` keep one real ESM `import()`
+alive; it can become a static import only with an ESM server build or an
+upstream `require` condition.

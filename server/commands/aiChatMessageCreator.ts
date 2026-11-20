@@ -40,6 +40,16 @@ type Props = {
    */
   toolCallDigest?: Record<string, unknown>;
   /**
+   * The prompt tokens the provider reported for the run, or `null` when it
+   * reported no usage. Stored as-is; never estimated here.
+   */
+  promptTokens?: number | null;
+  /**
+   * The completion tokens the provider reported for the run, or `null` when it
+   * reported no usage. Stored as-is; never estimated here.
+   */
+  completionTokens?: number | null;
+  /**
    * The request context, supplying the authenticated type and client address.
    * Its transaction is deliberately neither read nor replaced – a streaming
    * context outlives this write and must not be left pointing at a transaction
@@ -72,6 +82,8 @@ export default async function aiChatMessageCreator({
   ctx,
   citationMiss,
   toolCallDigest,
+  promptTokens,
+  completionTokens,
 }: Props) {
   return retryOnUniqueConstraintError(() =>
     sequelize.transaction(async (transaction) => {
@@ -116,6 +128,8 @@ export default async function aiChatMessageCreator({
          runId: runId ?? null,
          toolCallDigest: toolCallDigest ?? null,
          citationMiss: citationMiss ?? false,
+         promptTokens: promptTokens ?? null,
+         completionTokens: completionTokens ?? null,
        });
 
       // Sequelize makes `updatedAt` read-only: `set` returns without assigning it on

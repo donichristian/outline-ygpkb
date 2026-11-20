@@ -43,6 +43,12 @@ type MessagePage = {
   cursor?: number;
 };
 
+type SessionPage = {
+  sessions: PresentedSession[];
+  hasNextPage: boolean;
+  cursor?: string;
+};
+
 type TestResponse = Awaited<ReturnType<typeof server.post>>;
 
 /**
@@ -119,6 +125,29 @@ async function seedMessages(sessionId: string, count: number) {
       runId: null,
     }))
   );
+}
+
+/**
+ * Seeds `count` sessions owned by `user`, one second apart so the list order is
+ * unambiguous, newest last.
+ *
+ * @param user the owner of the seeded sessions.
+ * @param count how many sessions to write.
+ * @returns the ids in newest-first order, which is the order the list returns.
+ */
+async function seedSessions(user: User, count: number) {
+  const base = Date.parse("2026-01-01T00:00:00.000Z");
+  const rows = await AIChatSession.bulkCreate(
+    Array.from({ length: count }, (_, index) => ({
+      teamId: user.teamId,
+      userId: user.id,
+      title: `Session ${index + 1}`,
+      createdAt: new Date(base + index * 1000),
+      updatedAt: new Date(base + index * 1000),
+    }))
+  );
+
+  return rows.map((row) => row.id).reverse();
 }
 
 /**
@@ -228,6 +257,127 @@ describe("POST /api/ai.sessions.list", () => {
 
     const { sessions } = (await data(res)).data as { sessions: unknown[] };
     expect(sessions).toEqual([]);
+  });
+
+  it("returns at most one page when the user has more sessions than the bound", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+    const newestFirst = await seedSessions(user, 500);
+
+    const res = await server.post("/api/ai.sessions.list", user, { body: {} });
+    const page = (await data(res)).data as SessionPage;
+
+    expect(res.status).toEqual(200);
+    expect(page.sessions).toHaveLength(100);
+    // Newest first and contiguous, so the window is the top of the list.
+    expect(page.sessions.map((session) => session.id)).toEqual(
+      newestFirst.slice(0, 100)
+    );
+    expect(page.hasNextPage).toBe(true);
+    expect(page.cursor).toEqual(expect.any(String));
+  });
+
+  it("does not let a caller raise the bound with a larger limit", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+    await seedSessions(user, 500);
+
+    const res = await server.post("/api/ai.sessions.list", user, {
+      body: { limit: 5000 },
+    });
+    const page = (await data(res)).data as SessionPage;
+
+    expect(res.status).toEqual(200);
+    expect(page.sessions).toHaveLength(100);
+  });
+
+  it("resumes from the cursor with no gap and no repeat", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+    const newestFirst = await seedSessions(user, 250);
+
+    const seen: string[] = [];
+    let after: string | undefined;
+
+    do {
+      const res = await server.post("/api/ai.sessions.list", user, {
+        body: after ? { after } : {},
+      });
+      const page = (await data(res)).data as SessionPage;
+
+      expect(res.status).toEqual(200);
+      expect(page.sessions.length).toBeLessThanOrEqual(100);
+      // A page that claims more rows must hand out the cursor to reach them.
+      expect(page.hasNextPage).toBe(page.cursor !== undefined);
+
+      seen.push(...page.sessions.map((session) => session.id));
+      after = page.cursor;
+    } while (after);
+
+    expect(seen).toEqual(newestFirst);
+    expect(new Set(seen).size).toEqual(250);
+  });
+
+  it("pages sessions that share one updatedAt without a gap or a repeat", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+    // Every row has the same sort key, so only the id tiebreaker in the cursor
+    // can keep the boundary total: without it the rest of the group is skipped
+    // as soon as the first page ends inside it.
+    const shared = new Date("2026-02-01T00:00:00.000Z");
+    const seeded = await AIChatSession.bulkCreate(
+      Array.from({ length: 5 }, (_, index) => ({
+        teamId: user.teamId,
+        userId: user.id,
+        title: `Tie ${index + 1}`,
+        createdAt: shared,
+        updatedAt: shared,
+      }))
+    );
+    const newestFirst = seeded.map((row) => row.id).sort().reverse();
+
+    const seen: string[] = [];
+    let after: string | undefined;
+
+    do {
+      const res = await server.post("/api/ai.sessions.list", user, {
+        body: after ? { after, limit: 2 } : { limit: 2 },
+      });
+      const page = (await data(res)).data as SessionPage;
+
+      expect(res.status).toEqual(200);
+      expect(page.sessions.length).toBeLessThanOrEqual(2);
+
+      seen.push(...page.sessions.map((session) => session.id));
+      after = page.cursor;
+    } while (after);
+
+    expect(seen).toEqual(newestFirst);
+    expect(new Set(seen).size).toEqual(5);
+  });
+
+  it("returns the last page without a cursor", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+    const newestFirst = await seedSessions(user, 3);
+
+    const res = await server.post("/api/ai.sessions.list", user, { body: {} });
+    const page = (await data(res)).data as SessionPage;
+
+    expect(page.sessions.map((session) => session.id)).toEqual(newestFirst);
+    expect(page.hasNextPage).toBe(false);
+    expect(page.cursor).toBeUndefined();
+  });
+
+  it("rejects a malformed cursor", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+
+    const res = await server.post("/api/ai.sessions.list", user, {
+      body: { after: "not-a-cursor" },
+    });
+
+    expect(res.status).toEqual(400);
   });
 });
 
@@ -394,6 +544,41 @@ describe("POST /api/ai.messages.list", () => {
     expect(new Set([...firstSeqs, ...secondSeqs])).toEqual(
       new Set(Array.from({ length: pageSize + 1 }, (_, i) => i + 1))
     );
+  });
+
+  it("pages a 500-turn history in bound-sized pages with no gap or repeat", async () => {
+    const user = await buildUser();
+    await configureAiChat(user.team);
+    const session = await buildSession(user);
+    await seedMessages(session.id, 500);
+
+    const seen: number[] = [];
+    let beforeSeq: number | undefined;
+
+    for (;;) {
+      const page = (
+        await data(
+          await server.post("/api/ai.messages.list", user, {
+            body: { sessionId: session.id, beforeSeq },
+          })
+        )
+      ).data as MessagePage;
+
+      expect(page.messages.length).toBeLessThanOrEqual(pageSize);
+      seen.push(...page.messages.map((message) => message.seq));
+      // Fails instead of spinning if a page ever repeats its own cursor.
+      expect(seen.length).toBeLessThanOrEqual(500);
+
+      if (!page.truncated) {
+        break;
+      }
+
+      expect(page.cursor).toEqual(expect.any(Number));
+      beforeSeq = page.cursor;
+    }
+
+    // Every turn exactly once, newest first.
+    expect(seen).toEqual(Array.from({ length: 500 }, (_, index) => 500 - index));
   });
 
   it("returns an empty page for a cursor at the oldest message", async () => {
@@ -605,10 +790,11 @@ describe("ai.chat after the router is composed", () => {
       body: { messages: [{ role: "user", content: "How do I rotate keys?" }] },
     });
 
-    // The grounding gate refuses before the provider is contacted, which is
-    // enough to prove the route resolved rather than 404ing as unregistered.
+    // The provider is never reached, and the refusal still arrives in band as a
+    // synthetic run header, which is enough to prove the route resolved rather
+    // than 404ing as unregistered.
     expect(res.status).toEqual(200);
-    expect(res.headers.get("x-ai-chat-kind")).toEqual("refusal");
+    expect(res.headers.get("x-ai-chat-kind")).toEqual("upstream_unavailable");
     expect(await res.text()).toContain('"type":"RUN_FINISHED"');
     expect(fetchMock).not.toHaveBeenCalled();
   });

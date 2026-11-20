@@ -7,6 +7,7 @@ import AIChatMessage, {
   AIChatMessageRole,
   AIChatMessageStatus,
 } from "@server/models/AIChatMessage";
+import Logger from "@server/logging/Logger";
 import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
 import Redis from "@server/storage/redis";
@@ -39,7 +40,90 @@ vi.mock("./adapter", () => ({
     ),
 }));
 
+/**
+ * Switches the assistant-turn write into failure for the persistence-failure
+ * exit. A hoisted flag is used because `vi.fn(implementation)` survives
+ * `vi.restoreAllMocks`, so the mock is toggled per case instead of restored.
+ */
+const persistFailure = vi.hoisted(() => ({ failAssistantTurn: false }));
+
+/**
+ * Publishes every completed assistant-turn write so a test can await it.
+ *
+ * The write lands long after the response was terminated, and it commits inside
+ * the creator, so a counter per session (rather than a row hook that fires
+ * before commit) is the exact state change a test may wait on. Waiters are
+ * snapshotted, so a write that lands between the read and the wait still wakes
+ * it instead of being missed.
+ */
+const rowNotify = vi.hoisted(() => {
+  const counts = new Map<string, number>();
+  const waiters = new Map<string, Set<() => void>>();
+
+  return {
+    count(sessionId: string) {
+      return counts.get(sessionId) ?? 0;
+    },
+    next(sessionId: string, seen: number, budgetMs: number) {
+      if ((counts.get(sessionId) ?? 0) > seen) {
+        return Promise.resolve();
+      }
+      return new Promise<void>((resolve, reject) => {
+        const set = waiters.get(sessionId) ?? new Set<() => void>();
+        waiters.set(sessionId, set);
+        const settle = () => {
+          clearTimeout(timer);
+          set.delete(settle);
+          resolve();
+        };
+        const timer = setTimeout(() => {
+          set.delete(settle);
+          reject(
+            new Error(
+              `no assistant turn landed for session ${sessionId} within ${budgetMs}ms`
+            )
+          );
+        }, budgetMs);
+        set.add(settle);
+      });
+    },
+    publish(sessionId: string) {
+      counts.set(sessionId, (counts.get(sessionId) ?? 0) + 1);
+      const set = waiters.get(sessionId);
+      waiters.delete(sessionId);
+      set?.forEach((settle) => settle());
+    },
+  };
+});
+
+vi.mock("@server/commands/aiChatMessageCreator", async (importOriginal) => {
+  const actual =
+    await importOriginal<
+      typeof import("@server/commands/aiChatMessageCreator")
+    >();
+  const { AIChatMessageRole: Role } = await import(
+    "@server/models/AIChatMessage"
+  );
+
+  return {
+    default: vi.fn(async (props: Parameters<typeof actual.default>[0]) => {
+      if (persistFailure.failAssistantTurn && props.role === Role.Assistant) {
+        throw new Error("assistant turn persistence unavailable");
+      }
+      const message = await actual.default(props);
+      rowNotify.publish(props.sessionId);
+      return message;
+    }),
+  };
+});
+
 const server = getTestServer();
+
+/**
+ * Failure bound for {@link waitForRows}: generous for a loaded worker, short
+ * enough to name the missing write before Vitest's own test timeout fires.
+ */
+const RowWaitBudgetMs = 4_000;
 
 type TestUser = Awaited<ReturnType<typeof buildUser>>;
 
@@ -198,25 +282,39 @@ function stubGroundedProvider() {
  *
  * The assistant turn is flushed on whichever exit fires first, always after the
  * response has been terminated, so a test that produced rows must settle before
- * it ends or its insert lands during a later test's count.
+ * it ends or its insert lands during a later test's count. The wait is driven by
+ * the write itself (`rowNotify`), never by elapsed time: the only timer is the
+ * failure bound.
  *
- * @param sessionId the session to poll.
+ * @param sessionId the session to wait on.
  * @param expected the row count to wait for.
- * @returns the rows once the count is reached, or after the budget expires.
+ * @returns the rows once the count is reached.
+ * @throws If the count is not reached within `RowWaitBudgetMs`.
  */
 async function waitForRows(sessionId: string, expected: number) {
   const read = () =>
     AIChatMessage.findAll({ where: { sessionId }, order: [["seq", "ASC"]] });
 
-  for (let attempt = 0; attempt < 150; attempt += 1) {
+  const deadline = Date.now() + RowWaitBudgetMs;
+
+  for (;;) {
     const rows = await read();
+
     if (rows.length >= expected) {
       return rows;
     }
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
 
-  return read();
+    const seen = rowNotify.count(sessionId);
+    const remaining = deadline - Date.now();
+
+    if (remaining <= 0) {
+      throw new Error(
+        `AIChatMessage rows for session ${sessionId} stayed at ${rows.length} of ${expected}`
+      );
+    }
+
+    await rowNotify.next(sessionId, seen, remaining);
+  }
 }
 
 /**
@@ -311,6 +409,7 @@ afterEach(() => {
   env.AI_CHAT_BASE_URL = originalBaseUrl;
   env.AI_CHAT_MODEL = originalModel;
   engineLoad.rejectOnce = false;
+  persistFailure.failAssistantTurn = false;
   vi.unstubAllGlobals();
 });
 
@@ -424,6 +523,13 @@ describe("POST /api/ai.chat in-flight cap", () => {
     const first = chat(user, groundedBody(session.id));
     await provider.contacted;
 
+    // The first turn's runId is the lock value; the busy turn must leave it
+    // byte-identical, because deleting it would un-cap the session.
+    const heldByFirst = await Redis.defaultClient.get(
+      lockKey(user, session.id)
+    );
+    expect(heldByFirst).not.toEqual(null);
+
     // The question row is written before the first stream starts, so it is the
     // whole of the session while that answer is still generating.
     const beforeRows = await waitForRows(session.id, 1);
@@ -431,6 +537,7 @@ describe("POST /api/ai.chat in-flight cap", () => {
     expect(beforeRows[0].role).toEqual(AIChatMessageRole.User);
     const questionContent = beforeRows[0].content;
 
+    const info = vi.spyOn(Logger, "info");
     const secondRes = await chat(user, groundedBody(session.id));
     expect(secondRes.status).toEqual(200);
     expect(secondRes.headers.get("content-type")).toContain(
@@ -468,7 +575,19 @@ describe("POST /api/ai.chat in-flight cap", () => {
     ]);
     expect(
       await Redis.defaultClient.get(lockKey(user, session.id))
-    ).not.toEqual(null);
+    ).toEqual(heldByFirst);
+
+    // The refusal logs the holder's remaining lease, so an operator can see
+    // when the cap clears without a Redis console.
+    const busyLog = info.mock.calls.find(
+      ([, message]) => message === "AI chat turn refused, in-flight lock still held"
+    );
+    expect(busyLog).toBeDefined();
+    const lockTtlSeconds = (busyLog?.[2] as { lockTtlSeconds?: number | null })
+      .lockTtlSeconds;
+    expect(lockTtlSeconds).toBeGreaterThan(0);
+    expect(lockTtlSeconds).toBeLessThanOrEqual(900);
+    info.mockRestore();
 
     provider.push(
       'data: {"choices":[{"delta":{"content":"Payments."},"finish_reason":"stop"}]}\n\n'
@@ -676,6 +795,42 @@ describe("POST /api/ai.chat in-flight cap", () => {
 
     // Settle both flushes: the errored partial answer and the clean answer.
     await waitForRows(session.id, 4);
+  });
+
+  it("releases the lock when the assistant turn cannot be persisted (RUN_ERROR)", async () => {
+    const user = await buildUser();
+    await configureAiChat(user);
+    await seedReadableDocument(user, groundedDocumentText);
+    const session = await buildSession(user);
+
+    stubGroundedProvider();
+    persistFailure.failAssistantTurn = true;
+
+    const res = await chat(user, groundedBody(session.id));
+    expect(res.status).toEqual(200);
+    const text = await res.text();
+
+    // The lost answer is surfaced rather than passed off as a finished run.
+    expect(text).toContain('"type":"RUN_ERROR"');
+    expect(text).toContain('"code":"persistence-failed"');
+
+    // The release runs in the persistence middleware's `finally`, so the throw
+    // that surfaces RUN_ERROR cannot strand the key for the rest of its TTL.
+    expect(await Redis.defaultClient.get(lockKey(user, session.id))).toEqual(
+      null
+    );
+    await expectNoInFlightLock(user);
+
+    // Observable proof: the same session admits a turn at once, and that turn
+    // persists normally now that the write failure is off.
+    persistFailure.failAssistantTurn = false;
+    stubGroundedProvider();
+    const nextRes = await chat(user, groundedBody(session.id));
+    expect(nextRes.status).toEqual(200);
+    await nextRes.text();
+
+    await waitForRows(session.id, 3);
+    await expectNoInFlightLock(user);
   });
 
   it("releases the lock when reading the committed window throws before the stream exists", async () => {

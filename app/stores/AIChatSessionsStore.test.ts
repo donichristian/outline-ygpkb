@@ -1,14 +1,38 @@
+import "fake-indexeddb/auto";
 // The stores singleton must be imported before RootStore so that the module
 // cycle through AuthStore -> developer.ts -> ~/stores resolves in the same
 // order as the application entry point.
 import "~/stores";
+import { IDBFactory } from "fake-indexeddb";
 import { vi } from "vitest";
 import AIChatSessionsStore from "~/stores/AIChatSessionsStore";
 import RootStore from "~/stores/RootStore";
 import { RPCAction } from "~/stores/base/Store";
+import StorePersistence from "~/stores/base/StorePersistence";
 import { client } from "~/utils/ApiClient";
 
 const post = vi.mocked(client.post);
+
+/**
+ * A signed-in bootstrap payload. Constructing a store starts `auth.info` in the
+ * background; answering it stops that call from consuming a test mock and from
+ * adding a nameless user that later breaks relation walks.
+ */
+const authPayload = {
+  data: {
+    user: {
+      id: "user-1",
+      name: "Test User",
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    },
+    team: { id: "team-1", name: "Test Team", subdomain: "" },
+    groups: [],
+    groupUsers: [],
+    availableTeams: [],
+    collaborationToken: "token",
+  },
+  policies: [],
+};
 
 const sessionsStore = (root: RootStore) =>
   root.getStoreForModelName<"aiChatSessions">("AIChatSession");
@@ -26,9 +50,13 @@ describe("AIChatSessionsStore", () => {
   let store: AIChatSessionsStore;
 
   beforeEach(() => {
+    // A fresh IndexedDB per test, so a record persisted by an earlier test
+    // cannot rehydrate mid-test into an unrelated store.
+    globalThis.indexedDB = new IDBFactory();
+    post.mockReset();
+    post.mockResolvedValue(authPayload as never);
     rootStore = new RootStore();
     store = sessionsStore(rootStore);
-    post.mockReset();
   });
 
   afterEach(() => {
@@ -83,14 +111,14 @@ describe("AIChatSessionsStore", () => {
       expect(post).toHaveBeenCalledWith("/ai.sessions.delete", { id: "s1" });
     });
 
-    it("list posts to ai.sessions.list", async () => {
+    it("list posts to ai.sessions.list with a bounded page size", async () => {
       post.mockResolvedValueOnce({
         data: { sessions: [] },
       } as never);
 
       await store.list();
 
-      expect(post).toHaveBeenCalledWith("/ai.sessions.list");
+      expect(post).toHaveBeenCalledWith("/ai.sessions.list", { limit: 100 });
     });
   });
 
@@ -146,6 +174,108 @@ describe("AIChatSessionsStore", () => {
 
       expect(store.get("stale")).toBeUndefined();
       expect(store.get("keep")).toBeTruthy();
+    });
+
+    it("holds only the page it fetched, not the rest of the history", async () => {
+      post.mockResolvedValueOnce({
+        data: {
+          sessions: [
+            session(
+              "s1",
+              "2026-01-02T00:00:00.000Z",
+              "2026-01-02T00:00:00.000Z"
+            ),
+            session(
+              "s2",
+              "2026-01-01T00:00:00.000Z",
+              "2026-01-01T00:00:00.000Z"
+            ),
+          ],
+          hasNextPage: true,
+          cursor: "2026-01-01T00:00:00.000Z|s2",
+        },
+      } as never);
+
+      await store.list();
+
+      expect(store.data.size).toEqual(2);
+      expect(store.isLoaded).toBe(true);
+    });
+
+    it("removes an in-window session the page no longer returns", async () => {
+      // Inside the window the page covered, so the server has deleted it.
+      store.add(
+        session(
+          "stale",
+          "2026-01-05T00:00:00.000Z",
+          "2026-01-07T00:00:00.000Z"
+        )
+      );
+
+      post.mockResolvedValueOnce({
+        data: {
+          sessions: [
+            session(
+              "newer",
+              "2026-01-06T00:00:00.000Z",
+              "2026-01-06T00:00:00.000Z"
+            ),
+          ],
+          hasNextPage: true,
+          cursor: "2026-01-06T00:00:00.000Z|newer",
+        },
+      } as never);
+
+      await store.list();
+
+      expect(store.get("stale")).toBeUndefined();
+      expect(store.get("newer")).toBeTruthy();
+    });
+
+    it("keeps a cached session older than the fetched page across two loads", async () => {
+      const teamId = "team-ai-chat-page";
+      const cached = session(
+        "cached",
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:00.000Z"
+      );
+
+      // Cache it the way an earlier visit would have, through IndexedDB.
+      const earlier = new RootStore();
+      const earlierStore = sessionsStore(earlier);
+      earlierStore.add(cached);
+      const earlierPersistence = new StorePersistence(earlierStore, teamId);
+      earlierPersistence.persist(cached.id);
+      await earlierPersistence.flush();
+
+      // Boot: the cache hydrates, then the server caps the first page.
+      const persistence = new StorePersistence(store, teamId);
+      await persistence.hydrate();
+      expect(store.get(cached.id)).toBeTruthy();
+
+      const page = {
+        data: {
+          sessions: [
+            session(
+              "fresh",
+              "2026-01-10T00:00:00.000Z",
+              "2026-01-10T00:00:00.000Z"
+            ),
+          ],
+          hasNextPage: true,
+          cursor: "2026-01-10T00:00:00.000Z|fresh",
+        },
+      } as never;
+
+      // Two pages in a row, so a persistent mock cannot answer some unrelated
+      // request (the store boots AuthStore's `auth.info` in the background).
+      post.mockResolvedValueOnce(page).mockResolvedValueOnce(page);
+
+      await store.list();
+      await store.list();
+
+      expect(store.get(cached.id)).toBeTruthy();
+      expect(store.get("fresh")).toBeTruthy();
     });
   });
 

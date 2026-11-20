@@ -3,6 +3,7 @@ import { z } from "zod";
 import { errToString } from "@shared/utils/error";
 import env from "@server/env";
 import { Collection, Share, type Team, type User } from "@server/models";
+import Logger from "@server/logging/Logger";
 import { addTags } from "@server/logging/tracer";
 import { traceFunction } from "@server/logging/tracing";
 import { can } from "@server/policies";
@@ -69,6 +70,11 @@ export function optionalString() {
 /** The URI of the MCP resource that lists the available named icons. */
 export const iconNamesResourceUri = "outline://icons";
 
+/** Stable error code returned to MCP clients in place of internal error text. */
+export const toolErrorCode = "tool_error";
+
+const toolErrorMessage = `${toolErrorCode}: The tool could not complete the request.`;
+
 /**
  * Helper function to format successful MCP tool responses.
  *
@@ -98,10 +104,22 @@ export function success<T>(data: T | T[]): CallToolResult {
 /**
  * Helper function to format error MCP tool responses.
  *
- * @param message - the error message or error to include in the response.
+ * Error instances can carry infrastructure detail (SQL, paths, stack
+ * fragments), so they are logged in full and replaced with a stable code.
+ * Authored strings are safe to return to the client unchanged.
+ *
+ * @param err - the error message or error to include in the response.
  * @returns a formatted error response object for MCP tools.
  */
 export function error(err: unknown): CallToolResult {
+  if (err instanceof Error) {
+    Logger.error("MCP tool failed", err);
+    return {
+      content: [{ type: "text" as const, text: toolErrorMessage }],
+      isError: true,
+    };
+  }
+
   const message = errToString(err);
 
   return {
@@ -138,7 +156,14 @@ export function withTracing<F extends (...args: any[]) => any>(
         "request.teamId": user.teamId,
       });
     }
-    return handler.apply(this, args);
+    try {
+      const result = handler.apply(this, args);
+      return result instanceof Promise
+        ? result.catch((err: unknown) => error(err))
+        : result;
+    } catch (err) {
+      return error(err);
+    }
   } as F);
 }
 /* oxlint-enable @typescript-eslint/no-explicit-any */
