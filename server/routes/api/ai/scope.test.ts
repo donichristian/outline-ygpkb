@@ -50,12 +50,12 @@ afterEach(() => {
 const hanPrompt = "支付服务的部署手册在哪里";
 
 describe("findUngroundedReason", () => {
-  it("reports `unsupported script` for a multi-character whitespace-free prompt with no match", async () => {
+  it("reports `no_grounded_docs` for a multi-character whitespace-free prompt with no match", async () => {
     stubProvider({ searchForUser: async () => ({ total: 0 }) });
 
     const reason = await findUngroundedReason(fakeUser(), userTurn(hanPrompt));
 
-    expect(reason).toEqual("unsupported script");
+    expect(reason).toEqual("no_grounded_docs");
   });
 
   it("still allows a grounded prompt (boundary intact, returns undefined)", async () => {
@@ -72,33 +72,36 @@ describe("findUngroundedReason", () => {
     expect(reason).toBeUndefined();
   });
 
-  it("DOCUMENTS THE LIMITATION: a whitespace-free prompt is refused even when a matching document exists", async () => {
-    // The deployed `tsquery` config tokenizes on whitespace, so a Han sentence
-    // arrives as one long unmatchable "word" and the provider returns zero hits
-    // even though the workspace contains the document the user is asking about.
-    // This test asserts the fail-closed refusal rather than real grounding.
-    //
-    // PROBE COULD NOT RUN: this environment has no live authenticated round-trip
-    // against a Han-indexed corpus, so the 50% threshold ships as the documented
-    // default and the limitation is pinned here instead.
-    stubProvider({ searchForUser: async () => ({ total: 0 }) });
+  it("searches the raw text of a whitespace-free prompt instead of refusing it outright", async () => {
+    // The lexical extractor yields one long unmatchable "word" for a Han
+    // sentence, so the probe runs over the raw prompt and only an empty result
+    // refuses. `scopeCJK.test.ts` covers the grounded half of this contract.
+    const searchForUser = vi.fn(async () => ({ total: 0 }));
+    stubProvider({ searchForUser });
 
     const reason = await findUngroundedReason(fakeUser(), userTurn(hanPrompt));
 
-    expect(reason).toEqual("unsupported script");
+    expect(reason).toEqual("no_grounded_docs");
+    expect(searchForUser).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ query: "支付服务的部署手册在哪里" })
+    );
   });
 
-  it("passes a single-character prompt through ungated", async () => {
+  it("searches the raw text of a single-character prompt rather than skipping the gate", async () => {
     // `好` normalizes to one token of length 1, which `buildProbeQuery` drops
-    // (`word.length < 2`). With no term left to probe there is nothing to match
-    // a document against, so the gate does not run and no search is spent.
+    // (`word.length < 2`). With no lexical query left the raw text is searched,
+    // and an empty result refuses.
     const searchForUser = vi.fn(async () => ({ total: 0 }));
     stubProvider({ searchForUser });
 
     const reason = await findUngroundedReason(fakeUser(), userTurn("好"));
 
-    expect(reason).toBeUndefined();
-    expect(searchForUser).not.toHaveBeenCalled();
+    expect(reason).toEqual("no_grounded_docs");
+    expect(searchForUser).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ query: "好" })
+    );
   });
 
   it("pins the 50% threshold on a mixed-script prompt", async () => {
@@ -115,9 +118,9 @@ describe("findUngroundedReason", () => {
     expect(reason).toEqual("no matching document");
   });
 
-  it("reports `unsupported script` on a mixed-script prompt at or above the threshold", async () => {
+  it("reports `no_grounded_docs` on a mixed-script prompt at or above the threshold", async () => {
     // `支付服务的部署手册 deploy` is 8 Han letters + 6 Latin letters → 57% Han,
-    // above the threshold, so it flips to `unsupported script`.
+    // above the threshold, so it falls back to the raw-prompt search.
     stubProvider({ searchForUser: async () => ({ total: 0 }) });
 
     const reason = await findUngroundedReason(
@@ -125,7 +128,7 @@ describe("findUngroundedReason", () => {
       userTurn("支付服务的部署手册 deploy")
     );
 
-    expect(reason).toEqual("unsupported script");
+    expect(reason).toEqual("no_grounded_docs");
   });
 
   it("reports `search failed` when retrieval throws, even for a whitespace-free prompt", async () => {

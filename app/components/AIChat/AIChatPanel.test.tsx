@@ -246,6 +246,8 @@ type StreamScript = {
   error?: Error;
   /** The `X-AI-Chat-Kind` the response carries, as the server sends it. */
   kind?: AiChatKind;
+  /** A trailing `RUN_ERROR`, emitted after the run finished. */
+  runError?: { message: string; code: string };
 };
 
 /**
@@ -369,6 +371,10 @@ function fakeConnection(
         }
 
         yield chunk("RUN_FINISHED", { threadId, runId: `run-${id}` });
+
+        if (script.runError) {
+          yield chunk("RUN_ERROR", script.runError);
+        }
       })() as unknown as AsyncIterable<never>;
     },
   })) as never);
@@ -1014,6 +1020,108 @@ describe("AIChatPanel", () => {
     cleanup();
   });
 
+  it("closes the panel when Escape is pressed", async () => {
+    const { onClose, cleanup } = renderPanel(rootStore);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+      await Promise.resolve();
+    });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    cleanup();
+  });
+
+  it("closes the panel on Escape without stopping the streaming turn", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const runs = fakeConnection((run) => {
+      run.signal?.addEventListener("abort", () => release());
+      return {
+        deltas: ["Hel", "lo"],
+        gateAfter: { index: 0, promise: gate },
+      };
+    });
+
+    const { query, typeMessage, submit, onClose, cleanup } =
+      renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+
+    expect(query("ai-chat-stop")).not.toBeNull();
+    expect(runs[0].signal?.aborted).toBe(false);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Escape",
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+      await Promise.resolve();
+    });
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // Closing is not Stop: the turn keeps streaming and only the stop button
+    // abandons it.
+    expect(runs[0].signal?.aborted).toBe(false);
+    expect(query("ai-chat-stop")).not.toBeNull();
+    expect(query("ai-chat-spinner")).not.toBeNull();
+
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    cleanup();
+  });
+
+  it("leaves the panel open on Escape at a mobile viewport, so only the Drawer closes", async () => {
+    const desktopMatchMedia = window.matchMedia;
+    // Only the mobile breakpoint matches, which is what `useMobile` asks for.
+    window.matchMedia = ((query: string) => ({
+      matches: query.startsWith("(max-width:"),
+      media: query,
+      onchange: null,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      addListener: () => {},
+      removeListener: () => {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+
+    try {
+      const { onClose, cleanup } = renderPanel(rootStore);
+
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", {
+            key: "Escape",
+            bubbles: true,
+            cancelable: true,
+          })
+        );
+        await Promise.resolve();
+      });
+
+      // The vaul Drawer handles Escape itself on mobile; the panel must not
+      // also close, or one keypress would dismiss both layers.
+      expect(onClose).not.toHaveBeenCalled();
+      cleanup();
+    } finally {
+      window.matchMedia = desktopMatchMedia;
+    }
+  });
+
   it("queues a mid-stream send and sends it once the turn settles", async () => {
     let release: () => void = () => undefined;
     const gate = new Promise<void>((resolve) => {
@@ -1252,6 +1360,45 @@ describe("AIChatPanel", () => {
     const notice = query("ai-chat-error");
     expect(notice).not.toBeNull();
     expect(notice?.textContent).toContain("Too many requests");
+    // The banner announces itself to assistive technology as it appears.
+    expect(notice?.getAttribute("role")).toBe("alert");
+    cleanup();
+  });
+
+  it("shows the upstream notice instead of a mid-run provider error", async () => {
+    const providerDetail = "provider quota exceeded for org-123";
+    fakeConnection({
+      deltas: [],
+      error: Object.assign(new Error(providerDetail), {
+        code: "upstream_unavailable",
+      }),
+    });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+
+    const notice = query("ai-chat-error");
+    expect(notice).not.toBeNull();
+    expect(notice?.textContent).toContain(
+      "The AI service is temporarily unavailable. Please try again."
+    );
+    // The provider's own message is logged server-side only; the panel must
+    // never render it back to the user.
+    expect(document.body.textContent).not.toContain(providerDetail);
+    cleanup();
+  });
+
+  it("shows the upstream notice for a pre-stream failure the header flags", async () => {
+    fakeConnection({ deltas: [], kind: "upstream_unavailable" });
+
+    const { query, typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+
+    expect(query("ai-chat-error")?.textContent).toContain(
+      "The AI service is temporarily unavailable. Please try again."
+    );
     cleanup();
   });
 
@@ -1271,7 +1418,7 @@ describe("AIChatPanel", () => {
     cleanup();
   });
 
-  it("renders a grounding refusal inline as an assistant turn, not an error", async () => {
+  it("renders a grounding refusal inline and offers a retry, not a failure badge", async () => {
     const refusal =
       "This assistant only answers from this workspace’s knowledge base";
     fakeConnection({ deltas: [refusal], question: "hi", kind: "refusal" });
@@ -1282,12 +1429,51 @@ describe("AIChatPanel", () => {
 
     expect(query("message-user")?.textContent).toBe("hi");
     expect(query("message-assistant")?.textContent).toContain(refusal);
-    expect(query("ai-chat-error")).toBeNull();
-    // A refusal completed normally, so it carries no turn marker at all.
-    // `error` here rendered a danger "Failed" badge under the refusal text,
-    // which is what made the boundary read as a failure.
+    // The header flags the run as a refusal even though it completed cleanly,
+    // so the banner offers one more try instead of a silent dead end.
+    expect(query("ai-chat-error")?.textContent).toContain(
+      "The AI chat request was declined"
+    );
+    expect(query("ai-chat-retry")?.textContent).toBe("Retry");
+    // A refusal is still an ordinary assistant turn: no failure badge.
     expect(query("message-status-error")).toBeNull();
     expect(query("message-status-completed")).toBeNull();
+    cleanup();
+  });
+
+  it("retries a refused turn's own prompt without refilling the composer", async () => {
+    const refusal =
+      "This assistant only answers from this workspace’s knowledge base";
+    let attempt = 0;
+    const runs = fakeConnection(() => {
+      attempt += 1;
+
+      return attempt === 1
+        ? { deltas: [refusal], question: "hi", kind: "refusal" }
+        : { deltas: ["grounded answer"], question: "hi" };
+    });
+
+    const { query, click, inputValue, typeMessage, submit, cleanup } =
+      renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+
+    const retry = query("ai-chat-retry") as HTMLButtonElement | null;
+    expect(query("ai-chat-error")).not.toBeNull();
+    expect(retry?.disabled).toBe(false);
+    // A refusal is persisted before the frames, so the question already lives
+    // in the transcript. Refilling the composer would show it twice and a
+    // submit from there would store a second copy of the same turn.
+    expect(inputValue()).toBe("");
+
+    await click(retry);
+    await flush();
+
+    expect(runs).toHaveLength(2);
+    // The retry resent the refused turn's own prompt, not the composer.
+    expect(messageText(runs[1].messages[0])).toBe("hi");
+    expect(query("ai-chat-error")).toBeNull();
+    expect(query("ai-chat-retry")).toBeNull();
     cleanup();
   });
 
@@ -1318,6 +1504,27 @@ describe("AIChatPanel", () => {
     expect(query("ai-chat-queue")).toBeNull();
 
     // The refused turn reached the wire but wrote nothing.
+    expect(runs).toHaveLength(1);
+    expect(rootStore.aiChatMessages.orderedData).toHaveLength(0);
+    cleanup();
+  });
+
+  it("shows the upstream unavailable notice in place of the generic one", async () => {
+    const runs = fakeConnection({ deltas: [], kind: "upstream_unavailable" });
+
+    const { typeMessage, submit, cleanup } = renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+    await flush();
+
+    const notices = document.querySelectorAll('[data-testid="ai-chat-error"]');
+    expect(notices).toHaveLength(1);
+    expect(notices[0].textContent).toContain(
+      "The AI service is temporarily unavailable. Please try again."
+    );
+    // The upstream copy replaces the generic stream failure; it never stacks.
+    expect(notices[0].textContent).not.toContain("The AI chat stream failed");
+
     expect(runs).toHaveLength(1);
     expect(rootStore.aiChatMessages.orderedData).toHaveLength(0);
     cleanup();
@@ -1375,6 +1582,35 @@ describe("AIChatPanel", () => {
     expect(query("ai-chat-error")?.textContent).toContain(
       "Your session has expired, refresh the page to continue"
     );
+    cleanup();
+  });
+
+  it("surfaces a lost assistant turn and marks it not saved", async () => {
+    // The answer streamed and the run finished, then the server reported that
+    // the turn could not be stored. Nothing was written, so a re-read would
+    // return no rows: the transcript must keep what the user already read.
+    fakeConnection({
+      deltas: ["An answer the server failed to store"],
+      question: "hi",
+      runError: {
+        message: "The assistant turn could not be persisted",
+        code: "persistence-failed",
+      },
+    });
+
+    const { query, transcripts, typeMessage, submit, cleanup } =
+      renderPanel(rootStore);
+    typeMessage("hi");
+    await submit();
+
+    expect(transcripts().join("")).toContain(
+      "An answer the server failed to store"
+    );
+    expect(query("ai-chat-error")?.textContent).toContain(
+      "The assistant's answer could not be saved to your chat history."
+    );
+    expect(query("ai-chat-not-saved")?.textContent).toBe("Not saved");
+    expect(query("ai-chat-no-source")).toBeNull();
     cleanup();
   });
 
@@ -2006,6 +2242,112 @@ describe("AIChatPanel", () => {
       "No sources found"
     );
     expect(panel.query("ai-chat-starters")).toBeNull();
+    panel.cleanup();
+  });
+
+  it("retries the failed turn's own prompt, never the composer buffer", async () => {
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let attempt = 0;
+    const runs = fakeConnection(() => {
+      attempt += 1;
+
+      return attempt === 1
+        ? { deltas: [], kind: "busy" }
+        : {
+            deltas: ["second answer"],
+            question: "first question",
+            gateBeforeFinish: gate,
+          };
+    });
+
+    const panel = renderPanel(rootStore);
+    panel.typeMessage("first question");
+    await panel.submit();
+    await flush();
+
+    // The busy refusal put the prompt back in the composer, so the user can
+    // edit it before reaching for Retry; the buffer and the failed turn then
+    // hold different text.
+    expect(panel.inputValue()).toBe("first question");
+    panel.typeMessage("something else entirely");
+
+    const retry = panel.query("ai-chat-retry") as HTMLButtonElement | null;
+    expect(panel.query("ai-chat-error")).not.toBeNull();
+    expect(retry).not.toBeNull();
+    expect(retry?.disabled).toBe(false);
+
+    await panel.click(retry);
+    await flush();
+
+    // In flight: the banner cleared with the new turn, so the control is gone
+    // rather than offering a second concurrent send.
+    expect(panel.query("ai-chat-error")).toBeNull();
+    expect(panel.query("ai-chat-retry")).toBeNull();
+    expect(panel.query("ai-chat-stop")).not.toBeNull();
+
+    // The retry resent the failed turn's text, not the edited buffer.
+    expect(runs).toHaveLength(2);
+    expect(messageText(runs[1].messages[0])).toBe("first question");
+
+    release();
+    await flushUntil(() => panel.query("ai-chat-stop") === null);
+
+    // Success clears the banner and, with it, the retry control.
+    expect(panel.query("ai-chat-error")).toBeNull();
+    expect(panel.query("ai-chat-retry")).toBeNull();
+    panel.cleanup();
+  });
+
+  it("offers retry beneath the banner for an upstream failure", async () => {
+    fakeConnection({ deltas: [], kind: "upstream_unavailable" });
+
+    const panel = renderPanel(rootStore);
+    panel.typeMessage("hi");
+    await panel.submit();
+    await flush();
+
+    expect(panel.query("ai-chat-error")).not.toBeNull();
+    const retry = panel.query("ai-chat-retry");
+    expect(retry?.textContent).toBe("Retry");
+    panel.cleanup();
+  });
+
+  it("offers no retry for a rejected request", async () => {
+    fakeConnection({
+      deltas: [],
+      error: new AiChatError("Forbidden", "http", 403),
+    });
+
+    const panel = renderPanel(rootStore);
+    panel.typeMessage("hi");
+    await panel.submit();
+    await flush();
+
+    expect(panel.query("ai-chat-error")?.textContent).toContain(
+      "Your session has expired"
+    );
+    expect(panel.query("ai-chat-retry")).toBeNull();
+    panel.cleanup();
+  });
+
+  it("offers no retry for a network failure", async () => {
+    fakeConnection({
+      deltas: [],
+      error: new AiChatError("offline", "network"),
+    });
+
+    const panel = renderPanel(rootStore);
+    panel.typeMessage("hi");
+    await panel.submit();
+    await flush();
+
+    expect(panel.query("ai-chat-error")?.textContent).toContain(
+      "A network error occurred"
+    );
+    expect(panel.query("ai-chat-retry")).toBeNull();
     panel.cleanup();
   });
 });

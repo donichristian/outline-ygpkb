@@ -162,10 +162,10 @@ const UntokenizableScriptRatio = 0.5;
 /**
  * Reports whether a prompt is written in a script the term extractor cannot
  * tokenize. The extractor splits on whitespace (`buildProbeQuery`), so a
- * whitespace-free script degrades to near-total refusal; this only makes that
- * refusal *say why* in the logs. It is a reason classifier, never a decision:
- * the caller only consults it once retrieval has already returned no match, so
- * it cannot turn a refusal into an allow.
+ * whitespace-free script degrades to one long unmatchable "word". The caller
+ * uses it to route such a prompt to retrieval over the raw text instead of the
+ * extracted query; the retrieval result alone decides whether the prompt is
+ * grounded.
  *
  * @param normalizedPrompt the prompt as returned by `normalize` – never raw user
  *   text, because the ratio is measured over letters and raw text still carries
@@ -200,12 +200,12 @@ export function isUntokenizableScript(normalizedPrompt: string): boolean {
  * nothing and is refused, so prompts cannot be used to probe for inaccessible
  * collections.
  *
- * A prompt that yields no term to probe is NOT gated. Refusing it answered a
- * bare greeting with a lecture about the knowledge base, which is the one
- * response a user cannot act on. A prompt with no distinctive term also has
- * nothing to match a document against, so the probe would decide nothing either
- * way.
- *
+ * A prompt written in a script the extractor cannot tokenize is NOT refused on
+ * that basis: the probe runs over the raw prompt text so the provider's own
+ * tokenizer decides, and only an empty result refuses, with `no_grounded_docs`.
+ * A prompt that yields no term for any other reason is still ungated – refusing
+ * it answered a bare greeting with a lecture, which is the one response a user
+ * cannot act on, and it carries no evidence either way. *
  * Fails closed from the probe onwards. If retrieval is unavailable the prompt is
  * refused rather than passed through ungrounded.
  *
@@ -214,21 +214,16 @@ export function isUntokenizableScript(normalizedPrompt: string): boolean {
  * a document that merely shares a word and under-matches a paraphrase that shares
  * none. Deliberately biased toward refusing, because a refusal is visible and a
  * hallucinated answer is not. Costs one search (two or three indexed queries on
- * the read replica) on a route that previously did no database read. The bias
- * applies to prompts that carry terms; a prompt carrying none is ungated, since
- * refusing it is pure cost. Upgrade path if this proves too blunt: rank with
- * embeddings, or keep the probe and add a post-hoc check that the upstream stream
- * actually cites a `/doc/` URL before any token of it is flushed.
+ * the read replica) on a route that previously did no database read. Upgrade
+ * path if this proves too blunt: rank with embeddings, or keep the probe and add
+ * a post-hoc check that the upstream stream actually cites a `/doc/` URL before
+ * any token of it is flushed.
  *
- * ponytail: the term extractor assumes space-delimited scripts. A
- * whitespace-free script (Han, Thai, Khmer, …) arrives as one long "word", so
- * the probe degrades to near-total refusal regardless of what the workspace
- * contains. That ceiling is now *distinguishable in the logs* as
- * `unsupported script`, while a single-character prompt is no longer gated at
- * all – but neither is fixed here. Only the reason string changed; the decision
- * did not. Upgrade path if this proves too blunt: segment
- * the prompt with a language-aware tokenizer before extracting terms, and
- * index those languages rather than relying on the default `tsquery` config.
+ * ponytail: the fallback still hands a whitespace-free prompt to the default
+ * `tsquery` config, which does not segment it, so a real corpus can still return
+ * nothing for a question it could answer. Upgrade path if this proves too blunt:
+ * segment the prompt with a language-aware tokenizer before searching, and index
+ * those languages rather than relying on the default `tsquery` config.
  *
  * @param user the requesting user, whose access bounds the search.
  * @param messages the conversation as resolved by the caller – the client array
@@ -245,12 +240,18 @@ export async function findUngroundedReason(
     return "empty prompt";
   }
 
-  const query = buildProbeQuery(prompt);
+  const untokenizable = isUntokenizableScript(prompt);
 
-  // Deliberately ungated. A prompt with no term to probe carries no evidence
-  // either way, so gating it decides nothing and answers a greeting with a
-  // lecture. Every sibling branch below returns a reason; this one does not,
-  // and that is the point — every word of "hi" is in `WeakTerms`.
+  // A whitespace-free script arrives as one long unmatchable "word" – or, for a
+  // single character such as "好", as no term at all – so the probe runs over
+  // the raw text and the provider's own tokenizer decides.
+  const query = untokenizable ? prompt : buildProbeQuery(prompt);
+
+  // Deliberately ungated. A prompt in a tokenizable script that yields no term
+  // to probe carries no evidence either way, so gating it decides nothing and
+  // answers a greeting with a lecture. Every sibling branch below returns a
+  // reason; this one does not, and that is the point — every word of "hi" is in
+  // `WeakTerms`, and "Can you tell me anything about it?" names nothing.
   if (!query) {
     return undefined;
   }
@@ -261,14 +262,16 @@ export async function findUngroundedReason(
       { query, filter: ProbeFilter, offset: 0, limit: 1 }
     );
 
-    // Refining the reason string *after* retrieval came back empty leaves the
-    // decision untouched: `total > 0` stays the only path to `undefined`, every
-    // other path is a refusal. The call sits inside the `try` so a classifier
-    // throw degrades to "search failed" rather than escaping as a JSON 500.
+    // `total > 0` stays the only path to `undefined`, every other path is a
+    // refusal. A tokenizable prompt keeps its reason string; a whitespace-free
+    // script pretends the probe ran, but a `tsquery` only tokenizes on
+    // whitespace, so an empty result is the extractor's failure to segment it
+    // rather than proof the workspace cannot answer. It refuses as
+    // `no_grounded_docs` instead.
     return total > 0
       ? undefined
-      : isUntokenizableScript(prompt)
-        ? "unsupported script"
+      : untokenizable
+        ? "no_grounded_docs"
         : "no matching document";
   } catch (err) {
     Logger.error(

@@ -14,7 +14,7 @@ import type { APIContext } from "@server/types";
 import { RateLimiterStrategy } from "@server/utils/RateLimiter";
 import { assertAiChatEnabled } from "./enabled";
 import * as T from "./schema";
-import { AiChatMaxMessages } from "./schema";
+import { AiChatMaxMessages, AiChatMaxSessions } from "./schema";
 
 /**
  * The number of messages returned in a single page of history. One page is one
@@ -22,6 +22,42 @@ import { AiChatMaxMessages } from "./schema";
  * than the model is ever sent.
  */
 const messagesPageSize = AiChatMaxMessages;
+
+/**
+ * The number of sessions returned in a single page of the session list. A hard
+ * bound: the caller may ask for fewer, never for more.
+ */
+const sessionsPageSize = AiChatMaxSessions;
+
+/**
+ * Encodes the position of the last session on a page as an opaque cursor.
+ *
+ * `updatedAt` alone is not unique, so the id breaks ties and keeps the order
+ * total – two sessions saved in the same millisecond would otherwise be
+ * skipped or repeated across pages.
+ *
+ * @param session the last session on the page.
+ * @returns the cursor for the next page.
+ */
+function sessionCursor(session: AIChatSession): string {
+  return `${session.updatedAt.toISOString()}|${session.id}`;
+}
+
+/**
+ * Splits a session cursor back into the position it names. The shape is
+ * validated by `AiSessionsListSchema`, so both parts are always present.
+ *
+ * @param cursor the cursor returned by a previous page.
+ * @returns the updatedAt and id of the last row of that page.
+ */
+function parseSessionCursor(cursor: string): { updatedAt: Date; id: string } {
+  const separator = cursor.lastIndexOf("|");
+
+  return {
+    updatedAt: new Date(cursor.slice(0, separator)),
+    id: cursor.slice(separator + 1),
+  };
+}
 
 const router = new Router();
 
@@ -57,20 +93,48 @@ router.post(
     const { user } = ctx.state.auth;
     assertAiChatEnabled(user);
 
+    const { limit, after } = ctx.input.body;
+    const pageSize = Math.min(limit ?? sessionsPageSize, sessionsPageSize);
+    const cursor = after ? parseSessionCursor(after) : undefined;
+
     // The where clause is the authorization: it matches the index prefix
     // `[teamId, userId, updatedAt]` and excludes every other user's rows in one
-    // read, so there is no per-row check to loop over.
-    const sessions = await AIChatSession.findAll({
+    // read, so there is no per-row check to loop over. One row beyond the page
+    // size is read so "are there older sessions?" is answered by the page
+    // already fetched rather than a second query.
+    const rows = await AIChatSession.findAll({
       where: {
         teamId: user.teamId,
         userId: user.id,
+        ...(cursor
+          ? {
+              [Op.or]: [
+                { updatedAt: { [Op.lt]: cursor.updatedAt } },
+                { updatedAt: cursor.updatedAt, id: { [Op.lt]: cursor.id } },
+              ],
+            }
+          : {}),
       },
-      order: [["updatedAt", "DESC"]],
+      // The id breaks updatedAt ties, matching the cursor above so a page
+      // boundary can never skip or repeat a row.
+      order: [
+        ["updatedAt", "DESC"],
+        ["id", "DESC"],
+      ],
+      limit: pageSize + 1,
     });
+
+    const truncated = rows.length > pageSize;
+    const page = truncated ? rows.slice(0, pageSize) : rows;
 
     ctx.body = {
       data: {
-        sessions: sessions.map(presentAIChatSession),
+        sessions: page.map(presentAIChatSession),
+        // Older sessions exist that this page does not include.
+        hasNextPage: truncated,
+        // The cursor to send next is the position of the last row on this
+        // page, and only exists while there is something below it to fetch.
+        cursor: truncated ? sessionCursor(page[page.length - 1]) : undefined,
       },
     };
   }

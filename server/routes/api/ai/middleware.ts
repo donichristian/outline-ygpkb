@@ -9,6 +9,59 @@ import {
 } from "@server/models/AIChatMessage";
 import { requestContext } from "@server/storage/requestContext";
 import type { APIContext } from "@server/types";
+import { fenceRetrievedData, unfenceRetrievedData } from "./prompt";
+import { ToolBudgetExhausted } from "./tools";
+
+/**
+ * Decodes a tool-result payload into the value the model received. A string is
+ * returned as-is; a content-part array yields its first text part, parsed as
+ * JSON when it is one.
+ *
+ * @param content the `TOOL_CALL_RESULT` chunk content.
+ * @return the decoded payload, or undefined when it cannot be decoded.
+ */
+function parseToolResultContent(
+  content: Extract<StreamChunk, { type: "TOOL_CALL_RESULT" }>["content"]
+): unknown {
+  let text: unknown = content;
+  if (Array.isArray(content)) {
+    const part = content.find(
+      (item): item is { type: "text"; text: string } =>
+        item.type === "text" && typeof item.text === "string"
+    );
+    text = part?.text;
+  }
+  if (typeof text !== "string") {
+    return text;
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+/**
+ * Reports whether a tool-result payload is the budget-refusal sentinel. Only
+ * the payload itself counts: either the bare sentinel string or an object
+ * whose `error` equals it.
+ *
+ * @param content the `TOOL_CALL_RESULT` chunk content.
+ * @return true when this result is the budget refusal.
+ */
+function isToolBudgetExhaustedResult(
+  content: Extract<StreamChunk, { type: "TOOL_CALL_RESULT" }>["content"]
+): boolean {
+  const payload = parseToolResultContent(content);
+  if (payload === ToolBudgetExhausted) {
+    return true;
+  }
+  return (
+    !!payload &&
+    typeof payload === "object" &&
+    (payload as { error?: unknown }).error === ToolBudgetExhausted
+  );
+}
 
 /** Inputs for {@link appendTurn}. */
 export type AppendTurnProps = {
@@ -39,6 +92,23 @@ export type AppendTurnProps = {
    * called, which lets the empty-text guard drop a turn that produced nothing.
    */
   toolCallDigest?: Record<string, unknown>;
+  /**
+   * Reject with a {@link PersistenceFailedError} when the row cannot be stored,
+   * instead of logging and resolving. Set only by the terminal hook: the
+   * pre-stream user turn stays a best-effort write, while an accepted assistant
+   * turn that is lost has to reach the client (todo 14).
+   */
+  surfaceFailure?: boolean;
+  /**
+   * The prompt tokens the provider reported for the run, or `null` when it
+   * reported no usage. Persisted as-is; never estimated here.
+   */
+  promptTokens?: number | null;
+  /**
+   * The completion tokens the provider reported for the run, or `null` when it
+   * reported no usage. Persisted as-is; never estimated here.
+   */
+  completionTokens?: number | null;
 };
 export type PersistenceMiddlewareProps = {
   /** The user the turn belongs to. */
@@ -83,11 +153,67 @@ export type ToolCallDigestEntry = {
 /** The body-free tool-call digest persisted with an assistant turn. */
 export type ToolCallDigest = {
   toolCalls: ToolCallDigestEntry[];
+  events?: ToolCallDigestEvent[];
 };
+
+/** A typed event the turn records next to its tool calls. */
+export type ToolCallDigestEvent = {
+  /** The turn's tool budget was exhausted and further calls were refused. */
+  type: "tool-call-budget-exhausted";
+};
+
+/**
+ * Builds the body-free digest persisted with the turn, adding the typed budget
+ * event when a tool call was refused at the turn's cap.
+ *
+ * @param toolCalls the tool calls the turn attempted, in order.
+ * @param toolBudgetExhausted whether a call was refused at the cap.
+ * @return the digest to persist, or undefined when no tool ran.
+ */
+export function buildToolCallDigest(
+  toolCalls: ToolCallDigestEntry[],
+  toolBudgetExhausted: boolean
+): Record<string, unknown> | undefined {
+  if (toolCalls.length === 0) {
+    return undefined;
+  }
+
+  return toolBudgetExhausted
+    ? { toolCalls, events: [{ type: "tool-call-budget-exhausted" }] }
+    : { toolCalls };
+}
 
 /** The error code the OpenAI-compatible adapter uses for a stream that ended
  * without a `finish_reason`. */
-const IncompleteStreamCode = "incomplete-stream";
+export const IncompleteStreamCode = "incomplete-stream";
+
+/** The error code a client matches to tell a lost answer from a failed run. */
+export const PersistenceFailedCode = "persistence-failed";
+
+/**
+ * The `RUN_ERROR` code the server stamps on any upstream failure – provider
+ * error, timeout, or quota rejection mid-run – so the client can tell "ask
+ * again in a moment" from a plain stream failure. The provider's own body never
+ * travels with it; `onError` logs the cause server-side.
+ */
+export const UpstreamUnavailableCode = "upstream_unavailable";
+
+/**
+ * Raised by the terminal hook when an accepted assistant turn could not be
+ * stored. The engine turns a rejected terminal hook into a trailing
+ * `RUN_ERROR` frame, which is the only way a client learns that the answer it
+ * just read was never recorded.
+ */
+class PersistenceFailedError extends Error {
+  /** The wire code identifying a lost assistant turn. */
+  readonly code = PersistenceFailedCode;
+
+  /** Builds the error with a message that is safe to put on the wire. */
+  constructor() {
+    super("The assistant turn could not be persisted");
+    this.name = "PersistenceFailedError";
+  }
+}
 
 /**
  * Appends one row to a stored AI chat session. The single write path shared by
@@ -108,11 +234,15 @@ const IncompleteStreamCode = "incomplete-stream";
  *
  * A turn that cannot be stored is a lost answer, never a failed request: the
  * bytes are already on the wire, so there is nothing left to report to the
- * client and the stream must still terminate.
+ * client and the stream must still terminate. `surfaceFailure` is the one
+ * exception: with it set the caller has decided that a lost answer must not
+ * look like a successful run, and the failure is rethrown.
  *
  * @param props the turn to append and the session to append it to.
  * @return a promise that resolves once the row is committed or the failure is
  *   logged.
+ * @throws {PersistenceFailedError} when the write fails and `surfaceFailure` is
+ *   set.
  */
 export async function appendTurn({
   user,
@@ -125,6 +255,9 @@ export async function appendTurn({
   requestId,
   citationMiss,
   toolCallDigest,
+  promptTokens,
+  completionTokens,
+  surfaceFailure,
 }: AppendTurnProps): Promise<void> {
   if (!sessionId) {
     return;
@@ -148,12 +281,94 @@ export async function appendTurn({
       ctx,
       citationMiss,
       toolCallDigest,
-    }).catch((err) =>
+      promptTokens,
+      completionTokens,
+    }).catch((err) => {
       Logger.error("AI chat turn could not be persisted", toError(err), {
         requestId,
-      })
-    )
+      });
+
+      if (surfaceFailure) {
+        throw new PersistenceFailedError();
+      }
+    })
   );
+}
+
+/** The provider-reported token counts persisted on an assistant turn. */
+type PersistedTokenUsage = {
+  promptTokens: number | null;
+  completionTokens: number | null;
+};
+
+/**
+ * Reads a token count off a provider-shaped value.
+ *
+ * @param value the value the provider put where a count belongs.
+ * @return the count, or `null` when it is not a token count.
+ */
+function tokenCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : null;
+}
+
+/**
+ * Normalizes the usage a terminal `RUN_FINISHED` chunk carries into the two
+ * counts the assistant row stores. The shape is provider-defined: the AG-UI
+ * spec defines a `usage[]` array whose entries carry `inputTokens`/
+ * `outputTokens`, while the chat-completions adapter attaches a TanStack
+ * `TokenUsage` object with `promptTokens`/`completionTokens`. Both are summed
+ * per run, because a run may report one entry per upstream model call.
+ *
+ * A count the provider did not report stays `null`. A fabricated number in a
+ * cost column is worse than a missing one, so nothing is estimated here.
+ *
+ * @param usage the `RUN_FINISHED` usage payload, in any provider shape.
+ * @return the two counts, `null` where the provider reported none.
+ */
+function normalizeTokenUsage(usage: unknown): PersistedTokenUsage {
+  if (Array.isArray(usage)) {
+    let promptTokens: number | null = null;
+    let completionTokens: number | null = null;
+
+    for (const entry of usage) {
+      if (!entry || typeof entry !== "object") {
+        continue;
+      }
+
+      const spec = entry as { inputTokens?: unknown; outputTokens?: unknown };
+      const input = tokenCount(spec.inputTokens);
+      const output = tokenCount(spec.outputTokens);
+
+      if (input !== null) {
+        promptTokens = (promptTokens ?? 0) + input;
+      }
+      if (output !== null) {
+        completionTokens = (completionTokens ?? 0) + output;
+      }
+    }
+
+    return { promptTokens, completionTokens };
+  }
+
+  if (usage && typeof usage === "object") {
+    const object = usage as {
+      promptTokens?: unknown;
+      completionTokens?: unknown;
+      inputTokens?: unknown;
+      outputTokens?: unknown;
+    };
+
+    return {
+      promptTokens: tokenCount(object.promptTokens ?? object.inputTokens),
+      completionTokens: tokenCount(
+        object.completionTokens ?? object.outputTokens
+      ),
+    };
+  }
+
+  return { promptTokens: null, completionTokens: null };
 }
 
 /**
@@ -168,6 +383,176 @@ function errorCode(error: unknown): unknown {
     return undefined;
   }
   return error.code;
+}
+
+/**
+ * Result fields that identify a document rather than carry its text. They stay
+ * byte-identical so a citation resolves to the real link, and so the digest
+ * keeps storing identifiers the citation-miss check can match.
+ */
+const UnfencedResultKeys = new Set(["documentId", "url"]);
+
+/**
+ * Frames every third-party string inside a tool result with the data
+ * sentinels. Identifiers stay bare, scalars are kept as they are, and the
+ * result keeps its shape so the engine can still serialize it back to JSON.
+ *
+ * @param value the tool result value to walk.
+ * @param key the field name `value` was stored under, when known.
+ * @return the same shape with every text field framed.
+ */
+function fenceThirdPartyText(value: unknown, key?: string): unknown {
+  if (typeof value === "string") {
+    return key && UnfencedResultKeys.has(key)
+      ? value
+      : fenceRetrievedData(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => fenceThirdPartyText(item));
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([entryKey, entryValue]) => [
+        entryKey,
+        fenceThirdPartyText(entryValue, entryKey),
+      ])
+    );
+  }
+  return value;
+}
+
+/** Absolute links an answer may carry. Trailing punctuation is trimmed after
+ * the match so a link at the end of a sentence still compares byte-identical. */
+const AbsoluteUrlPattern = /https?:\/\/[^\s<>"'`)\]}]+/gi;
+
+/** Citation-shaped markers an answer can carry without an absolute URL: a
+ * footnote number, a source or reference label, a markdown link, or a link
+ * path. A conversational answer carries none of these. */
+const SourceMarkerPattern =
+  /\[\^?\d+\]|(?:^|\n)\s*(?:sources?|references?)\s*:|!?\[[^\]]*\]\([^)]+\)|(?:^|[\s(])\/[a-z0-9]/i;
+
+/**
+ * Reports whether an answer names a source without citing an absolute URL.
+ *
+ * @param text the accumulated assistant text.
+ * @return true when the text carries a source-like marker.
+ */
+function hasSourceMarker(text: string): boolean {
+  return SourceMarkerPattern.test(text);
+}
+
+/**
+ * Extracts the absolute URLs an answer cites.
+ *
+ * @param text the accumulated assistant text.
+ * @return every absolute URL in the text, without trailing punctuation.
+ */
+function extractAbsoluteUrls(text: string): string[] {
+  return (text.match(AbsoluteUrlPattern) ?? []).map((url) =>
+    url.replace(/[.,;:!?]+$/, "")
+  );
+}
+
+/**
+ * Builds the set of links the turn's tool results actually returned.
+ *
+ * @param toolCalls the tool calls recorded for the turn.
+ * @return the links any tool returned.
+ */
+function toolReturnedLinks(toolCalls: ToolCallDigestEntry[]): Set<string> {
+  const links = new Set<string>();
+  for (const call of toolCalls) {
+    for (const link of call.links) {
+      links.add(link);
+    }
+  }
+  return links;
+}
+
+/**
+ * Whether an absolute URL in the answer maps to a link a tool returned. Tools
+ * commonly return a workspace-relative link, so the path is compared as well.
+ *
+ * @param url the absolute URL the answer cites.
+ * @param links the links the turn's tools returned.
+ * @return true when the URL is backed by a tool result.
+ */
+function isToolReturnedUrl(url: string, links: Set<string>): boolean {
+  if (links.has(url)) {
+    return true;
+  }
+  let path: string;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    return false;
+  }
+  for (const link of links) {
+    if (link.startsWith("/") && link === path) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Removes the given URLs from the answer, keeping the surrounding sentence.
+ *
+ * @param text the answer text.
+ * @param urls the URLs to remove.
+ * @return the text without those URLs.
+ */
+function removeUrls(text: string, urls: string[]): string {
+  let result = text;
+  for (const url of urls) {
+    result = result.split(url).join("");
+  }
+  return result;
+}
+
+/**
+ * Keeps only the absolute URLs this turn's tools returned. A URL no tool
+ * returned is stripped so it cannot auto-link, and the answer turns into a
+ * citation miss. An answer that was nothing but a rejected URL keeps a
+ * placeholder, because an empty assistant turn is dropped by {@link appendTurn}.
+ *
+ * Never throws: a validation failure strips every URL instead, so no
+ * unvalidated link reaches a persisted row.
+ *
+ * @param text the accumulated assistant text.
+ * @param toolCalls the tool calls recorded for the turn.
+ * @return the validated text, the number of URLs removed, and whether the
+ *   engine failed closed.
+ */
+function validateAnswerCitations(
+  text: string,
+  toolCalls: ToolCallDigestEntry[]
+): { content: string; stripped: number; failed: boolean } {
+  try {
+    const cited = extractAbsoluteUrls(text);
+    if (cited.length === 0) {
+      return { content: text, stripped: 0, failed: false };
+    }
+    const links = toolReturnedLinks(toolCalls);
+    const rejected = cited.filter((url) => !isToolReturnedUrl(url, links));
+    if (rejected.length === 0) {
+      return { content: text, stripped: 0, failed: false };
+    }
+    const content = removeUrls(text, rejected);
+    return {
+      content: content.trim() ? content : "[citation removed]",
+      stripped: rejected.length,
+      failed: false,
+    };
+  } catch {
+    const stripped = (text.match(AbsoluteUrlPattern) ?? []).length;
+    const content = text.replace(AbsoluteUrlPattern, "");
+    return {
+      content: content.trim() ? content : "[citation removed]",
+      stripped,
+      failed: true,
+    };
+  }
 }
 
 /**
@@ -214,6 +599,8 @@ export function createPersistenceMiddleware({
   const toolCallIndex = new Map<string, ToolCallDigestEntry>();
   const toolCallArguments = new Map<string, string>();
   const toolCallNames = new Map<string, string>();
+  let toolBudgetExhausted = false;
+
 
   /**
    * Parses the tool result a `TOOL_CALL_RESULT` chunk carries and collects its
@@ -276,7 +663,8 @@ export function createPersistenceMiddleware({
             documentIds.push(identifier.documentId);
           }
           if (typeof identifier.title === "string" && identifier.title) {
-            titles.push(identifier.title);
+            // The digest is metadata, so it stores the title without framing.
+            titles.push(unfenceRetrievedData(identifier.title));
           }
           if (typeof identifier.url === "string" && identifier.url) {
             toolResultIdentifiers.add(identifier.url);
@@ -300,16 +688,18 @@ export function createPersistenceMiddleware({
           )
         : false);
 
+    // Framing is not payload, so the digest measures what the tool returned.
     const characterCount =
       typeof chunk.content === "string"
-        ? chunk.content.length
+        ? unfenceRetrievedData(chunk.content).length
         : Array.isArray(chunk.content)
         ? chunk.content.reduce(
             (sum, part) =>
               sum +
                (part && typeof part === "object" && "text" in part
                  ? (typeof (part as { text?: unknown }).text === "string"
-                     ? ((part as { text: string }).text.length)
+                     ? unfenceRetrievedData((part as { text: string }).text)
+                         .length
                      : 0)
                  : 0),
             0
@@ -368,13 +758,15 @@ export function createPersistenceMiddleware({
   /**
    * The citation-miss check: grounded only when the accumulated answer text
    * contains an identifier some tool returned in this run. A link the model
-   * produced without a tool ever returning it does not count as sourced.
+   * produced without a tool ever returning it does not count as sourced, and
+   * a run that called no tool is a miss only when the answer itself names a
+   * source – a plain conversational reply is not a citation miss.
    *
    * @return true when no tool-returned identifier is present in the answer.
    */
   const isCitationMiss = (): boolean => {
     if (toolResultIdentifiers.size === 0) {
-      return true;
+      return hasSourceMarker(content);
     }
     for (const identifier of toolResultIdentifiers) {
       if (content.includes(identifier)) {
@@ -385,10 +777,10 @@ export function createPersistenceMiddleware({
   };
 
   // Token counts ride the terminal `RUN_FINISHED` chunk as a provider-shaped
-  // value (`usage[]` per the AG-UI spec, or a TanStack object), so it is kept
-  // opaque here and only logged. Shape is provider-defined; nothing branches on
-  // it.
-  let tokenUsage: unknown;
+  // value, normalized on arrival into the two columns the turn row stores so
+  // that the row and the log line below cannot disagree. Stays undefined until
+  // a run reports usage at all, which is the only case worth logging.
+  let tokenUsage: PersistedTokenUsage | undefined;
 
   /**
    * Persists the accumulated assistant text, then frees the lock. The release
@@ -397,11 +789,15 @@ export function createPersistenceMiddleware({
    *
    * @param status how the run ended.
    * @param citationMiss whether the answer carried no tool-returned source.
+   * @param surfaceFailure whether a failed write has to reach the client.
+   * @throws {PersistenceFailedError} when the write fails and `surfaceFailure`
+   *   is set.
    */
   const persistAndRelease = async (
     status: AIChatMessageStatus,
     citationMiss: boolean,
-    toolCallDigest: Record<string, unknown> | undefined
+    toolCallDigest: Record<string, unknown> | undefined,
+    surfaceFailure = false
   ) => {
     if (citationMiss) {
       Logger.warn("AI chat answer carries no tool-returned source", {
@@ -416,32 +812,54 @@ export function createPersistenceMiddleware({
         ? toolCallDigest
         : undefined;
 
-    await appendTurn({
-      user,
-      sessionId,
-      role: AIChatMessageRole.Assistant,
-      content,
-      status,
-      runId,
-      ctx,
-      requestId,
-      citationMiss,
-      toolCallDigest: digest,
-    });
-
-    // Deliberate: cost is observable but not enforced. Nothing caps spend yet,
-    // so the numbers are logged for an operator to read rather than stored.
-    if (tokenUsage) {
-      Logger.info("http", "AI chat token usage", {
+    // The persistence boundary keeps only the absolute URLs this turn's tools
+    // returned. One log line per turn reports a rejection; the turn itself is
+    // always written, never dropped for a stripped link.
+    const validated = validateAnswerCitations(content, toolCalls);
+    if (validated.stripped > 0) {
+      Logger.info("http", "AI chat citation rejected", {
         requestId,
-        sessionId,
         runId,
-        status,
-        usage: tokenUsage,
+        strippedUrls: validated.stripped,
+        ...(validated.failed ? { reason: "validation-failed" } : {}),
       });
     }
 
-    await releaseInFlightLock();
+    try {
+      await appendTurn({
+        user,
+        sessionId,
+        role: AIChatMessageRole.Assistant,
+        content: validated.content,
+        status,
+        runId,
+        ctx,
+        requestId,
+        citationMiss: citationMiss || validated.stripped > 0,
+        toolCallDigest: digest,
+        promptTokens: tokenUsage?.promptTokens ?? null,
+        completionTokens: tokenUsage?.completionTokens ?? null,
+        surfaceFailure,
+      });
+    } finally {
+      // Deliberate: cost is observable but not enforced. Nothing caps spend
+      // yet, so the numbers are logged for an operator to read. They are the
+      // values the row above just persisted, so the log and the column agree,
+      // and a surfaced failure still reports its cost before the error leaves
+      // this hook.
+      if (tokenUsage) {
+        Logger.info("http", "AI chat token usage", {
+          requestId,
+          sessionId,
+          runId,
+          status,
+          promptTokens: tokenUsage.promptTokens,
+          completionTokens: tokenUsage.completionTokens,
+        });
+      }
+
+      await releaseInFlightLock();
+    }
   };
 
   return {
@@ -454,6 +872,18 @@ export function createPersistenceMiddleware({
         return { toolChoice };
       }
       return undefined;
+    },
+    onAfterToolCall(_hookCtx, info) {
+      // Every tool result is third-party text, so it reaches the model framed.
+      // An error result carries no document text, and callers read it verbatim,
+      // so it is passed through untouched.
+      if (!info.ok) {
+        return undefined;
+      }
+      return {
+        type: "replaceResult" as const,
+        result: fenceThirdPartyText(info.result),
+      };
     },
     onChunk(_hookCtx, chunk) {
       if (chunk.type === "TEXT_MESSAGE_CONTENT") {
@@ -495,9 +925,18 @@ export function createPersistenceMiddleware({
            }
          }
        } else if (chunk.type === "TOOL_CALL_RESULT") {
+        // A refused tool call still reaches the model as a result chunk
+        // carrying the sentinel; the turn ended at the cap, so the digest
+        // records the typed event alongside the calls that did run.
+        if (isToolBudgetExhaustedResult(chunk.content)) {
+          toolBudgetExhausted = true;
+        }
         collectToolResultIdentifiers(chunk);
       } else if (chunk.type === "RUN_FINISHED") {
-        tokenUsage = chunk.usage;
+        // A run that reports no usage leaves the columns null rather than zero.
+        if (chunk.usage !== undefined) {
+          tokenUsage = normalizeTokenUsage(chunk.usage);
+        }
       }
     },
     async onFinish(_hookCtx, info) {
@@ -506,14 +945,17 @@ export function createPersistenceMiddleware({
           ? AIChatMessageStatus.Completed
           : AIChatMessageStatus.Truncated,
         isCitationMiss(),
-        toolCalls.length > 0 ? { toolCalls } : undefined
+        buildToolCallDigest(toolCalls, toolBudgetExhausted),
+        // The accepted answer is already on the wire, so a row that could not
+        // be written has to fail the run instead of passing for a flushed one.
+        true
       );
     },
     async onAbort() {
       await persistAndRelease(
         AIChatMessageStatus.Aborted,
         isCitationMiss(),
-        toolCalls.length > 0 ? { toolCalls } : undefined
+        buildToolCallDigest(toolCalls, toolBudgetExhausted)
       );
     },
     async onError(_hookCtx, info) {
@@ -528,7 +970,7 @@ export function createPersistenceMiddleware({
           ? AIChatMessageStatus.Truncated
           : AIChatMessageStatus.Error,
         isCitationMiss(),
-        toolCalls.length > 0 ? { toolCalls } : undefined
+        buildToolCallDigest(toolCalls, toolBudgetExhausted)
       );
     },
   };

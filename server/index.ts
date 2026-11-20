@@ -3,6 +3,7 @@ import "./logging/tracer"; // must come before importing any instrumented module
 import os from "node:os";
 import env from "./env";
 import Logger from "./logging/Logger";
+import { logAiChatGroundingState } from "./routes/api/ai/enabled";
 import { ClusterManager } from "./utils/ClusterManager";
 import {
   printEnv,
@@ -31,6 +32,7 @@ if (env.SERVICES.includes("collaboration") && !env.REDIS_COLLABORATION_URL) {
 async function primary() {
   await checkPendingMigrations();
   await printEnv();
+  logAiChatGroundingState();
 }
 
 const isWebProcess =

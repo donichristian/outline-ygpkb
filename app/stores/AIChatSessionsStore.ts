@@ -6,11 +6,21 @@ import type RootStore from "./RootStore";
 import Store, { RPCAction } from "./base/Store";
 
 /**
+ * The number of sessions requested per page. The server clamps this to its own
+ * hard cap, so the two never disagree about the bound.
+ */
+const sessionsPageSize = 100;
+
+/**
  * The sessions of the AI assistant chat. Sessions are persisted to IndexedDB
  * so that a previously loaded conversation list is available immediately at
- * boot; because `list` replaces the local set rather than merging into it, a
- * session deleted on the server or on another device cannot be resurrected
- * from the cache.
+ * boot; a session deleted on the server or on another device cannot be
+ * resurrected from the cache because `list` reconciles the local set against
+ * the fetched page rather than merging into it.
+ *
+ * The list is paged server-side, so reconciliation is limited to the window
+ * this page covered: a cached session older than the oldest row fetched may
+ * still exist, and is kept rather than guessed away.
  *
  * `Info` is deliberately omitted from `actions`: a single-session fetch is not
  * part of the API, so `Store.fetch(id)` throws loudly rather than issuing a
@@ -59,10 +69,13 @@ export default class AIChatSessionsStore extends Store<AIChatSession> {
   }
 
   /**
-   * Lists every session belonging to the current user and replaces the local
-   * set with the result. Sessions absent from the response are removed rather
-   * than left in place, so that a session deleted on the server or on another
-   * device (or restored from the IndexedDB cache at boot) is not resurrected.
+   * Lists one page of the current user's sessions, most recently updated first.
+   *
+   * Only the rows this page returned can be compared against the local set: a
+   * cached session older than the page was not fetched, so its absence proves
+   * nothing about deletion and it is kept. Once the server reports no further
+   * pages the window is the whole list, and absent sessions are removed as
+   * before.
    *
    * @returns the fetched sessions.
    */
@@ -71,31 +84,49 @@ export default class AIChatSessionsStore extends Store<AIChatSession> {
     this.isFetching = true;
 
     try {
-      const res = await client.post(`/${this.apiEndpoint}.list`);
+      const res = await client.post(`/${this.apiEndpoint}.list`, {
+        limit: sessionsPageSize,
+      });
       invariant(res?.data, "Data should be available");
 
       return runInAction(() => {
         this.addPolicies(res.policies);
 
         const sessions: AIChatSession[] = res.data.sessions ?? [];
+        const hasNextPage = res.data.hasNextPage === true;
 
-        // A merge would leave server-deleted sessions in place, where the
-        // IndexedDB cache could hydrate them back into the list.
-        Array.from(this.data.keys()).forEach((id) => {
-          if (!sessions.some((session) => session.id === id)) {
-            this.remove(id);
-          }
-        });
+        // Rows are ordered newest first, so the last one marks the oldest
+        // position this page covered. Anything below it was not fetched.
+        const windowStart = sessions.length
+          ? sessions[sessions.length - 1].updatedAt
+          : undefined;
+        const isInWindow = (updatedAt: string | undefined) =>
+          !hasNextPage ||
+          (updatedAt !== undefined &&
+            windowStart !== undefined &&
+            updatedAt >= windowStart);
 
-        // A selection pointing at a session this response did not return would
-        // otherwise leave the panel reading a conversation that no longer
-        // exists. Drop it with the session so the panel falls back to a new one.
+        const present = new Set(sessions.map((session) => session.id));
+
+        // A selection pointing at a session this page covered but did not
+        // return no longer exists; one beyond the window may still exist, so
+        // dropping it would close a conversation the user can still open.
         if (
           this.selectedSessionId !== null &&
-          !sessions.some((session) => session.id === this.selectedSessionId)
+          !present.has(this.selectedSessionId) &&
+          isInWindow(this.data.get(this.selectedSessionId)?.updatedAt)
         ) {
           this.selectedSessionId = null;
         }
+
+        // A merge would leave server-deleted sessions in place, where the
+        // IndexedDB cache could hydrate them back into the list. Evict only
+        // what the fetched window can prove is gone.
+        Array.from(this.data.keys()).forEach((id) => {
+          if (!present.has(id) && isInWindow(this.data.get(id)?.updatedAt)) {
+            this.remove(id);
+          }
+        });
 
         this.isLoaded = true;
         return sessions.map((session) => this.add(session));

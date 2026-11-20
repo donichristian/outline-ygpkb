@@ -276,18 +276,30 @@ describe("resolveUpstreamMessages", () => {
       content: `turn ${i + 1}`,
     }));
     const session = await seedSession(user, rows);
+    const findAll = vi.spyOn(AIChatMessage, "findAll");
 
-    const resolved = await withAPIContext(user, (ctx) =>
-      resolveUpstreamMessages({
-        user,
-        ctx: chatCtx(ctx, { sessionId: session.id }),
-        sessionId: session.id,
-      })
-    );
+    try {
+      const resolved = await withAPIContext(user, (ctx) =>
+        resolveUpstreamMessages({
+          user,
+          ctx: chatCtx(ctx, { sessionId: session.id }),
+          sessionId: session.id,
+        })
+      );
 
-    expect(resolved).toHaveLength(T.AiChatMaxMessages);
-    expect(resolved[0].content).toEqual("turn 6");
-    expect(resolved[T.AiChatMaxMessages - 1].content).toEqual("turn 55");
+      // The bound is on the query, not on the array: the database returns at
+      // most one row past the window, so a long session never loads in full.
+      const options = findAll.mock.calls[0]?.[0] as
+        | { limit?: number }
+        | undefined;
+      expect(options?.limit).toEqual(T.AiChatMaxMessages + 1);
+
+      expect(resolved).toHaveLength(T.AiChatMaxMessages);
+      expect(resolved[0].content).toEqual("turn 6");
+      expect(resolved[T.AiChatMaxMessages - 1].content).toEqual("turn 55");
+    } finally {
+      findAll.mockRestore();
+    }
   });
 
   it("returns rows in seq ASC order regardless of insertion order", async () => {
