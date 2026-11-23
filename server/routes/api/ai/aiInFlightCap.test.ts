@@ -10,6 +10,7 @@ import AIChatMessage, {
 import Logger from "@server/logging/Logger";
 import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
+import type * as AiChatMessageCreatorModule from "@server/commands/aiChatMessageCreator";
 import Redis from "@server/storage/redis";
 
 /**
@@ -97,10 +98,7 @@ const rowNotify = vi.hoisted(() => {
 });
 
 vi.mock("@server/commands/aiChatMessageCreator", async (importOriginal) => {
-  const actual =
-    await importOriginal<
-      typeof import("@server/commands/aiChatMessageCreator")
-    >();
+  const actual = await importOriginal<typeof AiChatMessageCreatorModule>();
   const { AIChatMessageRole: Role } = await import(
     "@server/models/AIChatMessage"
   );
@@ -583,7 +581,10 @@ describe("POST /api/ai.chat in-flight cap", () => {
       ([, message]) => message === "AI chat turn refused, in-flight lock still held"
     );
     expect(busyLog).toBeDefined();
-    const lockTtlSeconds = (busyLog?.[2] as { lockTtlSeconds?: number | null })
+    if (!busyLog) {
+      throw new Error("expected an in-flight refusal log");
+    }
+    const lockTtlSeconds = (busyLog[2] as { lockTtlSeconds?: number | null })
       .lockTtlSeconds;
     expect(lockTtlSeconds).toBeGreaterThan(0);
     expect(lockTtlSeconds).toBeLessThanOrEqual(900);

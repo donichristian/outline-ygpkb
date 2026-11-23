@@ -1,4 +1,5 @@
 // @vitest-isolate true
+import type { ChatMiddleware } from "@tanstack/ai";
 import { AIChatMessageRole, AIChatMessageStatus } from "@server/models/AIChatMessage";
 
 describe("POST /api/ai.chat citation validation", () => {
@@ -35,7 +36,7 @@ describe("POST /api/ai.chat citation validation", () => {
     requestId: string;
     toolResults?: Array<Record<string, unknown>>;
     answer: string;
-  }): Promise<import("@tanstack/ai").ChatMiddleware> {
+  }): Promise<ChatMiddleware> {
     const module = await import("./middleware");
     const middleware = module.createPersistenceMiddleware({
       user: {} as never,
@@ -47,7 +48,7 @@ describe("POST /api/ai.chat citation validation", () => {
     });
 
     for (const result of toolResults ?? []) {
-      middleware.onChunk?.(
+      await middleware.onChunk?.(
         {} as never,
         {
           type: "TOOL_CALL_RESULT",
@@ -59,7 +60,7 @@ describe("POST /api/ai.chat citation validation", () => {
       );
     }
 
-    middleware.onChunk?.(
+    await middleware.onChunk?.(
       {} as never,
       {
         type: "TEXT_MESSAGE_CONTENT",

@@ -5,6 +5,7 @@ import { AIChatMessage, AIChatSession } from "@server/models";
 import { AIChatMessageRole } from "@server/models/AIChatMessage";
 import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
+import type * as PromptModule from "./prompt";
 
 /**
  * Prompt-injection corpus for the AI chat boundary.
@@ -52,7 +53,7 @@ vi.mock("./adapter", () => ({
 }));
 
 vi.mock("./prompt", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("./prompt")>();
+  const actual = await importOriginal<typeof PromptModule>();
 
   return {
     ...actual,

@@ -1,5 +1,5 @@
 // @vitest-isolate true
-import { buildToolCallDigest, ToolCallDigestEntry } from "./middleware";
+import { buildToolCallDigest, type ToolCallDigestEntry } from "./middleware";
 import {
   createToolCallBudget,
   DefaultMaxToolCalls,

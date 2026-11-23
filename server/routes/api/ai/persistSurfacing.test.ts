@@ -5,6 +5,7 @@ import AIChatSession from "@server/models/AIChatSession";
 import { AIChatMessageRole } from "@server/models/AIChatMessage";
 import { buildDocument, buildUser } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
+import type * as AiChatMessageCreatorModule from "@server/commands/aiChatMessageCreator";
 
 vi.mock("./tanstack", () => ({
   loadTanstack: () => import("@tanstack/ai"),
@@ -31,10 +32,7 @@ const persistFailure = vi.hoisted(() => ({ failAssistantTurn: true }));
 // still commits and the run itself completes; the successful-run case switches
 // the failure off and reaches the real writer.
 vi.mock("@server/commands/aiChatMessageCreator", async (importOriginal) => {
-  const actual =
-    await importOriginal<
-      typeof import("@server/commands/aiChatMessageCreator")
-    >();
+  const actual = await importOriginal<typeof AiChatMessageCreatorModule>();
   const { AIChatMessageRole: Role } = await import(
     "@server/models/AIChatMessage"
   );

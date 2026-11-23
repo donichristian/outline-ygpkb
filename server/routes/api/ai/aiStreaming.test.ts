@@ -2,9 +2,9 @@
 import { Readable } from "node:stream";
 import { readFileSync } from "node:fs";
 import { chat, toServerSentEventsResponse } from "@tanstack/ai";
+import type { ChatMiddleware } from "@tanstack/ai";
 import { TeamPreference } from "@shared/types";
 import env from "@server/env";
-import Logger from "@server/logging/Logger";
 import { AIChatSession } from "@server/models";
 import AIChatMessage, {
   AIChatMessageRole,
@@ -15,7 +15,6 @@ import { getTestServer } from "@server/test/support";
 import Redis from "@server/storage/redis";
 import { OutOfScopeRefusal } from "./scope";
 import { createAiChatAdapter } from "./adapter";
-import { createPersistenceMiddleware } from "./middleware";
 
 vi.mock("./tanstack", () => ({
   loadTanstack: () => import("@tanstack/ai"),
@@ -1278,7 +1277,7 @@ describe("POST /api/ai.chat citation-miss measurement", () => {
     requestId: string;
     toolResults?: Array<Record<string, unknown>>;
     answer: string;
-  }): Promise<import("@tanstack/ai").ChatMiddleware> {
+  }): Promise<ChatMiddleware> {
     const module = await import("./middleware");
     const middleware = module.createPersistenceMiddleware({
       user: {} as never,
@@ -1290,7 +1289,7 @@ describe("POST /api/ai.chat citation-miss measurement", () => {
     });
 
     for (const result of toolResults ?? []) {
-      middleware.onChunk?.(
+      await middleware.onChunk?.(
         {} as never,
         {
           type: "TOOL_CALL_RESULT",
@@ -1302,7 +1301,7 @@ describe("POST /api/ai.chat citation-miss measurement", () => {
       );
     }
 
-    middleware.onChunk?.(
+    await middleware.onChunk?.(
       {} as never,
       {
         type: "TEXT_MESSAGE_CONTENT",

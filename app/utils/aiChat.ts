@@ -212,7 +212,7 @@ export function toAiChatError(
 
     if (typeof error !== "object" || error === null) {
       return new AiChatError(
-        "The AI chat request failed, try again?",
+        "The AI chat request failed. Try again?",
         "network"
       );
     }
@@ -231,7 +231,7 @@ export function toAiChatError(
     const causeError = cause instanceof Error ? cause : undefined;
 
     if (name === "AbortError" || causeError?.name === "AbortError") {
-      return new AiChatError("The AI chat request was cancelled", "aborted");
+      return new AiChatError("The AI chat request was canceled", "aborted");
     }
 
     if (error instanceof TypeError || causeError instanceof TypeError) {
@@ -275,7 +275,7 @@ export function toAiChatError(
   } catch {
     // A hostile or exotic value must never escape the mapping as an unhandled
     // rejection; a failure to classify is still a stream failure.
-    return new AiChatError("The AI chat request failed, try again?", "stream");
+    return new AiChatError("The AI chat request failed. Try again?", "stream");
   }
 }
 

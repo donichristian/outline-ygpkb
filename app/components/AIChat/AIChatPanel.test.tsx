@@ -2037,7 +2037,7 @@ describe("AIChatPanel", () => {
     expect(notice).toContain(
       "messages: Too small: expected array to have >=1 items"
     );
-    expect(notice).not.toContain("The AI chat request failed, try again?");
+    expect(notice).not.toContain("The AI chat request failed. Try again?");
     panel.cleanup();
   });
 

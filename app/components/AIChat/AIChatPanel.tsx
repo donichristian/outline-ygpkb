@@ -263,7 +263,7 @@ function errorText(error: AiChatError, t: (key: string) => string): string {
     case 403:
       return t("Your session has expired, refresh the page to continue");
     case 429:
-      return t("Too many requests, try again shortly");
+      return t("Too many requests. Try again shortly.");
     default:
       break;
   }
@@ -277,9 +277,9 @@ function errorText(error: AiChatError, t: (key: string) => string): string {
     case "http":
       return error.message;
     case "network":
-      return t("A network error occurred, try again?");
+      return t("A network error occurred. Try again?");
     case "stream":
-      return t("The AI chat stream failed, try again?");
+      return t("The AI chat stream failed. Try again?");
     case "upstream":
       // One notice, not two: the banner region renders a single error, so an
       // upstream failure replaces the generic copy rather than stacking on it.
@@ -295,9 +295,9 @@ function errorText(error: AiChatError, t: (key: string) => string): string {
     case "refusal":
       return t("The AI chat request was declined");
     case "aborted":
-      return t("The AI chat request was cancelled");
+      return t("The AI chat request was canceled");
     default:
-      return t("The AI chat request failed, try again?");
+      return t("The AI chat request failed. Try again?");
   }
 }
 
