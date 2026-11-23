@@ -11,17 +11,7 @@ import { getTestServer } from "@server/test/support";
 // route builds the genuine adapter and the provider wire format is real.
 vi.mock("./tanstack", () => ({
   loadTanstack: () => import("@tanstack/ai"),
-}));
-
-vi.mock("./adapter", () => ({
-  createAiChatAdapter: () =>
-    import("@tanstack/ai-openai/compatible").then((mod) =>
-      mod.openaiCompatibleText("test-model", {
-        api: "chat-completions" as const,
-        baseURL: "http://localhost:20127/v1",
-        apiKey: "test-key",
-      })
-    ),
+  loadOpenaiCompatible: () => import("@tanstack/ai-openai/compatible"),
 }));
 
 const server = getTestServer();

@@ -300,7 +300,9 @@ describe("POST /api/ai.chat", () => {
     expect(res.status).toEqual(200);
     const text = await res.text();
     expect(text).toContain('"type":"RUN_ERROR"');
-    expect(text).toContain("The AI chat stream failed");
+    expect(text).toContain(
+      "The AI service is temporarily unavailable. Please try again."
+    );
     expect(text).not.toContain("upstream boom");
   });
 

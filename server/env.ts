@@ -448,6 +448,34 @@ export class Environment {
   );
 
   /**
+   * The per-turn token ceiling for AI chat, enforced at the provider boundary
+   * as `max_tokens` and as a pre-call input estimate. Values above 32000 are
+   * clamped to 32000, and zero or unset means unlimited – the default today.
+   * Fail-open is documented and deliberate: an unbounded turn is still bounded
+   * by the TenPerMinute rate limiter, and the ceiling is an operator opt-in.
+   * A non-integer value fails validation at startup like every other numeric
+   * setting in this block.
+   */
+  @IsOptional()
+  @CannotUseWithout("AI_CHAT_BASE_URL")
+  @IsNumber()
+  public AI_CHAT_MAX_TURN_TOKENS = this.toOptionalNumber(
+    environment.AI_CHAT_MAX_TURN_TOKENS
+  );
+
+  /**
+   * The maximum number of server tool calls one AI chat turn may execute.
+   * Defaults to 12 and values above 40 are clamped to 40, so a turn is bounded
+   * even when an operator raises the ceiling. Unset falls back to the default.
+   */
+  @IsOptional()
+  @CannotUseWithout("AI_CHAT_BASE_URL")
+  @IsNumber()
+  public AI_CHAT_MAX_TOOL_CALLS = this.toOptionalNumber(
+    environment.AI_CHAT_MAX_TOOL_CALLS
+  );
+
+  /**
    * The default interface language. See translate.getoutline.com for a list of
    * available language codes and their percentage translated.
    */

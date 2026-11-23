@@ -91,6 +91,20 @@ class AIChatMessage extends IdModel<
   @Column(DataType.BOOLEAN)
   citationMiss: boolean;
 
+  /**
+   * Tokens the model consumed from the prompt for this turn, when the provider
+   * reported usage.
+   */
+  @Column({ type: DataType.INTEGER, field: "prompt_tokens" })
+  promptTokens: number | null;
+
+  /**
+   * Tokens the model produced for this message, when the provider reported
+   * usage.
+   */
+  @Column({ type: DataType.INTEGER, field: "completion_tokens" })
+  completionTokens: number | null;
+
   // associations
 
   @BelongsTo(() => AIChatSession, "sessionId")

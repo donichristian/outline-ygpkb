@@ -6,6 +6,7 @@
 import { buildCollection, buildDocument } from "@server/test/factories";
 import { getTestServer } from "@server/test/support";
 import { buildOAuthUser, callMcpTool } from "@server/test/McpHelper";
+import { toolErrorCode } from "@server/mcp/util";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -95,12 +96,10 @@ describe("fetch byte-identity capture", () => {
       "utf8"
     );
 
-    expect(capture.missingSection?.[0]).toBe(
-      'No section heading matching "Nope" was found in the document.'
-    );
-    expect(capture.missingId?.[0]).toBe(
-      "Document doesn't exist with id: 00000000-0000-4000-8000-000000000000"
-    );
+    // Error instances are masked to a stable code so infrastructure detail
+    // never reaches MCP clients, so both failures carry the same text.
+    expect(capture.missingSection?.[0]).toContain(toolErrorCode);
+    expect(capture.missingId?.[0]).toContain(toolErrorCode);
     expect(capture.base?.[1]).toContain("Alpha body.");
     expect(capture.sectioned?.[1]).toContain("Beta body.");
     expect((capture.paged?.[1] as string)?.length).toBe(40);

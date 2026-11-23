@@ -1,4 +1,6 @@
 import { CollectionPermission, type NavigationNode } from "@shared/types";
+import type { CallToolResult } from "@modelcontextprotocol/server";
+import Logger from "@server/logging/Logger";
 import {
   buildCollection,
   buildDocument,
@@ -7,9 +9,12 @@ import {
 } from "@server/test/factories";
 import {
   buildBreadcrumb,
+  error,
   getBreadcrumbsForDocuments,
   optionalString,
   success,
+  toolErrorCode,
+  withTracing,
 } from "./util";
 
 const node = (
@@ -43,6 +48,63 @@ describe("success", () => {
     expect(success({ success: true })).toEqual({
       content: [{ type: "text", text: JSON.stringify({ success: true }) }],
     });
+  });
+});
+
+describe("error", () => {
+  it("replaces internal error text with a stable code", () => {
+    const logged: Error[] = [];
+    const spy = vi
+      .spyOn(Logger, "error")
+      .mockImplementation((_message, err) => {
+        logged.push(err);
+      });
+
+    const result = error(
+      new Error(
+        "pg: duplicate key value violates UNIQUE constraint SECRET-DETAIL"
+      )
+    );
+
+    const payload = JSON.stringify(result);
+    expect(payload).toContain(toolErrorCode);
+    expect(payload).not.toContain("SECRET-DETAIL");
+    expect(result.isError).toBe(true);
+
+    // Full detail still reaches server-side logging.
+    expect(spy).toHaveBeenCalledOnce();
+    expect(logged[0].message).toContain("SECRET-DETAIL");
+
+    spy.mockRestore();
+  });
+
+  it("returns authored strings unchanged", () => {
+    expect(error("Unknown resource: x")).toEqual({
+      content: [{ type: "text", text: "Unknown resource: x" }],
+      isError: true,
+    });
+  });
+});
+
+describe("withTracing", () => {
+  it("sanitizes an error thrown by a tool handler", async () => {
+    const spy = vi.spyOn(Logger, "error").mockImplementation(() => undefined);
+    const handler = withTracing(
+      "throwing_tool",
+      async (_context: unknown): Promise<CallToolResult> => {
+        throw new Error("conn refused at 10.0.0.5 SECRET-DETAIL");
+      }
+    );
+
+    const result = await handler({});
+
+    const payload = JSON.stringify(result);
+    expect(payload).toContain(toolErrorCode);
+    expect(payload).not.toContain("SECRET-DETAIL");
+    expect(result.isError).toBe(true);
+    expect(spy).toHaveBeenCalledOnce();
+
+    spy.mockRestore();
   });
 });
 

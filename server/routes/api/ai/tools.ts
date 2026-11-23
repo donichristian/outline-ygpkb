@@ -20,6 +20,81 @@ import { loadTanstack } from "./tanstack";
 /** The `@tanstack/ai` module namespace. */
 type TanstackAI = typeof TanstackAIModule;
 
+/** Tool message the model receives once the turn's tool budget is spent. */
+export const ToolBudgetExhausted = "tool_budget_exhausted";
+
+/** Default number of server tool calls one turn may execute. */
+export const DefaultMaxToolCalls = 12;
+
+/** Documented maximum for `AI_CHAT_MAX_TOOL_CALLS`. */
+export const MaxToolCalls = 40;
+
+/**
+ * One shared per-turn tool-call counter. Every server tool claims against the
+ * same instance, so the cap spans the whole turn rather than one tool.
+ */
+export interface ToolCallBudget {
+  /**
+   * Counts one invocation before it executes.
+   *
+   * @return true when this call is within the turn's cap.
+   */
+  claim(): boolean;
+}
+
+/**
+ * Creates the counter shared by every tool call of one turn.
+ *
+ * @param maxToolCalls the turn's cap, inclusive.
+ * @return the counter handed to the tools through the chat context.
+ */
+export function createToolCallBudget(maxToolCalls: number): ToolCallBudget {
+  let calls = 0;
+
+  return {
+    claim() {
+      calls += 1;
+      return calls <= maxToolCalls;
+    },
+  };
+}
+
+/**
+ * Resolves the operator cap for `AI_CHAT_MAX_TOOL_CALLS`. An unset or
+ * non-numeric value falls back to the documented default; values above the
+ * documented maximum are clamped, so the turn stays bounded either way.
+ *
+ * @param maxToolCalls the raw configured value, if any.
+ * @return the cap to enforce for one turn.
+ */
+export function resolveToolCallCap(
+  maxToolCalls: number | undefined
+): number {
+  if (
+    maxToolCalls === undefined ||
+    !Number.isFinite(maxToolCalls) ||
+    maxToolCalls < 1
+  ) {
+    return DefaultMaxToolCalls;
+  }
+
+  return Math.min(Math.trunc(maxToolCalls), MaxToolCalls);
+}
+
+/**
+ * Counts a call before it executes and refuses it once the turn's cap is
+ * exceeded. Throwing keeps the refusal inside the existing tool-error path, so
+ * the model receives `{ error: "tool_budget_exhausted" }` and nothing runs.
+ *
+ * @param context the per-turn tool context.
+ * @throws when the turn's tool budget is already spent.
+ */
+function assertToolBudget(context: ServerToolContext): void {
+  if (context.toolBudget && !context.toolBudget.claim()) {
+    throw new Error(ToolBudgetExhausted);
+  }
+}
+
 /**
  * The runtime context `ai.chat` threads into every server tool. Tools are
  * static, so the requesting user reaches them here rather than through a
@@ -31,6 +106,8 @@ export type ServerToolContext = {
   user: User;
   /** A document bound server-side by an explicit reference on the request. */
   boundDocumentId?: string;
+  /** The one counter shared by every tool call of this turn, when enforced. */
+  toolBudget?: ToolCallBudget;
 };
 
 /** How many documents one tool call returns, keeping the provider context small. */
@@ -156,6 +233,7 @@ function buildServerTools(toolDefinition: TanstackAI["toolDefinition"]) {
       ),
     }),
   }).server<ServerToolContext>(async ({ query, collectionId, limit }, context) => {
+    assertToolBudget(context.context);
     const user = context.context.user;
     const requestedLimit =
       typeof limit === "number" ? Math.min(limit, MaxToolResultsBound) : MaxToolResults;
@@ -238,6 +316,7 @@ function buildServerTools(toolDefinition: TanstackAI["toolDefinition"]) {
       ),
     }),
   }).server<ServerToolContext>(async ({ query, collectionId, limit }, context) => {
+    assertToolBudget(context.context);
     const user = context.context.user;
     const requestedLimit =
       typeof limit === "number" ? Math.min(limit, MaxToolResultsBound) : MaxToolResults;
@@ -328,6 +407,7 @@ function buildServerTools(toolDefinition: TanstackAI["toolDefinition"]) {
     }),
   }).server<ServerToolContext>(
     async ({ documentId, section, offset, limit }, context) => {
+      assertToolBudget(context.context);
       // A server-bound document wins over anything the model passes.
       const requestedId = context.context.boundDocumentId ?? documentId;
 

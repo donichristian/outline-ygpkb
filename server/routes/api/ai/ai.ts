@@ -3,10 +3,11 @@ import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { t } from "i18next";
 import Router from "@koa/router";
 import { v4 as uuidv4 } from "uuid";
+import type { RunErrorEvent } from "@tanstack/ai";
 import { toError } from "@shared/utils/error";
 import { Minute } from "@shared/utils/time";
 import env from "@server/env";
-import { NotFoundError, ProviderUnavailableError } from "@server/errors";
+import { NotFoundError } from "@server/errors";
 import Logger from "@server/logging/Logger";
 import auth from "@server/middlewares/authentication";
 import { rateLimiter } from "@server/middlewares/rateLimiter";
@@ -24,12 +25,23 @@ import Redis from "@server/storage/redis";
 import { assertAiChatEnabled } from "./enabled";
 import { messageText } from "./messages";
 import type { MessageLike } from "./messages";
-import { appendTurn, createPersistenceMiddleware } from "./middleware";
+import {
+  appendTurn,
+  createPersistenceMiddleware,
+  IncompleteStreamCode,
+  PersistenceFailedCode,
+  UpstreamUnavailableCode,
+} from "./middleware";
 import { findUngroundedReason } from "./scope";
 import * as T from "./schema";
 import { buildSystemPrompts } from "./prompt";
 import { loadTanstack } from "./tanstack";
-import { loadServerTools, resolveDocumentReference } from "./tools";
+import {
+  createToolCallBudget,
+  loadServerTools,
+  resolveDocumentReference,
+  resolveToolCallCap,
+} from "./tools";
 import { createAiChatAdapter } from "./adapter";
 
 /** The validated context of a chat request. */
@@ -189,12 +201,18 @@ export async function resolveUpstreamMessages({
     throw NotFoundError();
   }
 
+  // The window is the tail of the conversation, so read it newest-first with a
+  // SQL bound and reverse it: a long session must never load every turn just
+  // to discard all but the last `AiChatMaxMessages` in memory. The extra row
+  // leaves room for one row dropped while normalizing.
   const rows = await AIChatMessage.findAll({
     attributes: ["seq", "role", "content"],
     where: { sessionId: session.id },
-    order: [["seq", "ASC"]],
+    order: [["seq", "DESC"]],
+    limit: T.AiChatMaxMessages + 1,
     transaction: ctx.state.transaction,
   });
+  rows.reverse();
 
   return toUpstreamMessages(rows, pendingTurn);
 }
@@ -218,15 +236,12 @@ function setSseHeaders(ctx: APIContext) {
  *
  * The unit is one **tool loop**, not one model call: the adapter streams a
  * model round, the engine executes `search_workspace`, then streams the model
- * again, for as many rounds as the answer needs. A single model round over the
- * full 50-message window routinely takes up to two minutes, and a tool round
- * adds a few seconds for the search itself, so the worst case is roughly
+ * again, for as many rounds as the answer needs. The engine defaults to five
+ * model turns per request (`maxIterations(5)`).
  *
- *   5 rounds × (120s model + 5s tool) ≈ 625s
- *
- * A 15-minute TTL (900s) covers that with room for one more round plus the
- * terminal flush, while a crash still strands the session for a bounded time.
- * The trade-off is asymmetric: a lock that expires mid-stream silently defeats
+ * Per-turn latency has not been measured, so the TTL below is a chosen bound
+ * rather than a derived worst case. The trade-off is asymmetric: a lock that
+ * expires mid-stream silently defeats
  * the cap — a second turn is admitted and both race to allocate `seq` — whereas
  * a crashed lock costs one refusal per TTL, and every ordinary exit releases
  * explicitly. The cost is therefore shifted to the crash case deliberately.
@@ -238,14 +253,28 @@ const AiChatInFlightLockTtlSeconds = 15 * Minute.seconds;
  * the `X-AI-Chat-Kind` response header.
  *
  * `refusal` is the grounding gate declining to answer, which the client renders
- * as an ordinary assistant turn. `busy` is a second turn arriving while the
+ * as an ordinary assistant turn. `over_ceiling` is the same kind of considered
+ * refusal, from `AI_CHAT_MAX_TURN_TOKENS` rather than from grounding, and the
+ * client renders it identically. `busy` is a second turn arriving while the
  * first is still streaming, which is transient contention rather than a
  * considered answer — folding the two together would make a permanent,
  * knowledge-boundary refusal indistinguishable from "ask again in a moment",
  * and the two want opposite UI. Anything else the client maps to a plain
  * stream failure.
  */
-type ChatFallbackKind = "refusal" | "busy";
+type ChatFallbackKind =
+  | "refusal"
+  | "busy"
+  | "over_ceiling"
+  | "upstream_unavailable";
+
+/**
+ * The only upstream-failure text the client ever sees. The provider's own body
+ * and message stay in the server log; this is what the synthetic run and the
+ * `RUN_ERROR` frame carry instead.
+ */
+const UpstreamUnavailableMessage =
+  "The AI service is temporarily unavailable. Please try again.";
 
 /** Inputs for {@link refuseWithAgUiRun}. */
 type RefuseWithAgUiRunProps = {
@@ -327,9 +356,9 @@ router.post(
     // A TanStack client addresses a continued conversation by its AG-UI
     // `threadId`, a legacy RPC caller by `sessionId`. Both name the same stored
     // session, so the alias is resolved exactly once here: every downstream
-    // read – the ownership lookup, the lock key, the persistence middleware and
-    // the `threadId` handed to `chat()` – then uses this one value. Absent both,
-    // the request is stateless and stores nothing.
+    // read – the ownership lookup, the lock key and the persistence middleware –
+    // then uses this one value. Absent both, the request is stateless and stores
+    // nothing.
     const sessionId = ctx.input.body.sessionId ?? ctx.input.body.threadId;
     const requestId = ctx.get("x-request-id");
 
@@ -390,6 +419,18 @@ router.post(
       );
 
       if (acquired !== "OK") {
+        // The holder's remaining lease answers "when does this refusal clear"
+        // without a Redis console. PTTL is -1 (no expiry) or -2 (already gone),
+        // neither of which is a TTL worth reporting.
+        const remainingMs = await Redis.defaultClient.pttl(inFlightLock.key);
+
+        Logger.info("ai-chat", "AI chat turn refused, in-flight lock still held", {
+          requestId,
+          sessionId: inFlightLock.key.split(":").at(-1),
+          lockTtlSeconds:
+            remainingMs > 0 ? Math.ceil(remainingMs / 1000) : null,
+        });
+
         Logger.warn("AI chat turn refused, another turn is already in flight", {
           requestId,
           sessionId: inFlightLock.key.split(":").at(-1),
@@ -444,6 +485,31 @@ router.post(
     // off; this releases on every exit before that.
     let streamHandedOff = false;
     try {
+      // The adapter is created before any row is written: a missing base URL or
+      // model is a pre-stream failure, and it must cost the conversation
+      // nothing. `createAiChatAdapter` only reads env, so this cannot touch the
+      // provider.
+      let adapter: Awaited<ReturnType<typeof createAiChatAdapter>>;
+      try {
+        adapter = await createAiChatAdapter();
+      } catch (err) {
+        // No headers are out yet, so this can still answer with the synthetic
+        // run the busy path uses – a bare 5xx would leave the panel with no
+        // frame to attach the notice to. The cause stays in the log.
+        Logger.error(
+          "AI chat upstream is not configured",
+          toError(err),
+          { requestId }
+        );
+        refuseWithAgUiRun({
+          ctx,
+          message: t(UpstreamUnavailableMessage),
+          kind: "upstream_unavailable",
+          runId,
+          sessionId: ownedSession?.id,
+        });
+        return;
+      }
       // Every write on this path delegates to `appendTurn`, which opens and
       // commits its own short-lived transaction: `aiChatMessageCreator` never
       // reads or replaces `ctx.state.transaction`, and `ai.chat` carries no
@@ -497,6 +563,55 @@ router.post(
       // The upstream stream may be long-lived; disable the per-request socket
       // timeout that would otherwise cut the connection mid-stream.
       ctx.req.setTimeout(0);
+
+      // PER-TURN CEILING (`AI_CHAT_MAX_TURN_TOKENS`, fail-open). Zero or unset
+      // means unlimited – exactly the behaviour before this gate existed – and
+      // a positive value is clamped to the provider-safe maximum of 32000. The
+      // ceiling bounds the provider's `max_tokens` below and this pre-call
+      // estimate: serialized input bytes over four. That ratio over-estimates
+      // tokens for prose and under-estimates for non-Latin scripts, so it can
+      // refuse a turn that cannot fit but never admits one that cannot; a turn
+      // the estimate cannot judge is left to the provider. Refusing here costs
+      // no upstream call and is persisted on the same typed-refusal path as the
+      // grounding refusal, so accounting sees an ordinary assistant row.
+      const maxTurnTokens =
+        env.AI_CHAT_MAX_TURN_TOKENS && env.AI_CHAT_MAX_TURN_TOKENS > 0
+          ? Math.min(env.AI_CHAT_MAX_TURN_TOKENS, 32000)
+          : undefined;
+      const estimatedInputTokens = Math.ceil(
+        Buffer.byteLength(JSON.stringify(resolvedMessages), "utf8") / 4
+      );
+      if (maxTurnTokens && estimatedInputTokens >= maxTurnTokens) {
+        Logger.warn("AI chat turn rejected as over the token ceiling", {
+          requestId,
+          maxTurnTokens,
+          estimatedInputTokens,
+        });
+        const refusal = t("This turn is too long for the assistant to process");
+
+        await appendTurn({
+          user,
+          sessionId: ownedSession?.id,
+          role: AIChatMessageRole.Assistant,
+          content: refusal,
+          status: AIChatMessageStatus.Completed,
+          runId,
+          ctx,
+          requestId,
+        });
+
+        refuseWithAgUiRun({
+          ctx,
+          message: refusal,
+          kind: "over_ceiling",
+          runId,
+          sessionId: ownedSession?.id,
+        });
+
+        // A refusal returns before the stream exists, so `finish` never runs for
+        // this request; the `finally` below releases the lock in that case.
+        return;
+      }
 
       // The provider's persona carries the knowledge-base boundary as prompt
       // text only, and honours it roughly 60% of the time – it answers general
@@ -568,6 +683,11 @@ router.post(
       // fired within 10ms and `req` never fired at all. `writableEnded`
       // separates a genuine disconnect from the ordinary close after `end()`.
       // The abort surfaces as the chat middleware's `onAbort` terminal hook.
+      // TanStack AI 1.0 still documents `abortController` as the cancellation
+      // primitive (`node_modules/@tanstack/ai/dist/esm/types.d.ts:1209-1221`).
+      // interrupt/resume is opt-in for durable approval flows; this route is
+      // stateless, so Stop aborts the request and persistence writes the partial
+      // run once. No interrupt mechanism is needed here.
       const ac = new AbortController();
       ctx.res.on("close", () => {
         if (!ctx.res.writableEnded) {
@@ -575,12 +695,19 @@ router.post(
         }
       });
 
-      // SECURITY: threadId from server-owned sessionId, runId server-minted.
+      // SECURITY: threadId is the owned session's id, else the server-minted
+      // runId; it is never the raw request-body value. A stateless chat has no
+      // stored conversation, so its run is its own one-turn thread.
       // Tools are the server's own frozen allowlist – the request body is never
       // read for tools and `forwardedProps` is never spread into `chat()`.
       // Client-supplied tools/forwardedProps/state/resume are ignored.
       const [
-        { chat, chatParamsFromRequestBody, toServerSentEventsResponse },
+        {
+          chat,
+          chatParamsFromRequestBody,
+          EventType,
+          toServerSentEventsResponse,
+        },
         serverTools,
       ] = await Promise.all([loadTanstack(), loadServerTools()]);
 
@@ -610,7 +737,12 @@ router.post(
 
       let response: Response;
       try {
-        const adapter = await createAiChatAdapter();
+        // One counter per turn: every server tool claims against it before the
+        // tool runs, so the cap spans the whole turn rather than one tool. The
+        // counter is fresh on every request and shared by all three tools.
+        const toolBudget = createToolCallBudget(
+          resolveToolCallCap(env.AI_CHAT_MAX_TOOL_CALLS)
+        );
         // OPERATOR GATE: the instruction layer is a repository decision, never
         // the request body. Off, the `chat()` call is byte-identical to the
         // pre-gate call — no `systemPrompts` key at all, so the upstream body
@@ -626,7 +758,7 @@ router.post(
           messages: resolvedMessages as unknown as Parameters<
             typeof chat
           >[0]["messages"],
-          threadId: sessionId,
+          threadId: ownedSession?.id ?? runId,
           runId,
           // The allowlist is static and read-only. It is the only source of
           // tools on this path; the request body contributes none.
@@ -640,43 +772,100 @@ router.post(
           // no tool closes over a request-scoped value. boundDocumentId is
           // threaded through so the frozen fetch_document tool can bind its
           // requested id to the document the user referenced.
-          context: { user, boundDocumentId },
+          context: { user, boundDocumentId, toolBudget },
           // REASONING: an operator decision (`AI_CHAT_REASONING`), never the
-          // request body. The installed `openaiCompatibleText` adapter never
-          // maps `chat({ reasoning })` onto the wire — its base
-          // `modelReasoning()` default is `undefined`, and the compatible
-          // adapter does not override it — so `reasoning_effort` is placed in
-          // the provider-native `modelOptions`, which the adapter spreads into
-          // the Chat Completions body verbatim. Unconfigured, the key is
-          // omitted entirely and the body carries no reasoning field, so a
-          // plain gateway is not sent an unsupported parameter.
+          // request body. It rides the 1.0 top-level `reasoning` option; the
+          // adapter declares the levels the operator contract allows
+          // (`adapter.ts`), so its base adapter resolves the level and sends it
+          // as the provider-native `reasoning_effort` field. Unconfigured, the
+          // key is omitted entirely and the body carries no reasoning field, so
+          // a plain gateway is not sent an unsupported parameter.
+          // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- The generic compatible adapter declares no reasoning capability in its types; the capability is declared at runtime in `adapter.ts`.
           ...(env.AI_CHAT_REASONING
             ? {
-                modelOptions: {
-                  reasoning_effort: env.AI_CHAT_REASONING,
-                },
+                reasoning: env.AI_CHAT_REASONING as unknown as Parameters<
+                  typeof chat
+                >[0]["reasoning"],
               }
             : {}),
+          // `stream_options.include_usage` is declared here as well as by the
+          // installed adapter, so per-turn usage keeps arriving even if the
+          // adapter stops adding it; the Chat Completions body is the only
+          // place a provider reports usage on a streamed response.
+          //
+          // `max_tokens` is the ceiling from `AI_CHAT_MAX_TURN_TOKENS`
+          // computed above. It rides in `modelOptions`, the provider-native
+          // escape hatch the adapter spreads verbatim into the request body; it
+          // is never a top-level `chat()` argument, which the adapter does not
+          // map onto the wire. Unset or zero, the key is absent and the body is
+          // unchanged from before the ceiling existed.
+          modelOptions: {
+            stream_options: { include_usage: true },
+            ...(maxTurnTokens ? { max_tokens: maxTurnTokens } : {}),
+          },
           abortController: ac,
           // oxlint-disable-next-line @typescript-eslint/consistent-type-assertions -- TanStack's middleware generic defaults to `undefined`; a middleware array is accepted at runtime.
           middleware: [persistenceMiddleware] as unknown as Parameters<
             typeof chat
           >[0]["middleware"],
         });
-        // The adapter surfaces the provider's raw error text inside RUN_ERROR;
-        // replace it with a generic message so the wire never leaks upstream
-        // detail. The real cause is logged by the middleware's onError.
+        // The adapter surfaces the provider's raw error text inside RUN_ERROR,
+        // and a provider throw would reach the transport, which builds a
+        // RUN_ERROR straight from it. Both paths are scrubbed here: the wire
+        // carries one typed code and one generic message, never the provider's
+        // body. The real cause is logged by the middleware's onError.
+        //
+        // `incomplete-stream` is the one exception: it is the server's own
+        // verdict on a run that ended without a finish reason, and the client
+        // maps it to `truncated`. Rewriting it would erase that distinction.
         const sanitized = (async function* () {
-          for await (const chunk of stream) {
-            if (chunk.type === "RUN_ERROR") {
-              yield {
-                ...chunk,
-                message: "The AI chat stream failed",
-                code: undefined,
-              };
-            } else {
-              yield chunk;
+          try {
+            for await (const chunk of stream) {
+              if (
+                chunk.type === "RUN_ERROR" &&
+                chunk.code !== IncompleteStreamCode
+              ) {
+                const frame: RunErrorEvent = {
+                  type: EventType.RUN_ERROR,
+                  timestamp: chunk.timestamp ?? Date.now(),
+                  message: UpstreamUnavailableMessage,
+                  code: UpstreamUnavailableCode,
+                };
+                yield frame;
+              } else {
+                yield chunk;
+              }
             }
+          } catch (err) {
+            if (ac.signal.aborted) {
+              return;
+            }
+            // A failed assistant-turn write is rethrown by the terminal hook
+            // after the run's own `RUN_FINISHED` was already yielded, so the
+            // lost turn reaches the client only as a trailing `RUN_ERROR`.
+            if (
+              err instanceof Error &&
+              (err as Error & { code?: unknown }).code === PersistenceFailedCode
+            ) {
+              const frame: RunErrorEvent = {
+                type: EventType.RUN_ERROR,
+                timestamp: Date.now(),
+                message: "The assistant turn could not be persisted",
+                code: PersistenceFailedCode,
+              };
+              yield frame;
+              return;
+            }
+            Logger.error("AI chat upstream stream failed", toError(err), {
+              requestId,
+            });
+            const frame: RunErrorEvent = {
+              type: EventType.RUN_ERROR,
+              timestamp: Date.now(),
+              message: UpstreamUnavailableMessage,
+              code: UpstreamUnavailableCode,
+            };
+            yield frame;
           }
         })();
         response = toServerSentEventsResponse(sanitized, {
@@ -686,7 +875,19 @@ router.post(
         if (typeof (err as { status?: unknown }).status === "number") {
           throw err;
         }
-        throw ProviderUnavailableError();
+        // Any other synchronous failure is still pre-stream: no headers are out
+        // and no run exists, so answer on the same synthetic path.
+        Logger.error("AI chat upstream failed before streaming", toError(err), {
+          requestId,
+        });
+        refuseWithAgUiRun({
+          ctx,
+          message: t(UpstreamUnavailableMessage),
+          kind: "upstream_unavailable",
+          runId,
+          sessionId: ownedSession?.id,
+        });
+        return;
       }
 
       ctx.status = response.status;

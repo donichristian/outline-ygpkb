@@ -11,6 +11,7 @@ import * as Tracing from "./tracer";
 
 type LogCategory =
   | "lifecycle"
+  | "ai-chat"
   | "authentication"
   | "multiplayer"
   | "http"

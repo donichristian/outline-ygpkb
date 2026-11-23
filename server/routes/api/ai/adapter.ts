@@ -19,6 +19,17 @@ export type AiChatAdapter =
   | OpenAICompatibleResponsesAdapter<string>;
 
 /**
+ * The reasoning levels the operator contract (`AI_CHAT_REASONING`) allows. The
+ * compatible adapter ships no model metadata, so these are its model's levels.
+ */
+export const AI_CHAT_REASONING_LEVELS = {
+  minimal: "minimal",
+  low: "low",
+  medium: "medium",
+  high: "high",
+} as const;
+
+/**
  * Build the TanStack AI adapter for the configured OpenAI-compatible chat
  * gateway. This is the only place the adapter is constructed.
  *
@@ -58,7 +69,7 @@ export async function createAiChatAdapter(): Promise<AiChatAdapter> {
 
   const { openaiCompatibleText } = await loadOpenaiCompatible();
 
-  return openaiCompatibleText(model, {
+  const adapter = openaiCompatibleText(model, {
     api: "chat-completions",
     baseURL,
     // The SDK requires a non-empty key to construct a client. A keyless gateway
@@ -66,4 +77,15 @@ export async function createAiChatAdapter(): Promise<AiChatAdapter> {
     // the real secret, which stays inside the SDK.
     apiKey: env.AI_CHAT_API_KEY ?? "not-configured",
   });
+
+  // `chat({ reasoning })` resolves the requested level against the adapter's
+  // model metadata, and the generic compatible adapter has none: the base
+  // `modelReasoning()` returns `undefined`, so the option would be dropped
+  // silently. Declaring the levels here makes the base adapter resolve the
+  // level and send it as the provider-native `reasoning_effort` field.
+  Object.defineProperty(adapter, "modelReasoning", {
+    value: () => ({ levels: AI_CHAT_REASONING_LEVELS, budget: false }),
+  });
+
+  return adapter;
 }

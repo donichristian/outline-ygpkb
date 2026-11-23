@@ -115,6 +115,46 @@ describe("AIChatMessage", () => {
     expect(found?.messages[1].status).toEqual(AIChatMessageStatus.Truncated);
   });
 
+  it("persists usage tokens across a reload", async () => {
+    const user = await buildUser();
+    const session = await buildSession(user);
+
+    const message = await AIChatMessage.create({
+      sessionId: session.id,
+      role: AIChatMessageRole.Assistant,
+      seq: 1,
+      content: "Hi",
+      promptTokens: 12,
+      completionTokens: 34,
+    });
+
+    const reloaded = await AIChatMessage.findByPk(message.id, {
+      rejectOnEmpty: true,
+    });
+
+    expect(reloaded.promptTokens).toEqual(12);
+    expect(reloaded.completionTokens).toEqual(34);
+  });
+
+  it("leaves usage tokens null when the provider reports none", async () => {
+    const user = await buildUser();
+    const session = await buildSession(user);
+
+    const message = await AIChatMessage.create({
+      sessionId: session.id,
+      role: AIChatMessageRole.User,
+      seq: 1,
+      content: "Hello",
+    });
+
+    const reloaded = await AIChatMessage.findByPk(message.id, {
+      rejectOnEmpty: true,
+    });
+
+    expect(reloaded.promptTokens).toBeNull();
+    expect(reloaded.completionTokens).toBeNull();
+  });
+
   it("rejects a duplicate sequence number within a session", async () => {
     const user = await buildUser();
     const session = await buildSession(user);

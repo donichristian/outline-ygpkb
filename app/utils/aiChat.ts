@@ -63,6 +63,10 @@ export type AiChatErrorKind =
   | "http"
   /** The provider failed mid-stream, surfaced as an in-band `event: error`. */
   | "stream"
+  /** The AI service itself failed or is unreachable; asking again may succeed. */
+  | "upstream"
+  /** The answer streamed, but the server could not store the assistant turn. */
+  | "persistence"
   /** The request was refused by the grounding gate before the provider was contacted. */
   | "refusal"
   /** Another turn for this session is still streaming; asking again may succeed. */
@@ -122,9 +126,15 @@ export class AiChatError extends Error {
 /**
  * The discriminator a refused turn may carry on the `X-AI-Chat-Kind` response
  * header: `refusal` is the grounding gate declining, `busy` is transient
- * contention with a turn already streaming, and `null` is an ordinary answer.
+ * contention with a turn already streaming, `upstream_unavailable` is the
+ * provider failing before the stream began, and `null` is an ordinary answer.
  */
-export type AiChatKind = "refusal" | "busy" | null;
+export type AiChatKind =
+  | "refusal"
+  | "busy"
+  | "over_ceiling"
+  | "upstream_unavailable"
+  | null;
 
 /**
  * What the composer does with a message submitted while a turn is still
@@ -136,6 +146,18 @@ export type AiChatWhenBusy = "queue" | "drop" | "interrupt";
 
 /** The `RUN_ERROR` code the server uses when upstream ended with no reason. */
 const incompleteStreamCode = "incomplete-stream";
+
+/**
+ * The `RUN_ERROR` code the server stamps when an accepted assistant turn could
+ * not be stored, so the client can mark the answer it already read as unsaved.
+ */
+const persistenceFailedCode = "persistence-failed";
+
+/**
+ * The `RUN_ERROR` code the server stamps on an upstream failure, mid-run or
+ * pre-stream. It never carries the provider's own message or body.
+ */
+const upstreamUnavailableCode = "upstream_unavailable";
 
 /** Context that refines an outcome the transport cannot classify on its own. */
 export interface AiChatErrorContext {
@@ -150,7 +172,8 @@ export interface AiChatErrorContext {
  *
  * A rejected response keeps the {@link AiChatError} the connection threw, so its
  * status survives; the response header decides `refusal` and `busy`; a stream
- * that ended without a reason is `truncated`; an aborted signal is `aborted`; a
+ * that ended without a reason is `truncated`; a run whose assistant turn could
+ * not be stored is `persistence`; an aborted signal is `aborted`; a
  * rejected fetch (including one the library wrapped as a `StreamReadError`) is
  * `network`; an unparseable frame is `malformed`; anything else mid-stream is
  * `stream`.
@@ -180,9 +203,16 @@ export function toAiChatError(
       );
     }
 
+    if (context.kind === "upstream_unavailable") {
+      return new AiChatError(
+        "The AI service is temporarily unavailable. Please try again.",
+        "upstream"
+      );
+    }
+
     if (typeof error !== "object" || error === null) {
       return new AiChatError(
-        "The AI chat request failed, try again?",
+        "The AI chat request failed. Try again?",
         "network"
       );
     }
@@ -201,7 +231,7 @@ export function toAiChatError(
     const causeError = cause instanceof Error ? cause : undefined;
 
     if (name === "AbortError" || causeError?.name === "AbortError") {
-      return new AiChatError("The AI chat request was cancelled", "aborted");
+      return new AiChatError("The AI chat request was canceled", "aborted");
     }
 
     if (error instanceof TypeError || causeError instanceof TypeError) {
@@ -219,6 +249,24 @@ export function toAiChatError(
       return new AiChatError(message, "truncated");
     }
 
+    // The answer already streamed, but the server could not store it: the turn
+    // is lost even though the run itself completed.
+    if (shaped.code === persistenceFailedCode) {
+      return new AiChatError(
+        "The assistant's answer could not be saved to your chat history.",
+        "persistence"
+      );
+    }
+
+    // A mid-run upstream failure carries the same code with no header to read
+    // it from, so the code decides here as well.
+    if (shaped.code === upstreamUnavailableCode) {
+      return new AiChatError(
+        "The AI service is temporarily unavailable. Please try again.",
+        "upstream"
+      );
+    }
+
     if (error instanceof SyntaxError || causeError instanceof SyntaxError) {
       return new AiChatError(message, "malformed");
     }
@@ -227,7 +275,7 @@ export function toAiChatError(
   } catch {
     // A hostile or exotic value must never escape the mapping as an unhandled
     // rejection; a failure to classify is still a stream failure.
-    return new AiChatError("The AI chat request failed, try again?", "stream");
+    return new AiChatError("The AI chat request failed. Try again?", "stream");
   }
 }
 
@@ -361,7 +409,12 @@ function aiChatHeaders(): Record<string, string> {
 function readKind(response: Response): AiChatKind {
   const kind = response.headers.get(aiChatKindHeader);
 
-  return kind === "refusal" || kind === "busy" ? kind : null;
+  return kind === "refusal" ||
+    kind === "busy" ||
+    kind === "over_ceiling" ||
+    kind === "upstream_unavailable"
+    ? kind
+    : null;
 }
 
 /**
